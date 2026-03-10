@@ -1,0 +1,3 @@
+[workspace]
+members = ["flowspec", "flowspec-cli"]
+resolver = "2"

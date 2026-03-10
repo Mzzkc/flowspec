@@ -1,0 +1,24 @@
+[package]
+name = "flowspec-cli"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "CLI for Flowspec static code analyzer"
+
+[[bin]]
+name = "flowspec-cli"
+path = "src/main.rs"
+
+[dependencies]
+flowspec = { path = "../flowspec" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+walkdir = "2"
+serde_yaml = "0.9"
