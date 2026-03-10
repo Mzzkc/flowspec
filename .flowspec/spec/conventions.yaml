@@ -1,0 +1,141 @@
+# .flowspec/spec/conventions.yaml
+# PURPOSE: How Flowspec code is written — style, patterns, naming, structure.
+# AUDIENCE: Every agent writing Flowspec code. Follow these conventions.
+
+content:
+  philosophy: |
+    Data-oriented design inspired by ECS philosophy, implemented as
+    idiomatic Rust. Symbols are IDs in a flat table. Properties are data
+    stored alongside. Analyzers are functions that query data. The graph
+    is a passive data store. Analysis logic never lives inside data types.
+
+    Concrete types over abstractions. Traits only at boundaries where
+    swappability is genuinely needed. Simple functions over complex
+    patterns. The goal is code that an agent can read, understand, and
+    modify without needing to trace through layers of indirection.
+
+  architecture_patterns:
+    data_orientation: |
+      Inspired by ECS but not using an ECS framework:
+      - Symbols stored in flat indexed tables (arena/slotmap pattern)
+      - Properties stored alongside symbols, not in separate component stores
+      - Edges stored in adjacency lists on the graph
+      - Analyzers are standalone functions: fn analyze_X(graph: &Graph) -> Vec<Diagnostic>
+      - Parsers produce data (IR nodes), they don't own or mutate the graph
+      - Data and logic are separated — no diagnostic detection inside symbol types
+
+    trait_usage: |
+      Traits only where swappability is real, not speculative:
+      - LanguageAdapter trait — each language (Python, JS, Rust) implements this
+      - OutputFormatter trait — YAML, JSON, summary formatters
+      - NO traits for "maybe we'll want to swap this later"
+      - Prefer concrete types for internal components (graph, cache, config)
+
+    abstraction_policy: |
+      Three similar lines of code is better than a premature abstraction.
+      Don't create helpers, utilities, or trait hierarchies for one-time
+      operations. If you find yourself writing a trait with one impl,
+      use a concrete type instead. Abstractions earn their place by having
+      multiple real implementations, not hypothetical future ones.
+
+    error_handling: |
+      - thiserror for all library error types
+      - anyhow only in main.rs (CLI binary entry point)
+      - Error types carry context: what failed, why, and where
+      - Use #[from] for error conversion chains
+      - No .unwrap() outside of tests — use .expect("reason") if infallible
+      - Result<T, E> for fallible operations, never panic in library code
+
+    constructor_pattern: |
+      - Use fn new() for simple construction
+      - Use builder pattern only when construction has >3 optional params
+      - No factory traits or abstract factory patterns
+      - If a type needs validation on construction, use fn new() -> Result<Self, Error>
+
+  module_structure:
+    root: "src/"
+    layout:
+      - "lib.rs — library crate root, re-exports public API"
+      - "cli/ — CLI argument parsing and command dispatch (binary crate)"
+      - "parser/ — tree-sitter parsing + language adapters"
+      - "parser/ir.rs — intermediate representation types"
+      - "parser/rust.rs — Rust language adapter"
+      - "parser/python.rs — Python language adapter"
+      - "parser/javascript.rs — JavaScript/TypeScript language adapter"
+      - "analyzer/ — diagnostic detection, flow tracing, boundary analysis"
+      - "graph/ — persistent analysis graph, storage, queries, incremental updates"
+      - "manifest/ — output formatting (YAML, JSON, summary)"
+      - "config/ — configuration loading and validation"
+    policy: |
+      Module structure mirrors component architecture. Each directory
+      corresponds to one architectural component. Cross-module dependencies
+      follow the data flow: parser -> graph -> analyzer -> manifest.
+      The cli/ module depends on everything but nothing depends on cli/.
+
+  naming:
+    types: "PascalCase (Rust default). No prefixes like I or T."
+    functions: "snake_case (Rust default)."
+    modules: "snake_case, singular (parser not parsers, analyzer not analyzers)."
+    files: "snake_case, match the primary type or module they contain."
+    constants: "SCREAMING_SNAKE_CASE."
+    test_functions: "test_<what>_<condition>_<expected> e.g. test_dead_end_zero_callers_reports_warning"
+    symbol_ids: "module_path::name format, matching the project's actual module structure"
+
+  code_style:
+    parameters: "Prefer &str over String, &[T] over Vec<T> in function parameters"
+    returns: "Return owned types (String, Vec<T>) from functions that produce data"
+    lifetimes: "Elide when possible. Name when the relationship matters for understanding."
+    generics: "Use sparingly. Concrete types are easier to understand than generic ones."
+    closures: "Prefer named functions over closures when the logic is reused or complex"
+    logging: "tracing macros (trace!, debug!, info!, warn!, error!). Never println!/eprintln!"
+    comments: |
+      - /// doc comments on all public items
+      - // inline comments only where logic isn't self-evident
+      - Don't comment what the code does — comment WHY
+      - No TODO comments without a GitHub issue number
+
+  async_patterns:
+    runtime: "tokio"
+    policy: |
+      Async for I/O-bound operations (file reading, cache loading/saving,
+      watch mode file events). Tree-sitter parsing itself is CPU-bound
+      and sync — run it on tokio::task::spawn_blocking or in sync context.
+      Don't make everything async just because tokio is available.
+
+  testing_conventions:
+    unit_tests: "Inline #[cfg(test)] mod tests in the same file"
+    integration_tests: "tests/ directory, one file per major feature area"
+    fixture_access: "tests/fixtures/ — shared fixture project for integration tests"
+    test_naming: "test_<component>_<scenario>_<expected_outcome>"
+    assertions: |
+      Use assert_eq! with descriptive messages. For complex assertions,
+      use a helper function that produces a clear error message.
+      Prefer specific assertions over assert!(bool) — assert_eq! tells
+      you what was expected vs what was actual.
+
+data:
+  architecture_pattern: "data-oriented (ECS-inspired, not ECS framework)"
+  trait_policy: "only-at-real-boundaries"
+  abstraction_policy: "concrete-types-by-default"
+  error_style: "thiserror-library-anyhow-binary"
+  async_runtime: "tokio"
+  logging: "tracing"
+
+  module_layout:
+    - "cli"
+    - "parser"
+    - "analyzer"
+    - "graph"
+    - "manifest"
+    - "config"
+
+  trait_boundaries:
+    - "LanguageAdapter"
+    - "OutputFormatter"
+
+  naming_conventions:
+    types: "PascalCase"
+    functions: "snake_case"
+    modules: "snake_case-singular"
+    constants: "SCREAMING_SNAKE_CASE"
+    tests: "test_what_condition_expected"

@@ -1,0 +1,128 @@
+# .flowspec/spec/integration.yaml
+# PURPOSE: How Flowspec connects to Mozart, CI, and other tools.
+# AUDIENCE: Agents implementing integration points.
+
+content:
+  philosophy: |
+    Flowspec is standalone-first. It provides fantastic APIs and clean
+    output formats. Consumers (Mozart, CI, editors) decide how to
+    integrate. Flowspec doesn't reach into other tools — it exposes
+    capabilities and lets consumers pull what they need.
+
+  mozart:
+    relationship: "standalone tool, Mozart is one consumer among many"
+    integration_surface: |
+      Flowspec provides three integration surfaces for Mozart:
+      1. Library crate — Mozart links flowspec as a Rust dependency
+         for direct API access (analyze, trace, diagnose, query)
+      2. CLI — Mozart scores use flowspec commands in validation steps
+         (command_succeeds validations that run flowspec diagnose)
+      3. Manifest files — Flowspec manifests can be included in a
+         venue's libretto as structural context for musicians
+    mozart_responsibilities: |
+      Mozart decides:
+      - When to run Flowspec (during init, before compose, in validations)
+      - How to incorporate manifests into the libretto
+      - How to use the API crate in the composition engine
+      Flowspec does NOT call Mozart APIs or assume Mozart exists.
+    validation_usage: |
+      Mozart scores can use Flowspec as a validation gate:
+        - type: command_succeeds
+          command: 'flowspec diagnose {workspace} --severity critical --format json'
+          description: "No critical structural issues"
+      Exit code 2 = findings exist = validation fails.
+    api_crate_usage: |
+      Mozart's composition engine can link the flowspec library crate:
+        use flowspec::{analyze, trace_symbol, diagnose};
+        let result = analyze(project_path).await?;
+        let trace = trace_symbol(&result.graph, "auth::verify_token")?;
+
+  ci_cd:
+    exit_codes: |
+      Flowspec uses exit codes for CI integration:
+      - 0: success, no findings at specified severity
+      - 1: error (analysis failed, bad config, etc.)
+      - 2: success with findings at or above specified severity
+      This enables simple CI gates:
+        flowspec diagnose . --severity critical || exit 1
+    output_formats:
+      yaml: "Default. Human and AI readable."
+      json: "Programmatic consumption. Same structure as YAML."
+      sarif: |
+        Static Analysis Results Interchange Format. Standard format
+        understood by GitHub Code Scanning, VS Code, and other tools.
+        Enables native integration with GitHub PR annotations,
+        VS Code problem panel, and SARIF viewers.
+      summary: "Human-readable report. Not machine-parseable."
+    github_actions_example: |
+      - name: Flowspec structural check
+        run: |
+          flowspec diagnose . --severity warning --format sarif > flowspec.sarif
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: flowspec.sarif
+    generic_ci_example: |
+      flowspec diagnose . --severity critical --format json
+      # Exit code 2 if critical issues found — fails the pipeline
+
+  mcp_server:
+    purpose: |
+      MCP server for Claude Code and other MCP-capable AI tools.
+      Exposes Flowspec's analysis capabilities as MCP tools that
+      agents can call interactively during a session.
+    tools:
+      - name: "flowspec_analyze"
+        description: "Run full analysis on a project, return manifest"
+      - name: "flowspec_trace"
+        description: "Trace a symbol's complete flow through the codebase"
+      - name: "flowspec_diagnose"
+        description: "Run diagnostics, return structural issues"
+      - name: "flowspec_query"
+        description: "Query the analysis graph — entity lookup, caller/callee chains"
+    implementation: "Separate binary crate (flowspec-mcp), depends on flowspec library"
+    v1_priority: "implement after core CLI is stable"
+
+  api_crate:
+    purpose: |
+      The flowspec library crate is the primary integration surface for
+      Rust consumers. Mozart and other Rust tools link it directly.
+    public_api:
+      - "analyze(path) -> Result<AnalysisResult>"
+      - "diagnose(path) -> Result<Vec<Diagnostic>>"
+      - "trace_symbol(graph, symbol_id) -> Result<FlowTrace>"
+      - "diff(old, new) -> Result<ManifestDiff>"
+      - "Graph — the persistent analysis graph, queryable"
+      - "Config — configuration loading and validation"
+    stability: |
+      The public API surface is a contract. Changes to public function
+      signatures, type definitions, or behavior require a version bump
+      and changelog entry. Internal modules are not part of the public API.
+
+  codegraph:
+    relationship: "fully independent — separate tools solving different problems"
+    rationale: |
+      Flowspec: batch structural analysis, produces manifests, detects
+      failure patterns. codegraph-rust: interactive knowledge graph
+      queries, semantic embeddings, real-time exploration.
+      They're complementary but don't need integration points.
+      A user can run both on the same project independently.
+
+data:
+  integration_surfaces:
+    - "library-crate-api"
+    - "cli-commands"
+    - "manifest-files"
+    - "mcp-server"
+
+  output_formats: ["yaml", "json", "sarif", "summary"]
+
+  ci_exit_codes:
+    success: 0
+    error: 1
+    findings: 2
+
+  mozart_coupling: "none — Flowspec exposes, Mozart consumes"
+  codegraph_coupling: "none — fully independent"
+
+  mcp_priority: "post-v1-cli-stability"

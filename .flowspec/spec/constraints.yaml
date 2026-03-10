@@ -1,0 +1,144 @@
+# .flowspec/spec/constraints.yaml
+# PURPOSE: Boundaries — musts, must-nots, preferences, escalation triggers.
+# AUDIENCE: Every agent working on Flowspec. Violations of "musts" are bugs.
+# AUTHORITY: Constraints override convenience. If a constraint makes something
+#   harder, that's the point — it prevents worse problems.
+
+content:
+  musts:
+    language_and_toolchain:
+      - "Rust, stable toolchain only. No nightly features."
+      - "Cargo workspace: library crate (flowspec) + binary crate (flowspec-cli)"
+      - "Single binary distribution — no runtime dependencies for the CLI"
+      - "Commit Cargo.lock (binary project)"
+
+    error_handling:
+      - "thiserror for library code (typed errors with context)"
+      - "anyhow only in main.rs / CLI binary entry point"
+      - "Every error type must carry enough context to diagnose the failure without reading source"
+
+    code_quality:
+      - "Every public function must have /// documentation"
+      - "cargo clippy -- -D warnings must be clean"
+      - "cargo fmt --check must be clean"
+      - "All async code uses tokio runtime"
+
+    analysis:
+      - "Tree-sitter is the sole parsing foundation. No LSP server dependencies."
+      - "The analysis engine only operates on the language-agnostic IR — never raw AST"
+      - "Language adapters are independent — adding a language doesn't modify the engine"
+      - "The persistent graph is the source of truth — manifests are exports"
+      - "Incremental analysis must produce the same result as full analysis on the same source"
+      - "Deleting .flowspec/cache/ must trigger a clean full re-analysis (cache is rebuildable)"
+
+    output:
+      - "All manifest output must be valid YAML parseable by any YAML library"
+      - "Manifest must not exceed 10x the source code size"
+      - "Diagnostics must include evidence (what was observed) and suggestion (what to do)"
+      - "Every diagnostic must have a confidence level (high, moderate, low)"
+
+    licensing:
+      - "Dual license: AGPL-3.0-or-later AND Commercial, matching Mozart"
+      - "All dependencies must have AGPL-compatible licenses (MIT, Apache-2.0, BSD, MPL-2.0)"
+      - "No dependencies with GPL-only, SSPL, or proprietary-only licenses"
+
+  must_nots:
+    - "Do NOT use nightly Rust features"
+    - "Do NOT spawn external processes during analysis (no LSP servers, no subprocesses)"
+    - "Do NOT produce manifests larger than 10x the source code size"
+    - "Do NOT analyze generated code (target/, build artifacts, node_modules/, __pycache__/, .git/)"
+    - "Do NOT use unsafe unless absolutely required for FFI with tree-sitter C bindings"
+    - "Do NOT suppress diagnostic findings to reduce false positives — use confidence levels instead"
+    - "Do NOT require a running service or daemon for basic CLI operation"
+
+  preferences:
+    dependencies:
+      - "Prefer mature, well-maintained crates with safe licenses"
+      - "No hard limit on dependency count — use what's needed"
+      - "Prefer widely-adopted crates over niche alternatives"
+      - "Async throughout using tokio patterns"
+
+    pre_approved_crates:
+      - "clap — CLI argument parsing"
+      - "serde + serde_yaml + serde_json — serialization"
+      - "tree-sitter + tree-sitter-rust + tree-sitter-python + tree-sitter-javascript + tree-sitter-typescript — parsing"
+      - "thiserror — library error types"
+      - "anyhow — binary error handling"
+      - "tracing + tracing-subscriber — logging"
+      - "tokio — async runtime"
+      - "petgraph or similar — graph data structure (evaluate at implementation time)"
+      - "bincode or rkyv — binary serialization for cache"
+
+    testing:
+      - "Prefer integration tests that test the full pipeline over unit tests of internals"
+      - "Fixture projects with known properties are the primary test oracle"
+      - "Snapshot testing for manifest output — known-good manifests compared against"
+
+    code_style:
+      - "Prefer &str over String in function parameters"
+      - "Prefer streaming analysis over loading everything into memory"
+      - "tracing for logging, not println!/eprintln!"
+      - "Module structure should mirror the component architecture: cli/, parser/, analyzer/, graph/, manifest/"
+
+  performance:
+    first_run:
+      target: "Under 7 minutes for a 50K-line codebase"
+      acceptable: "Under 10 minutes"
+      unacceptable: "Over 10 minutes"
+    incremental_run:
+      target: "Under 1 minute"
+      acceptable: "Under 2 minutes"
+      unacceptable: "Over 5 minutes"
+    single_symbol_trace:
+      target: "Under 5 seconds (from cached graph)"
+      acceptable: "Under 15 seconds"
+    memory:
+      guideline: "Should not exceed 2x the size of the source code in memory during analysis"
+
+  platform_support:
+    primary: "Linux (x86_64)"
+    secondary: "macOS (x86_64, aarch64) — aim to support, loosely"
+    not_supported: "Windows — not a target, don't spend effort on it"
+    ci_testing: "Linux only (no macOS hardware for CI)"
+    policy: |
+      Write portable code by default (no Linux-specific syscalls, use
+      std::path instead of hardcoded separators). Don't go out of your
+      way to fix macOS-specific issues, but don't introduce gratuitous
+      incompatibilities either. If a macOS user reports a bug, fix it
+      if the fix is straightforward.
+
+  escalation_triggers:
+    - "If tree-sitter grammar doesn't cover a needed construct for any target language, document what's missing and propose a workaround"
+    - "If the manifest format needs changes from what's specified, document why and propose the change before implementing"
+    - "If a diagnostic pattern proves infeasible with static analysis alone, mark it 'requires dynamic analysis' and stub it"
+    - "If incremental analysis cannot guarantee equivalence with full analysis for a specific case, document the case and degrade gracefully"
+    - "If a dependency has a license concern, flag it before adding"
+    - "If cache format needs to change in a way that invalidates existing caches, document the migration path"
+
+data:
+  toolchain: "rust-stable"
+  async_runtime: "tokio"
+  parsing: "tree-sitter-only"
+  license: "AGPL-3.0-or-later AND Commercial"
+
+  performance_targets:
+    first_run_seconds: 420
+    incremental_run_seconds: 60
+    symbol_trace_seconds: 5
+
+  platforms:
+    supported: ["linux-x86_64"]
+    loose_support: ["macos-x86_64", "macos-aarch64"]
+    not_supported: ["windows"]
+
+  v1_languages: ["python", "javascript", "rust"]
+
+  dependency_policy: "mature-well-maintained-safe-license"
+
+  escalation_triggers:
+    - "grammar_coverage_gap"
+    - "manifest_format_change"
+    - "infeasible_diagnostic"
+    - "incremental_equivalence_failure"
+    - "license_concern"
+    - "cache_format_migration"

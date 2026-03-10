@@ -1,0 +1,40 @@
+# Build artifacts (Rust)
+target/
+*.swp
+*.swo
+
+# Generated scores (regenerate from generator-config.yaml)
+flowspec-build.yaml
+
+# Runtime workspaces (Mozart job artifacts)
+workspaces/
+
+# Test temporaries
+tests/temp/
+
+# Archives
+archive/
+
+# Miscellaneous scratch
+misc/
+
+# Flowspec analysis cache
+.flowspec/cache/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.bak
+*~
+.idea/
+.vscode/
+*.iml
+
+# Environment / secrets
+.env
+.env.*

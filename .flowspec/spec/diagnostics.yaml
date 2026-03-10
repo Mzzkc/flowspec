@@ -1,0 +1,411 @@
+# .flowspec/spec/diagnostics.yaml
+# PURPOSE: Every diagnostic type, its detection logic, severity model, and evidence format.
+# AUDIENCE: Agents implementing diagnostic detection in the analysis engine.
+# AUTHORITY: If a diagnostic is emitted that doesn't match a pattern here, the code is wrong.
+
+content:
+  philosophy: |
+    Diagnostics are Flowspec's highest-value output. They tell AI agents
+    what's wrong with a codebase in terms agents can act on.
+
+    Design principles:
+    1. Failure patterns, not graph theory. "Unwired feature" not "isolated subgraph."
+    2. Evidence-backed. Every diagnostic includes specific proof — what Flowspec
+       observed, not what it inferred.
+    3. Actionable suggestions. Every diagnostic says what to do about it.
+    4. Confidence-scored. Every finding has a confidence level. High-confidence
+       findings are prominent. Lower-confidence findings are present but flagged
+       as "investigate." False negatives are the worst failure — report everything
+       above minimum confidence rather than suppressing uncertain findings.
+    5. Accuracy matters. Better to report fewer things correctly than many things
+       with false positives. But never suppress a finding just because confidence
+       is moderate — flag it and let the consumer decide.
+
+  severity_model:
+    critical: |
+      Breaks correctness or causes data loss. Must fix.
+      Examples: data enters system and is silently dropped, error path
+      swallows exceptions, contract mismatch causes runtime failure.
+    warning: |
+      Structural defect that will cause problems. Should fix.
+      Examples: dead code accumulation, incomplete migration, missing
+      error handler on a path that can fail.
+    info: |
+      Suboptimal but not broken. Fix when convenient.
+      Examples: phantom imports, minor duplication, unused re-exports.
+
+  confidence_model:
+    high: |
+      Flowspec is certain this is a real issue. Zero or near-zero chance
+      of false positive. Example: a function with literally zero callers
+      anywhere in the project.
+    moderate: |
+      Flowspec believes this is likely an issue but cannot fully verify.
+      Example: two functions with overlapping logic that might be
+      intentional variants. Reported with "investigate" flag.
+    low: |
+      Flowspec detected a pattern that sometimes indicates an issue.
+      Only reported with explicit "possible" flag. Example: a public
+      function called from only one location might be dead or might
+      be a library API.
+
+  diagnostic_patterns:
+    isolated_cluster:
+      description: |
+        A group of symbols that reference each other but connect to nothing
+        outside the group. Likely an unwired feature — agent created a module
+        but never called it from the existing codebase.
+      detection: |
+        Graph analysis: find connected components in the call/reference graph
+        that have zero inbound edges from outside the component. Filter out
+        test modules, examples, and explicitly marked library APIs.
+      severity: "warning (critical if recently created files)"
+      confidence: "high — zero external references is verifiable"
+      evidence_format: |
+        List all symbols in the cluster, their internal references, and
+        confirm zero external callers. Note file creation dates if available
+        (recent = likely unwired feature, old = likely legacy dead code).
+      example: |
+        pattern: isolated_cluster
+        severity: warning
+        entity: "auth::verify_token, auth::refresh_token, auth::Token"
+        message: "Isolated cluster: 3 symbols in auth module reference each other but nothing outside auth calls into them"
+        evidence: "auth::verify_token has 0 external callers. auth::refresh_token has 0 external callers. auth::Token constructed only within auth module."
+        suggestion: "Wire auth module into the request handling pipeline — likely needs to be called from api::middleware"
+        confidence: high
+
+    data_dead_end:
+      description: |
+        A symbol is defined but never consumed. A variable is assigned but
+        never read. Data enters the system and goes nowhere. Includes:
+        - Functions with zero callers (classic dead code)
+        - Variables assigned but never read
+        - Return values that are always discarded
+        - Data deserialized from external input but never processed
+      detection: |
+        Reference counting: entities with zero inbound "called_by" or
+        "read_by" edges. For variables: assigned but never referenced
+        after assignment. For return values: call sites that discard
+        the return.
+      severity: "warning (critical if data from external input is dropped)"
+      confidence: "high for zero-reference, moderate for discarded returns"
+      evidence_format: |
+        The entity, its reference count (0), and what it was expected
+        to connect to based on its context (module, visibility, type).
+      example: |
+        pattern: data_dead_end
+        severity: warning
+        entity: "utils::format_timestamp"
+        message: "Dead end: public function with zero callers"
+        evidence: "utils::format_timestamp is pub, defined at utils.rs:42, has 0 callers in the project"
+        suggestion: "Remove if unused, or wire into the code paths that need timestamp formatting"
+        confidence: high
+
+    partial_wiring:
+      description: |
+        Code exists on some paths but is missing where it should be.
+        Error handlers defined but not in the error path. Consumers
+        expecting data that nobody provides. Validation on some
+        endpoints but not others.
+      detection: |
+        Pattern matching across parallel code paths. If function A has
+        error handling and function B (which does similar operations)
+        doesn't, flag B. If a type is consumed in some flows but a
+        parallel flow skips it, flag the gap.
+      severity: "warning (critical for missing error handling)"
+      confidence: "moderate — requires judgment about parallel paths"
+      evidence_format: |
+        The complete path, the missing element, and the parallel path
+        that has it.
+      example: |
+        pattern: partial_wiring
+        severity: critical
+        entity: "api::handler::update_user"
+        message: "Missing error handling: update_user can fail with DbError but has no error mapping"
+        evidence: "api::handler::create_user maps DbError -> ApiError at create_user.rs:58. api::handler::update_user calls the same db functions but has no DbError handling."
+        suggestion: "Add DbError -> ApiError mapping to update_user, matching create_user's pattern"
+        confidence: moderate
+
+    orphaned_implementation:
+      description: |
+        A trait/interface implementation exists but nothing dispatches
+        to it. A public method exists but nobody calls it. The code
+        was written but never integrated.
+      detection: |
+        For trait impls: check if the trait is ever used as a bound
+        or trait object in a context that could dispatch to this impl.
+        For public methods: zero callers outside the defining module.
+      severity: "warning"
+      confidence: "high for zero-caller methods, moderate for trait impls"
+      evidence_format: |
+        The implementation, the trait/interface, and the lack of
+        dispatch points.
+      example: |
+        pattern: orphaned_implementation
+        severity: warning
+        entity: "search::engine::SemanticEngine::reindex_all"
+        message: "Orphaned: public method with no callers in application code"
+        evidence: "SemanticEngine::reindex_all is pub, has 0 callers outside tests"
+        suggestion: "Wire to admin endpoint or remove"
+        confidence: high
+
+    duplication:
+      description: |
+        Overlapping logic in multiple places. Two or more functions that
+        do substantially the same thing. Agents create duplication
+        constantly — they implement a function without checking if one
+        already exists.
+      detection: |
+        Structural similarity analysis on the IR. Functions with similar
+        call patterns, similar parameter types, similar control flow
+        structure. NOT textual similarity — structural.
+      severity: "warning"
+      confidence: "moderate — structural similarity doesn't always mean duplication"
+      evidence_format: |
+        Both entities, what overlaps, and what differs.
+      example: |
+        pattern: duplication
+        severity: warning
+        entity: "search::normalize_query, api::clean_query_string"
+        message: "Duplication: both functions perform query normalization with overlapping logic"
+        evidence: "Both call str::to_lowercase, str::trim, and regex-based whitespace collapsing. clean_query_string additionally handles URL decoding."
+        suggestion: "Consolidate into search::query::normalize with URL decode option"
+        confidence: moderate
+
+    contract_mismatch:
+      description: |
+        Interface says one thing, implementation says another. Serde
+        field names don't match API schema. Function signature changed
+        but callers pass old arguments. Type annotations disagree with
+        actual usage.
+      detection: |
+        Cross-reference serialization annotations (serde rename, JSON
+        field names) against API schemas if available. Compare function
+        signatures against call sites. Compare type annotations against
+        actual assignments.
+      severity: "critical"
+      confidence: "high when verifiable against schema, moderate otherwise"
+      evidence_format: |
+        The contract (expected), the implementation (actual), and
+        where they diverge.
+      example: |
+        pattern: contract_mismatch
+        severity: critical
+        entity: "model::Response::score"
+        message: "Contract mismatch: struct field 'score' but API schema expects 'relevance_score'"
+        evidence: "model::Response has field 'score: f64' at response.rs:12. No #[serde(rename)] attribute. API schema at docs/api.yaml specifies 'relevance_score'."
+        suggestion: "Add #[serde(rename = \"relevance_score\")] to the score field"
+        confidence: high
+
+    circular_dependency:
+      description: |
+        Modules depend on each other creating coupling cycles. Module A
+        uses module B which uses module A. Creates maintenance burden
+        and makes the codebase harder to reason about.
+      detection: |
+        Cycle detection in the module dependency graph. Report the
+        shortest cycle and the specific cross-references that create it.
+      severity: "warning"
+      confidence: "high — cycles are structurally verifiable"
+      evidence_format: |
+        The full cycle path and the specific references at each step.
+      example: |
+        pattern: circular_dependency
+        severity: warning
+        entity: "config -> search::engine -> config"
+        message: "Circular dependency: config and search::engine depend on each other"
+        evidence: "config::Settings references search::engine::DEFAULT_CONFIG at config.rs:28. search::engine::SemanticEngine references config::Settings at engine.rs:15."
+        suggestion: "Extract shared types into a common module that both can depend on"
+        confidence: high
+
+    layer_violation:
+      description: |
+        Code bypasses architectural boundaries. API layer calling the
+        database directly instead of going through the service layer.
+        Presentation logic in the data model. These violations erode
+        architecture over time.
+      detection: |
+        Requires user-defined layer rules in .flowspec/config.yaml.
+        Check cross-module references against the allowed dependency
+        directions. Flag references that skip layers.
+      severity: "warning"
+      confidence: "high — rule-based, deterministic"
+      evidence_format: |
+        The rule violated, the specific reference, and the expected path.
+      example: |
+        pattern: layer_violation
+        severity: warning
+        entity: "api::handlers::admin"
+        message: "Layer violation: api layer directly accesses database"
+        evidence: "api::handlers::admin imports sqlx::PgPool at admin.rs:3. Layer rule: api -> service -> db (api should not import sqlx directly)."
+        suggestion: "Move database access to service::admin and call from api::handlers::admin"
+        confidence: high
+
+    incomplete_migration:
+      description: |
+        Old pattern and new pattern coexist in the codebase. Some code
+        uses the old way, some uses the new. This is the most common
+        agent failure mode — an agent updates 3 of 5 call sites during
+        a refactor and leaves the rest on the old pattern.
+      detection: |
+        Identify groups of similar operations (same function called with
+        different patterns, or old function and new function doing the
+        same job with different callers). Flag when both patterns exist
+        and neither is dominant enough to be intentional.
+      severity: "warning"
+      confidence: "moderate — requires judgment about intentionality"
+      evidence_format: |
+        The old pattern, the new pattern, which call sites use which,
+        and the ratio.
+      example: |
+        pattern: incomplete_migration
+        severity: warning
+        entity: "db::query, db::query_async"
+        message: "Incomplete migration: 3 call sites use db::query (sync), 7 use db::query_async. Likely mid-migration to async."
+        evidence: "db::query called from: handler_a.rs:12, handler_b.rs:34, handler_c.rs:56. db::query_async called from 7 other handlers."
+        suggestion: "Complete migration: update handler_a, handler_b, handler_c to use db::query_async"
+        confidence: moderate
+
+    asymmetric_handling:
+      description: |
+        Parallel code paths with inconsistent treatment. One API handler
+        validates input, another doing similar work doesn't. One error
+        path has recovery, a parallel one doesn't. One branch logs,
+        the other is silent.
+      detection: |
+        Group functions by structural similarity (same module, similar
+        signatures, similar call patterns). Compare their internal
+        structure for missing elements — error handling, validation,
+        logging, authorization checks.
+      severity: "warning (critical for missing error/auth handling)"
+      confidence: "moderate — requires judgment about what 'parallel' means"
+      evidence_format: |
+        The parallel functions, what one has that the other lacks.
+      example: |
+        pattern: asymmetric_handling
+        severity: critical
+        entity: "api::handler::delete_user"
+        message: "Asymmetric handling: delete_user lacks authorization check present in all other user handlers"
+        evidence: "create_user, update_user, get_user all call auth::require_admin(). delete_user does not."
+        suggestion: "Add auth::require_admin() call to delete_user"
+        confidence: moderate
+
+    stale_reference:
+      description: |
+        Code references something that has been moved, renamed, or
+        restructured. May still compile (especially Python/JS) but
+        points to the wrong thing or a compatibility shim.
+      detection: |
+        Cross-reference imports and references against actual definitions.
+        Flag references that resolve to re-exports, compatibility shims,
+        deprecated markers, or definitions that have moved.
+      severity: "warning"
+      confidence: "moderate — requires distinguishing intentional re-exports from stale refs"
+      evidence_format: |
+        The reference, what it resolves to, and why it's likely stale.
+      example: |
+        pattern: stale_reference
+        severity: warning
+        entity: "handler.rs:5"
+        message: "Stale reference: imports old_module::process, which re-exports new_module::process"
+        evidence: "old_module::process is a re-export added during migration. 4 of 6 importers already import from new_module directly."
+        suggestion: "Update import to use new_module::process directly"
+        confidence: moderate
+
+    phantom_dependency:
+      description: |
+        Module A imports module B but uses nothing from it. Leftover
+        from a refactor. Agents add imports and forget to clean up.
+      detection: |
+        Parse import/use statements. Check if any imported symbol is
+        actually referenced in the importing file. Flag imports where
+        zero imported symbols are used.
+      severity: "info"
+      confidence: "high — unused imports are verifiable"
+      evidence_format: |
+        The import statement, the file, and confirmation that no
+        imported symbol is referenced.
+      example: |
+        pattern: phantom_dependency
+        severity: info
+        entity: "handler.rs:3"
+        message: "Phantom dependency: imports utils::format but never uses it"
+        evidence: "use utils::format at handler.rs:3. Symbol 'format' has 0 references in handler.rs."
+        suggestion: "Remove unused import"
+        confidence: high
+
+    missing_reexport:
+      description: |
+        Public symbol exists in a submodule but isn't re-exported through
+        the module's public API. Agents add new functions to submodules
+        but don't update the module's pub use declarations.
+      detection: |
+        For each module with a mod.rs/init.py/__init__.py: compare
+        public symbols in submodules against the module's re-exports.
+        Flag public symbols that exist in submodules but aren't
+        accessible through the parent module.
+      severity: "info (warning if the symbol has external callers expecting it)"
+      confidence: "moderate — not all public symbols need re-exporting"
+      evidence_format: |
+        The symbol, its submodule, and the parent module's current exports.
+      example: |
+        pattern: missing_reexport
+        severity: info
+        entity: "auth::tokens::refresh_token"
+        message: "Missing re-export: auth::tokens::refresh_token is pub but not re-exported from auth module"
+        evidence: "auth/tokens.rs exports pub fn refresh_token. auth/mod.rs has pub mod tokens but no pub use tokens::refresh_token."
+        suggestion: "Add 'pub use tokens::refresh_token;' to auth/mod.rs if external access is intended"
+        confidence: moderate
+
+data:
+  severity_levels: ["critical", "warning", "info"]
+  confidence_levels: ["high", "moderate", "low"]
+
+  false_negative_policy: |
+    False negatives are the worst failure. Report everything above
+    minimum confidence. Use confidence levels to let consumers triage.
+    Never suppress a finding to reduce false positives.
+
+  diagnostic_patterns:
+    - id: "isolated_cluster"
+      default_severity: "warning"
+      typical_confidence: "high"
+    - id: "data_dead_end"
+      default_severity: "warning"
+      typical_confidence: "high"
+    - id: "partial_wiring"
+      default_severity: "warning"
+      typical_confidence: "moderate"
+    - id: "orphaned_implementation"
+      default_severity: "warning"
+      typical_confidence: "high"
+    - id: "duplication"
+      default_severity: "warning"
+      typical_confidence: "moderate"
+    - id: "contract_mismatch"
+      default_severity: "critical"
+      typical_confidence: "high"
+    - id: "circular_dependency"
+      default_severity: "warning"
+      typical_confidence: "high"
+    - id: "layer_violation"
+      default_severity: "warning"
+      typical_confidence: "high"
+    - id: "incomplete_migration"
+      default_severity: "warning"
+      typical_confidence: "moderate"
+    - id: "asymmetric_handling"
+      default_severity: "warning"
+      typical_confidence: "moderate"
+    - id: "stale_reference"
+      default_severity: "warning"
+      typical_confidence: "moderate"
+    - id: "phantom_dependency"
+      default_severity: "info"
+      typical_confidence: "high"
+    - id: "missing_reexport"
+      default_severity: "info"
+      typical_confidence: "moderate"
+
+  pattern_count: 13
+  extensible: true

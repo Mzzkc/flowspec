@@ -1,0 +1,214 @@
+# .flowspec/spec/cli.yaml
+# PURPOSE: Every command, flag, argument, default, and output format.
+# AUDIENCE: Agents implementing the CLI interface.
+# AUTHORITY: If the CLI doesn't match this spec, the code is wrong.
+
+content:
+  philosophy: |
+    The CLI is the primary human and agent interface. Design principles:
+    1. Simple for common cases — flowspec analyze . should just work
+    2. stdout by default — pipe-friendly for agent consumption
+    3. Optional --output for workflows that don't support piping/redirects
+    4. Consistent flag names across commands
+    5. Useful error messages that say what went wrong and how to fix it
+
+  binary_name: "flowspec"
+  version_format: "flowspec x.y.z"
+
+  global_flags:
+    - flag: "--output, -o <path>"
+      type: "optional path"
+      description: "Write output to file instead of stdout"
+      default: "stdout"
+    - flag: "--format, -f <format>"
+      type: "enum: yaml, json, summary"
+      description: "Output format"
+      default: "yaml"
+    - flag: "--verbose, -v"
+      type: "boolean"
+      description: "Verbose logging (tracing output to stderr)"
+      default: "false"
+    - flag: "--quiet, -q"
+      type: "boolean"
+      description: "Suppress all non-error output except the result"
+      default: "false"
+    - flag: "--config, -c <path>"
+      type: "optional path"
+      description: "Path to .flowspec/config.yaml"
+      default: "auto-detected from project root"
+    - flag: "--version"
+      type: "boolean"
+      description: "Print version and exit"
+    - flag: "--help, -h"
+      type: "boolean"
+      description: "Print help and exit"
+
+  commands:
+    analyze:
+      usage: "flowspec analyze [path] [flags]"
+      description: "Full analysis — parse, build graph, produce manifest"
+      args:
+        - name: "path"
+          type: "optional path"
+          default: "current directory"
+          description: "Project root to analyze"
+      flags:
+        - flag: "--incremental / --full"
+          default: "--incremental"
+          description: "Incremental uses cached graph, --full forces re-analysis"
+        - flag: "--language, -l <lang>"
+          type: "optional, repeatable"
+          description: "Restrict analysis to specific language(s). Auto-detected if omitted."
+      output: "Full manifest (YAML by default) to stdout or --output file"
+      exit_codes:
+        0: "Analysis completed successfully"
+        1: "Analysis failed (parse errors, config errors)"
+        2: "Analysis completed but critical diagnostics found"
+
+    diagnose:
+      usage: "flowspec diagnose [path] [flags]"
+      description: "Run diagnostics only — output structural issues found"
+      args:
+        - name: "path"
+          type: "optional path"
+          default: "current directory"
+      flags:
+        - flag: "--checks <patterns>"
+          type: "comma-separated list of diagnostic pattern names"
+          description: "Filter to specific diagnostic patterns"
+          example: "--checks dead-ends,partial-wiring,duplication"
+        - flag: "--severity <level>"
+          type: "enum: critical, warning, info"
+          description: "Minimum severity to report"
+          default: "info (show everything)"
+        - flag: "--confidence <level>"
+          type: "enum: high, moderate, low"
+          description: "Minimum confidence to report"
+          default: "low (show everything)"
+      output: "Diagnostics section only (not full manifest)"
+      exit_codes:
+        0: "No diagnostics at or above specified severity"
+        1: "Analysis failed"
+        2: "Diagnostics found at or above specified severity"
+      ci_usage: |
+        flowspec diagnose --severity critical exits with code 2 if any
+        critical diagnostics exist. Use as a CI gate:
+          flowspec diagnose . --severity critical --format json
+
+    trace:
+      usage: "flowspec trace [path] --symbol <id> [flags]"
+      description: "Trace a single symbol's complete flow through the codebase"
+      args:
+        - name: "path"
+          type: "optional path"
+          default: "current directory"
+      flags:
+        - flag: "--symbol, -s <id>"
+          type: "required string"
+          description: "Symbol to trace (module::name format, or partial match)"
+        - flag: "--depth <n>"
+          type: "optional integer"
+          description: "Maximum traversal depth"
+          default: "unlimited"
+        - flag: "--direction <dir>"
+          type: "enum: both, forward, backward"
+          default: "both"
+          description: "Trace callers (backward), callees (forward), or both"
+      output: |
+        Complete flow trace for the symbol: everything it touches,
+        everything that touches it, boundary crossings, transformations.
+      exit_codes:
+        0: "Symbol found and traced"
+        1: "Symbol not found or analysis failed"
+
+    diff:
+      usage: "flowspec diff <old> <new> [flags]"
+      description: "Compare two manifests — show structural changes"
+      args:
+        - name: "old"
+          type: "required path"
+          description: "Path to older manifest"
+        - name: "new"
+          type: "required path"
+          description: "Path to newer manifest"
+      flags:
+        - flag: "--section <name>"
+          type: "optional, repeatable"
+          description: "Only diff specific sections (entities, diagnostics, etc.)"
+      output: |
+        Structural diff: entities added/removed/changed, new diagnostics,
+        resolved diagnostics, boundary changes, flow changes.
+      exit_codes:
+        0: "Diff completed, manifests are identical or changes shown"
+        1: "Diff failed (invalid manifests)"
+        2: "Structural regressions found (new critical diagnostics)"
+
+    init:
+      usage: "flowspec init [path]"
+      description: "Create .flowspec/config.yaml for a project"
+      args:
+        - name: "path"
+          type: "optional path"
+          default: "current directory"
+      behavior: |
+        Detects project languages, creates .flowspec/ directory with
+        a default config.yaml. If config already exists, does nothing
+        (no overwrite). Prints the generated config to stdout.
+      exit_codes:
+        0: "Config created or already exists"
+        1: "Failed to create config"
+
+    watch:
+      usage: "flowspec watch [path] [flags]"
+      description: "Watch mode — re-analyze incrementally on file changes"
+      args:
+        - name: "path"
+          type: "optional path"
+          default: "current directory"
+      flags:
+        - flag: "--debounce <ms>"
+          type: "optional integer"
+          default: "500"
+          description: "Debounce interval for file change events"
+      behavior: |
+        Watches for file changes using OS file system events. On change,
+        runs incremental analysis and outputs updated manifest. Keeps
+        the graph in memory for instant re-analysis.
+      exit_codes:
+        0: "Watch stopped cleanly (Ctrl+C)"
+        1: "Watch failed to start"
+      v1_priority: "nice-to-have — implement if time permits"
+
+  output_behavior:
+    default: "stdout"
+    manifest_to: "stdout (or --output file)"
+    logs_to: "stderr (via tracing)"
+    progress_to: "stderr (so stdout stays clean for piping)"
+    policy: |
+      stdout is exclusively for structured output (manifest, diagnostics,
+      trace, diff). All logging, progress, and informational messages go
+      to stderr. This ensures stdout is always pipe-safe:
+        flowspec analyze . | other-tool
+        flowspec analyze . > manifest.yaml
+
+data:
+  binary: "flowspec"
+  commands:
+    - { name: "analyze", v1: true }
+    - { name: "diagnose", v1: true }
+    - { name: "trace", v1: true }
+    - { name: "diff", v1: true }
+    - { name: "init", v1: true }
+    - { name: "watch", v1: "nice-to-have" }
+
+  killed_commands:
+    - { name: "lint", reason: "Overlaps with diagnose — layer violations and contract mismatches are diagnostics" }
+
+  output_default: "stdout"
+  log_target: "stderr"
+  formats: ["yaml", "json", "summary"]
+
+  exit_code_convention:
+    0: "success"
+    1: "error"
+    2: "success-with-findings"

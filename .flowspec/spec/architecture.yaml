@@ -1,0 +1,252 @@
+# .flowspec/spec/architecture.yaml
+# PURPOSE: What the system looks like — components, interfaces, data flow.
+# AUDIENCE: Agents implementing Flowspec features.
+
+content:
+  overview: |
+    Flowspec is a three-layer analysis pipeline with a persistent graph core.
+
+    Layer 1: Language-specific parsers (tree-sitter) extract syntax into a
+    language-agnostic intermediate representation (IR). Custom semantic
+    resolution (name resolution, scope analysis, import following, cross-file
+    reference matching) enriches the syntactic data into structural understanding.
+
+    Layer 2: The analysis engine operates on the IR — resolving references,
+    tracing data flows, detecting boundaries, running diagnostics.
+
+    Layer 3: Output adapters export the analysis graph as YAML manifests,
+    JSON, or serve it via API/MCP for interactive queries.
+
+    The internal data structure is a persistent graph (in-memory, serialized
+    to disk). This graph is the engine — it enables incremental analysis
+    (only re-analyze changed files) and instant symbol trace queries. The
+    YAML manifest is an export format, not the primary data structure.
+
+  design_decisions:
+    tree_sitter_with_custom_semantics: |
+      Tree-sitter is the sole parsing foundation. No LSP servers. Flowspec
+      builds its own semantic resolution layer on top of tree-sitter AST
+      output — name resolution, scope analysis, import following, cross-file
+      reference matching, decorator/derive/annotation detection.
+
+      Tree-sitter provides fast, error-tolerant, incremental parsing with a
+      uniform API across all target languages. The custom semantic layer
+      gives Flowspec full control over what it extracts and how it represents
+      structural understanding.
+
+      For cases where tree-sitter + custom semantics can't fully resolve
+      something (complex generics, trait object dispatch, deep type inference),
+      Flowspec reports the symbol as partially resolved rather than guessing.
+      Accuracy over coverage.
+
+      Rationale (TDF 5-way synthesis): LSP is someone else's semantic layer —
+      complete but opaque, heavy to manage (process lifecycle for 3 different
+      language servers), and different for every language. Tree-sitter + custom
+      semantics gives Flowspec ownership of its analysis pipeline, uniform
+      multi-language support, and the speed profile needed for incremental
+      analysis. The complexity budget is better spent on making the custom
+      semantic resolution layer good than on managing external processes.
+
+    persistent_graph: |
+      The core data structure is an in-memory graph that serializes to a
+      binary cache file (.flowspec/cache/). This is NOT an external database
+      — no running services, no dependencies. It's an embedded data structure.
+
+      On first run: parse everything, build the full graph, serialize to disk.
+      On subsequent runs: load cached graph, diff source files (by hash),
+      re-parse and re-analyze only changed files, update the graph.
+
+      The graph supports instant queries: given a symbol, traverse its
+      connections to find everything it touches — callers, callees,
+      transformations, boundary crossings, consumers.
+
+      The YAML manifest is an export of the graph state, not the graph itself.
+
+      Rationale (TDF 4-way synthesis): The "no database" constraint was about
+      avoiding external dependencies, not avoiding persistence. Every
+      successful incremental analysis tool uses this pattern — in-memory
+      index with disk serialization.
+
+    multi_language: |
+      v1 targets Python, JavaScript/TypeScript, and Rust. The architecture
+      is language-agnostic at the core, with language-specific adapters.
+
+      Each language adapter translates tree-sitter AST into the common IR
+      and implements language-specific semantic resolution (import systems,
+      module systems, type annotation parsing). The analysis engine operates
+      only on the IR. Diagnostics, flow tracing, and boundary detection are
+      language-agnostic. Language-specific rules (e.g., Rust's ownership
+      model, Python's dynamic typing) are expressed as adapter-level
+      annotations on the IR, not special cases in the engine.
+
+  components:
+    cli:
+      responsibility: "User-facing interface — parse args, invoke engine, format output"
+      interface: "flowspec analyze|diagnose|trace|diff [options]"
+      depends_on: ["engine"]
+
+    engine:
+      responsibility: |
+        The core analysis engine. Owns the persistent graph. Orchestrates
+        parsing, semantic resolution, flow tracing, and diagnostics.
+        Exposes a Rust API (pub functions/traits) that CLI, API crate,
+        and MCP server all consume.
+      interface: |
+        - analyze(project_path) -> AnalysisResult
+        - trace_symbol(symbol_id) -> FlowTrace
+        - diagnose(project_path) -> Vec<Diagnostic>
+        - diff(old_manifest, new_manifest) -> ManifestDiff
+        - query(graph_query) -> QueryResult
+      depends_on: ["parser", "analyzer", "graph"]
+
+    parser:
+      responsibility: |
+        Language-specific parsing via tree-sitter plus custom semantic
+        resolution. Extracts syntax into the language-agnostic IR, then
+        enriches with name resolution, scope analysis, and import following.
+        One adapter per supported language.
+      approach: "tree-sitter + custom semantic resolution"
+      languages:
+        v1: ["python", "javascript", "rust"]
+        future: ["go", "java", "kotlin", "c", "cpp"]
+      adapters:
+        python: |
+          tree-sitter-python. Semantic resolution handles: import/from
+          statements, module hierarchy, class/method resolution, decorator
+          detection, type annotation parsing (when present).
+        javascript: |
+          tree-sitter-javascript and tree-sitter-typescript. Semantic
+          resolution handles: import/require/export statements, module
+          resolution (CommonJS and ESM), class/prototype chains, decorator
+          detection, TypeScript type annotations.
+        rust: |
+          tree-sitter-rust. Semantic resolution handles: use/mod statements,
+          crate module hierarchy, trait impl matching (syntactic), derive
+          macro detection, lifetime/ownership annotations, pub visibility.
+      depends_on: []
+
+    analyzer:
+      responsibility: |
+        Operates on the language-agnostic IR. Performs:
+        - Reference resolution (who calls what, who uses what)
+        - Flow tracing (data entry to exit, through transformations)
+        - Boundary detection (module, package, network, serialization)
+        - Diagnostic detection (dead ends, orphans, missing error paths, etc.)
+      depends_on: ["parser", "graph"]
+
+    graph:
+      responsibility: |
+        The persistent analysis graph. In-memory data structure that
+        serializes to .flowspec/cache/. Supports:
+        - Incremental updates (add/remove/modify nodes and edges)
+        - Symbol lookup by ID (O(1))
+        - Graph traversal for flow tracing
+        - Diff detection (what changed since last analysis)
+      storage: ".flowspec/cache/ — binary serialized, not human-readable"
+      depends_on: []
+
+    manifest_writer:
+      responsibility: |
+        Exports the analysis graph to external formats: YAML (default),
+        JSON (programmatic), summary (human-readable report).
+      formats: ["yaml", "json", "summary"]
+      depends_on: ["graph"]
+
+  intermediate_representation:
+    description: |
+      The language-agnostic IR is the contract between parsers and the
+      analysis engine. Every language adapter produces IR nodes. The
+      engine never sees language-specific AST.
+    node_types:
+      - "Symbol: function, method, class/struct, trait/interface, module, variable, constant, macro"
+      - "Reference: call, read, write, import, export, implement, derive/decorate"
+      - "Boundary: module, package/crate, network, serialization, ffi"
+      - "Scope: file, module, function, block"
+    edges:
+      - "calls: Symbol -> Symbol"
+      - "references: Symbol -> Symbol"
+      - "contains: Scope -> Symbol"
+      - "crosses: Reference -> Boundary"
+      - "transforms: Symbol -> Symbol (type transformation)"
+      - "flows_to: Symbol -> Symbol (data flow edge)"
+
+  data_flow:
+    - "Source files -> Language Adapter (tree-sitter + semantic resolution) -> IR nodes"
+    - "IR nodes -> Graph (persistent, in-memory) -> indexed and queryable"
+    - "Graph -> Analyzer -> flow paths, boundaries, diagnostics"
+    - "Graph -> Manifest Writer -> YAML/JSON export"
+    - "Graph -> Query API -> single-symbol trace responses"
+
+  crate_structure:
+    description: |
+      Flowspec is structured as a Cargo workspace with a library crate
+      (the engine) and a binary crate (the CLI). This enables Mozart and
+      other tools to link the engine directly as a dependency.
+    crates:
+      flowspec: "Library crate — engine, parser, analyzer, graph, manifest writer"
+      flowspec-cli: "Binary crate — CLI interface, depends on flowspec library"
+      flowspec-mcp: "Binary crate — MCP server, depends on flowspec library (future)"
+
+  cache_structure:
+    location: ".flowspec/cache/"
+    contents:
+      - "graph.bin — serialized analysis graph"
+      - "file_hashes.json — SHA256 of each source file at last analysis"
+      - "metadata.json — Flowspec version, last analysis timestamp, language config"
+    invalidation: |
+      On subsequent runs, compare current file hashes to cached hashes.
+      Files with changed hashes are re-parsed and their graph nodes updated.
+      Files that no longer exist have their nodes removed. New files are
+      parsed and added. The graph is always consistent after incremental update.
+
+  invariants:
+    - "The analysis engine never sees language-specific AST — only the IR"
+    - "The graph is the source of truth — manifests are exports, not the primary data"
+    - "Tree-sitter parsing never blocks on external processes — it's embedded"
+    - "No external processes are spawned during analysis — everything is in-process"
+    - "The cache is rebuildable — deleting .flowspec/cache/ triggers a full re-analysis"
+    - "Incremental analysis produces the same result as full analysis on the same source"
+    - "Language adapters are independent — adding a new language doesn't modify the engine"
+
+  future_directions:
+    - "Watch mode — file system watcher triggers incremental re-analysis"
+    - "Distributed analysis — split large monorepos across workers"
+    - "Plugin system for custom language adapters and diagnostic rules"
+    - "Optional LSP enrichment for deeper type resolution if ever needed"
+
+data:
+  components:
+    - cli
+    - engine
+    - parser
+    - analyzer
+    - graph
+    - manifest_writer
+
+  parsing_approach: "tree-sitter-with-custom-semantics"
+  lsp_role: "none — not in v1 architecture"
+
+  v1_languages: ["python", "javascript", "rust"]
+
+  persistence: "in-memory-graph-with-disk-serialization"
+  cache_location: ".flowspec/cache/"
+
+  crate_structure:
+    type: "cargo-workspace"
+    library: "flowspec"
+    binaries: ["flowspec-cli", "flowspec-mcp"]
+
+  ir_node_types:
+    - "symbol"
+    - "reference"
+    - "boundary"
+    - "scope"
+
+  invariants:
+    - "engine-only-sees-ir"
+    - "graph-is-source-of-truth"
+    - "tree-sitter-never-blocks"
+    - "no-external-processes"
+    - "cache-is-rebuildable"
+    - "incremental-equals-full"
+    - "adapters-are-independent"

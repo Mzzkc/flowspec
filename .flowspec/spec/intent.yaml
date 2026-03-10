@@ -1,0 +1,135 @@
+# .flowspec/spec/intent.yaml
+# PURPOSE: Why Flowspec exists, who it serves, what it optimizes for.
+# AUDIENCE: Every agent working on Flowspec reads this first.
+# AUTHORITY: This file overrides all other spec files when they conflict.
+
+content:
+  thesis: |
+    Flowspec is a static code analyzer that traces the flow of all data in a
+    codebase, optimized for efficient use by AI agents during building,
+    debugging, and within CI workflows.
+
+    AI tools operate on codebases at the text level. They read files, infer
+    local patterns, and guess at the bigger picture. Flowspec eliminates the
+    guessing — it tells agents exactly how data moves through a system, what's
+    connected to what, what's broken, and what's missing. Agents that consume
+    Flowspec output know what they're missing, immediately.
+
+  vision: |
+    Every AI coding session starts with structural understanding. An agent
+    doesn't read files hoping to piece together the architecture — it reads
+    the Flowspec manifest and knows. When it makes changes, Flowspec validates
+    that the changes are fully integrated — no dead code, no orphaned paths,
+    no missing error handling. When it debugs, it traces any symbol through
+    the entire program — every function that touches it, every transformation,
+    every boundary crossing.
+
+    Flowspec is the structural backbone that makes AI agents reliable on
+    real codebases, not just small scripts.
+
+  primary_user: "AI agents — Claude Code, Mozart musicians, Copilot, any LLM-based coding tool"
+
+  goal_hierarchy:
+    primary: "Give AI agents immediate, accurate structural understanding of a codebase"
+    secondary: "Catch structural defects — dead code, orphaned paths, missing error handling — that agents miss"
+    tertiary: "Serve as a CI gate that validates structural integrity of changes"
+
+  key_capabilities:
+    batch_manifest: |
+      Full codebase analysis producing a structured YAML manifest — entity
+      registry, flow paths, boundaries, diagnostics, dependency graph, type flows.
+    single_symbol_trace: |
+      On-demand query: given any valid symbol (variable, function, macro, type),
+      return its complete flow — everything it touches, everything that touches it,
+      by reference or value, through the entire program. Passed to, acted on,
+      modified, returned, transformed.
+    incremental_analysis: |
+      First run may be slow. All subsequent runs must be fast (target: under one
+      minute) by caching analysis state and only re-analyzing what changed.
+    structural_diagnostics: |
+      Deep diagnostics that find things wrong with a codebase — dead ends, orphan
+      consumers, unhooked features, missing error paths, circular dependencies.
+      Not linting. Not style. Structural truth.
+
+  access_patterns:
+    - cli: "Primary interface. flowspec analyze, flowspec trace, flowspec diagnose."
+    - api: "Rust library crate. Mozart and other tools link against it directly."
+    - mcp: "MCP server for Claude Code and other MCP-capable AI tools."
+
+  relationship_to_mozart:
+    coupling: "standalone-first"
+    description: |
+      Mozart AI Compose is cognitive orchestration infrastructure. Composers
+      write scores, the conductor (daemon) executes them through musicians
+      (AI agents). Flowspec gives musicians and the composition engine
+      structural understanding of the venue (project) they're working on.
+    integration_points:
+      - "Mozart links Flowspec as a library crate for direct API access"
+      - "The composition engine (mozart compose) consumes Flowspec manifests when generating scores for a venue"
+      - "Mozart scores use flowspec diagnose as a validation step to verify musician output"
+      - "Flowspec manifests become part of the venue's libretto — structural context injected into musician prompts"
+    independence: |
+      Flowspec must work without Mozart installed. It is a standalone tool with
+      its own CLI, its own release cycle, and its own user base. Mozart is one
+      consumer among many.
+
+  licensing:
+    model: "Dual license — AGPL-3.0 and Commercial, matching Mozart's licensing"
+    rationale: "Enables open-source use while supporting commercial integration"
+
+  trade_offs:
+    completeness_vs_speed: "Speed wins after first run. First run prioritizes completeness."
+    accuracy_vs_coverage: "Accuracy wins. Better to report fewer things correctly than many things with false positives."
+    simplicity_vs_power: "Power for AI consumers, simplicity for human operators. The manifest can be complex; the CLI must be simple."
+
+  anti_scope:
+    - "Not a linter. Does not enforce naming conventions, code style, or formatting."
+    - "Not a test runner. Does not execute code or measure runtime behavior."
+    - "Not an IDE. Does not provide editor integration as a primary goal (MCP server is an access pattern, not an IDE plugin)."
+    - "Not a dependency auditor. Does not check for CVEs or license compliance in dependencies."
+    - "Not a documentation generator. Produces structural manifests, not human-readable docs."
+
+  success_scenarios:
+    validation_catch: |
+      An AI agent (Mozart musician) implements a feature. Flowspec runs as a
+      validation step in the score. It finds the feature was never fully hooked
+      up — dead code, isolated modules, missing integration points. The musician
+      fixes it before the sheet passes validation.
+    debug_trace: |
+      An AI agent debugs a codebase. It needs to trace a variable's flow.
+      Flowspec returns everywhere that variable goes through the entire
+      program — by reference or value — every function that acts on it,
+      is passed it, modifies it, transforms it. The agent gives that trace
+      to the reviewer.
+    composition_context: |
+      A composer runs `mozart compose "add semantic search"`. The composition
+      engine reads the Flowspec manifest for the venue — it sees module
+      boundaries, data flows, existing diagnostics. It generates scores that
+      respect the architecture instead of guessing at structure.
+
+data:
+  goals:
+    - "immediate-structural-understanding"
+    - "structural-defect-detection"
+    - "ci-structural-validation"
+  primary_user: "ai-agents"
+  access_patterns: ["cli", "api", "mcp"]
+  coupling: "standalone-first"
+  license: "AGPL-3.0-or-later AND Commercial"
+  trade_off_matrix:
+    completeness_vs_speed: "speed-after-first-run"
+    accuracy_vs_coverage: "accuracy"
+    simplicity_vs_power: "power-for-consumers-simplicity-for-operators"
+  anti_scope_keywords:
+    - "linting"
+    - "style-enforcement"
+    - "test-execution"
+    - "runtime-analysis"
+    - "dependency-audit"
+    - "documentation-generation"
+    - "ide-plugin"
+  key_capabilities:
+    - "batch-manifest"
+    - "single-symbol-trace"
+    - "incremental-analysis"
+    - "structural-diagnostics"

@@ -1,0 +1,43 @@
+# Flowspec configuration for the Flowspec project itself (dogfooding)
+project:
+  name: "flowspec"
+  languages: ["rust"]
+
+analysis:
+  entry_points:
+    - "src/main.rs::main"
+    - "src/lib.rs::*"
+  ignore:
+    - "target/"
+    - "tests/fixtures/"
+    - ".flowspec/cache/"
+  max_call_depth: 20
+  max_type_chain: 10
+
+diagnostics:
+  enabled:
+    - isolated_cluster
+    - data_dead_end
+    - partial_wiring
+    - orphaned_implementation
+    - duplication
+    - contract_mismatch
+    - circular_dependency
+    - layer_violation
+    - incomplete_migration
+    - asymmetric_handling
+    - stale_reference
+    - phantom_dependency
+    - missing_reexport
+
+  layer_rules:
+    - name: "cli should not access graph internals directly"
+      from: "cli::*"
+      to: "graph::internal::*"
+      allowed_through: ["flowspec::*"]
+
+    - name: "manifest should not access parser"
+      from: "manifest::*"
+      to: "parser::*"
+
+  suppressions: []

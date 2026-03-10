@@ -1,0 +1,186 @@
+# .flowspec/spec/manifest-schema.yaml
+# PURPOSE: The exact format of Flowspec's output manifest.
+# AUDIENCE: Every agent that produces or consumes manifest data.
+# AUTHORITY: If the code produces output that doesn't match this schema, the code is wrong.
+
+content:
+  philosophy: |
+    The manifest is an export of the analysis graph, optimized for AI agent
+    consumption. Design principles:
+
+    1. Token-efficient. Every byte earns its place. Agents pay for context
+       with attention and compute — don't waste it on verbose formatting.
+    2. Complete. Every entity, every flow, every diagnostic. Agents guess at
+       what they can't see, so show everything.
+    3. Summary-first. The summary section gives full structural understanding
+       in ~2K tokens. Agents that need detail query via API/MCP or read
+       deeper sections.
+    4. Failure-pattern diagnostics. Diagnostics describe what went wrong in
+       terms agents can act on, not graph theory.
+
+  format: "yaml"
+  target_token_budget: |
+    Summary section: ~2K tokens (fits in any context window alongside a task).
+    Full manifest for a 50K-line project: target under 500KB YAML.
+    Agents should be able to consume the summary + diagnostics without
+    reading entities or flows in detail.
+
+  sections:
+    metadata:
+      required: true
+      purpose: "Project identity, analysis timestamp, version, counts"
+      fields:
+        - { name: "project", type: "string", description: "Project name" }
+        - { name: "analyzed_at", type: "datetime", description: "ISO 8601 timestamp" }
+        - { name: "flowspec_version", type: "string", description: "Flowspec version" }
+        - { name: "languages", type: "list[string]", description: "Languages detected and analyzed" }
+        - { name: "file_count", type: "integer" }
+        - { name: "entity_count", type: "integer" }
+        - { name: "flow_count", type: "integer" }
+        - { name: "diagnostic_count", type: "integer" }
+        - { name: "incremental", type: "boolean", description: "Whether this was an incremental analysis" }
+        - { name: "files_changed", type: "integer", description: "Files re-analyzed (0 if full run)" }
+
+    summary:
+      required: true
+      purpose: |
+        Compressed structural overview. An agent reading ONLY this section
+        should understand the project's architecture, key data flows, module
+        boundaries, and outstanding issues. Target: ~2K tokens.
+      fields:
+        - name: "architecture"
+          type: "string"
+          description: |
+            2-4 sentence description of the project's structure: what the
+            main modules are, how they relate, where data enters and exits.
+        - name: "modules"
+          type: "list[{name, entity_count, role}]"
+          description: "Each module with count and one-line role description"
+        - name: "entry_points"
+          type: "list[string]"
+          description: "Where data enters the system (main, API handlers, etc.)"
+        - name: "exit_points"
+          type: "list[string]"
+          description: "Where data leaves the system (responses, writes, etc.)"
+        - name: "key_flows"
+          type: "list[{name, path_summary}]"
+          description: "The most significant data flow paths, compressed"
+        - name: "diagnostic_summary"
+          type: "{critical: int, warning: int, info: int, top_issues: list[string]}"
+          description: "Diagnostic counts by severity plus the top 5 issues as one-liners"
+
+    entities:
+      required: true
+      purpose: |
+        Every meaningful symbol in the codebase. Token-efficient: one entity
+        per YAML list item, compact field names, no redundant information.
+        Agents can scan this list or query specific entities via API/MCP.
+      entity_format:
+        - { name: "id", type: "string", description: "Unique: module_path::name" }
+        - { name: "kind", type: "enum", values: ["fn", "method", "struct", "class", "trait", "interface", "module", "var", "const", "macro", "enum"], description: "Symbol kind, abbreviated" }
+        - { name: "vis", type: "enum", values: ["pub", "priv", "crate", "protected"], description: "Visibility, abbreviated" }
+        - { name: "sig", type: "string", description: "Compact signature: (param_types) -> return_type" }
+        - { name: "loc", type: "string", description: "file:line" }
+        - { name: "calls", type: "list[string]", description: "IDs of symbols this entity calls" }
+        - { name: "called_by", type: "list[string]", description: "IDs of symbols that call this entity" }
+        - { name: "annotations", type: "list[string]", description: "Decorators, derives, attributes" }
+
+    flows:
+      required: true
+      purpose: |
+        Traced data flow paths from entry points to exit points. Each flow
+        shows data moving through the system step by step — what enters,
+        what transforms it, what exits.
+      flow_format:
+        - { name: "id", type: "string", description: "Flow identifier" }
+        - { name: "description", type: "string", description: "One-line summary of what this flow does" }
+        - { name: "entry", type: "string", description: "Entry point entity ID" }
+        - { name: "exit", type: "string", description: "Exit point entity ID or description" }
+        - { name: "steps", type: "list[{entity, action, in_type, out_type}]", description: "Ordered steps in the flow" }
+        - { name: "issues", type: "list[string]", description: "Diagnostic IDs that affect this flow" }
+
+    boundaries:
+      required: true
+      purpose: |
+        Interfaces where data crosses a meaningful boundary — module,
+        package, network, serialization/deserialization, FFI.
+      boundary_format:
+        - { name: "id", type: "string" }
+        - { name: "type", type: "enum", values: ["module", "package", "network", "serialization", "ffi"] }
+        - { name: "from", type: "string", description: "Source module/scope" }
+        - { name: "to", type: "string", description: "Target module/scope" }
+        - { name: "crossing_points", type: "list[{fn, data_in, data_out}]" }
+        - { name: "issues", type: "list[string]", description: "Diagnostic IDs at this boundary" }
+
+    diagnostics:
+      required: true
+      purpose: |
+        Structural issues found in the codebase. Organized by failure
+        pattern — what went wrong in terms agents can act on.
+
+        This is the highest-value section. An agent reading only metadata
+        + summary + diagnostics should be able to identify and fix
+        structural problems without reading entities or flows.
+      severity_model:
+        critical: "Breaks correctness or causes data loss. Must fix."
+        warning: "Structural defect that will cause problems. Should fix."
+        info: "Suboptimal but not broken. Fix when convenient."
+      diagnostic_format:
+        - { name: "id", type: "string", description: "Unique diagnostic ID (D001, D002, ...)" }
+        - { name: "pattern", type: "enum", description: "Failure pattern category" }
+        - { name: "severity", type: "enum", values: ["critical", "warning", "info"] }
+        - { name: "entity", type: "string", description: "Primary entity or entities involved" }
+        - { name: "message", type: "string", description: "Human/agent-readable description of the issue" }
+        - { name: "evidence", type: "string", description: "Specific proof — what Flowspec observed" }
+        - { name: "suggestion", type: "string", description: "Actionable fix suggestion" }
+        - { name: "loc", type: "string", description: "Primary file:line location" }
+
+    dependency_graph:
+      required: true
+      purpose: "Module-level dependency structure with direction and weight"
+      edge_format:
+        - { name: "from", type: "string" }
+        - { name: "to", type: "string" }
+        - { name: "weight", type: "integer", description: "Number of cross-references" }
+        - { name: "direction", type: "enum", values: ["unidirectional", "bidirectional"] }
+        - { name: "issues", type: "list[string]", description: "Diagnostic IDs (e.g., circular deps)" }
+
+    type_flows:
+      required: true
+      purpose: "Where each significant type is created, transformed, and consumed"
+      type_format:
+        - { name: "type", type: "string", description: "Type name" }
+        - { name: "created_at", type: "list[string]", description: "Where instances are created" }
+        - { name: "transformed_to", type: "list[{target_type, via}]" }
+        - { name: "consumed_by", type: "list[string]" }
+        - { name: "lifetime", type: "string", description: "Scope: request, session, static, etc." }
+
+data:
+  format: "yaml"
+  required_sections:
+    - "metadata"
+    - "summary"
+    - "entities"
+    - "flows"
+    - "boundaries"
+    - "diagnostics"
+    - "dependency_graph"
+    - "type_flows"
+
+  entity_field_names:
+    abbreviated: true
+    mapping:
+      id: "id"
+      kind: "kind"
+      visibility: "vis"
+      signature: "sig"
+      location: "loc"
+      calls: "calls"
+      called_by: "called_by"
+      annotations: "annotations"
+
+  severity_levels: ["critical", "warning", "info"]
+
+  target_sizes:
+    summary_tokens: 2000
+    full_manifest_50k_loc: "500KB"

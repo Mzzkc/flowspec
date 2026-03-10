@@ -1,0 +1,186 @@
+# Flowspec Specification Corpus — Decision Log
+# Every significant decision made during the spec interview, with rationale.
+
+---
+decision: "Tree-sitter-first, no LSP"
+date: 2026-03-10
+area: architecture
+rationale: |
+  TDF 5-way synthesis. LSP is someone else's semantic layer — complete but
+  opaque, heavy to manage (process lifecycle for 3 different language servers),
+  and different for every language. Tree-sitter + custom semantic resolution
+  gives Flowspec ownership of its analysis pipeline, uniform multi-language
+  support, and the speed profile needed for incremental analysis. No external
+  processes spawned during analysis. LSP was fully removed from the v1
+  architecture — not even as optional enrichment.
+alternatives_considered:
+  - "LSP-first with tree-sitter supplementing (original design doc)"
+  - "Tree-sitter-first with optional LSP enrichment"
+  - "Pure tree-sitter, no LSP at all (chosen)"
+
+---
+decision: "Persistent in-memory graph with disk serialization"
+date: 2026-03-10
+area: architecture
+rationale: |
+  TDF 4-way synthesis. The original "no database" constraint was about avoiding
+  external dependencies, not avoiding persistence. Single-symbol trace queries
+  and incremental analysis inherently need a queryable, persistent data
+  structure. Every successful incremental analysis tool uses this pattern —
+  in-memory index with disk serialization. The YAML manifest is an export
+  format, not the primary data structure.
+alternatives_considered:
+  - "YAML manifest as primary data (original design doc)"
+  - "External database (too heavy)"
+  - "In-memory graph with binary cache (chosen)"
+
+---
+decision: "Python, JavaScript, and Rust for v1"
+date: 2026-03-10
+area: architecture
+rationale: |
+  User explicitly requested all three for v1. Python first (Mozart is Python),
+  JavaScript for broad applicability, Rust because Flowspec is Rust and
+  enables dogfooding. Original design doc had Rust-only for phase 1.
+
+---
+decision: "Dual AGPL-3.0 + Commercial license"
+date: 2026-03-10
+area: constraints
+rationale: |
+  Matches Mozart's licensing model. Enables open-source use while supporting
+  commercial integration. All dependencies must have AGPL-compatible licenses.
+
+---
+decision: "Rust implementation language"
+date: 2026-03-10
+area: constraints
+rationale: |
+  Tree-sitter has mature Rust bindings. Cargo workspace gives library + CLI
+  split naturally. Single binary distribution. Strong serialization ecosystem
+  (serde, bincode). Performance tier appropriate for incremental analysis.
+  User confirmed after considering C/C++ (ClamAV background).
+
+---
+decision: "Failure-pattern diagnostics, not graph-theory terms"
+date: 2026-03-10
+area: diagnostics
+rationale: |
+  TDF 5-way synthesis. AI agents understand failure patterns better than graph
+  theory. "Unwired feature" is actionable. "Isolated subgraph" requires the
+  agent to figure out what it means. 13 diagnostic patterns identified,
+  organized by what went wrong in terms agents can act on.
+
+---
+decision: "Confidence-scored diagnostics, false-negative-averse"
+date: 2026-03-10
+area: diagnostics
+rationale: |
+  User stated false negatives are the worst failure. Report everything above
+  minimum confidence with confidence levels (high, moderate, low). Consumers
+  triage by confidence. Never suppress a finding to reduce false positives.
+
+---
+decision: "Summary-first manifest with abbreviated field names"
+date: 2026-03-10
+area: manifest-schema
+rationale: |
+  Agents rarely dig past what's first presented to them. Summary section
+  (~2K tokens) gives full structural overview. Abbreviated field names
+  (vis, sig, loc) save tokens. Complete manifest for 50K-line project
+  targets under 500KB.
+
+---
+decision: "stdout default output"
+date: 2026-03-10
+area: cli
+rationale: |
+  stdout is natural for AI agent consumption (capture and inject into
+  context). --output flag available for workflows that don't support
+  piping or redirects. All logs go to stderr to keep stdout pipe-safe.
+
+---
+decision: "Kill flowspec lint command"
+date: 2026-03-10
+area: cli
+rationale: |
+  Overlaps with diagnose. Layer violations and contract mismatches are
+  diagnostic patterns, not lint rules. One command (diagnose) with
+  --checks filtering is cleaner than two commands with overlapping scope.
+
+---
+decision: "89% test coverage target with adversarial testing"
+date: 2026-03-10
+area: quality
+rationale: |
+  User wants Mozart-level test discipline from the start. 89% coverage
+  minimum. Every diagnostic must have true-positive, true-negative, and
+  adversarial tests. Broken tests never deferred. Issues always filed.
+  Agents must actively try to break their own work.
+
+---
+decision: "One multi-language fixture project"
+date: 2026-03-10
+area: quality
+rationale: |
+  Single fixture with Python, JS, and Rust code. Known properties per
+  language for validation. More realistic than per-language fixtures —
+  real projects mix languages.
+
+---
+decision: "Data-oriented architecture inspired by ECS"
+date: 2026-03-10
+area: conventions
+rationale: |
+  TDF synthesis. User's ECS instinct points at the right mental model:
+  symbols as IDs in flat tables, properties as data, analyzers as functions
+  that query data. Graph is passive data store, analysis logic is separate.
+  Implemented as idiomatic Rust (not an ECS framework) — concrete types,
+  traits only at real boundaries.
+
+---
+decision: "Linux primary, loose macOS support, no Windows"
+date: 2026-03-10
+area: constraints
+rationale: |
+  User's environment is Linux (WSL2). No macOS hardware for CI testing.
+  Write portable code by default but don't spend effort on macOS-specific
+  issues. Fix macOS bugs if reported and fix is straightforward. Windows
+  explicitly not supported.
+
+---
+decision: "SARIF output format for CI integration"
+date: 2026-03-10
+area: integration
+rationale: |
+  SARIF (Static Analysis Results Interchange Format) opens deeper
+  integration with GitHub Code Scanning, VS Code, and other tools.
+  Added as output format alongside YAML, JSON, and summary.
+
+---
+decision: "Flowspec and codegraph-rust are fully independent"
+date: 2026-03-10
+area: integration
+rationale: |
+  Different tools solving different problems. Flowspec: batch structural
+  analysis. codegraph: interactive knowledge graph queries. No integration
+  path needed. Users can run both independently.
+
+---
+decision: "Async with tokio throughout"
+date: 2026-03-10
+area: constraints
+rationale: |
+  User explicitly requested async/tokio patterns. Async for I/O-bound
+  operations (file reading, cache, watch mode). Tree-sitter parsing is
+  CPU-bound — use spawn_blocking. Dependency policy: prefer mature,
+  well-maintained crates, no hard limit on count.
+
+---
+decision: "Performance targets: <7min first run, <1min incremental"
+date: 2026-03-10
+area: constraints
+rationale: |
+  For a 50K-line codebase. Under 7 minutes ideal for first run, 10
+  pushes it. Under 1 minute for incremental. Under 5 seconds for
+  single-symbol trace from cached graph.

@@ -1,5 +1,14 @@
 # Flowspec: Static Data Flow Manifests for AI-Readable Codebases
 
+> **HISTORICAL REFERENCE.** This document is the original design draft from
+> the initial conversation between Emzi and Claude. The specification corpus
+> at `.flowspec/spec/` supersedes this document. Decisions made during the
+> spec corpus interview changed several aspects of the design — notably:
+> LSP was removed entirely (tree-sitter + custom semantics only), three
+> languages target v1 (Python, JS, Rust), a persistent graph replaces the
+> write-once manifest as the primary data structure, and 13 diagnostic
+> patterns were defined. See `.flowspec/state/decisions.log` for rationale.
+
 ---
 
 ## The Problem

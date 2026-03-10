@@ -1,0 +1,177 @@
+# .flowspec/spec/quality.yaml
+# PURPOSE: What "done" looks like — testing strategy, coverage, validation, dogfooding.
+# AUDIENCE: Every agent working on Flowspec. Nothing ships without meeting these bars.
+# AUTHORITY: If quality criteria aren't met, the work isn't done. Period.
+
+content:
+  philosophy: |
+    Nothing is done until an agent actually runs the thing fully — literally
+    testing all possible cases in addition to tests. Agents must actively try
+    to break their own work. Adversarial testing from the start, not bolted
+    on later.
+
+    Untested code is unfinished code. Broken tests are never deferred. Issues
+    found during development are recorded as GitHub issues, never ignored.
+
+  testing_strategy:
+    fixture_projects: |
+      One multi-language fixture project containing Python, JavaScript, and
+      Rust code with known, verifiable properties. The fixture is the test
+      oracle — validations check that Flowspec's output contains specific
+      facts about the fixture that can only be produced by real analysis.
+
+      The fixture must have:
+      - Known entities per language (functions, classes/structs, modules)
+      - Known cross-references (calls, imports)
+      - Known dead code (defined but never called)
+      - Known boundary crossings (module boundaries, serialization points)
+      - Known diagnostic triggers for every diagnostic pattern
+      - Deliberate structural issues planted for diagnostic testing
+
+      An agent cannot fudge a validation that says "the manifest must contain
+      entity math::add with signature (i32, i32) -> i32" — it either built
+      a working analyzer or it didn't.
+
+    adversarial_testing: |
+      Every feature must be tested adversarially. Don't just test the happy
+      path — actively try to break it:
+      - Malformed input (broken syntax, partial files, empty files)
+      - Edge cases (zero entities, single entity, circular everything)
+      - Large inputs (stress test with realistic project sizes)
+      - Concurrent access (multiple analyses on the same cache)
+      - Cache corruption (tampered cache files, version mismatches)
+      - Mixed languages in one project
+      - Deeply nested module hierarchies
+      - Pathological dependency graphs (star, chain, complete graph)
+
+    test_types:
+      integration: |
+        Primary test type. Test the full pipeline: source files -> analysis
+        -> manifest output. Validate against the fixture project's known
+        properties. Every diagnostic pattern must have an integration test
+        that proves it detects the planted issue in the fixture.
+      unit: |
+        Secondary. Test individual components (parser adapters, graph
+        operations, semantic resolution) in isolation. Use inline
+        #[cfg(test)] mod tests.
+      snapshot: |
+        Manifest output for the fixture project is snapshot-tested.
+        A known-good manifest is committed. Tests compare current output
+        against the snapshot. Snapshot updates require review.
+      adversarial: |
+        Dedicated tests that try to break things. Malformed input,
+        edge cases, stress tests. These are not afterthoughts — they
+        are first-class test citizens written alongside features.
+      dogfood: |
+        Flowspec analyzes its own codebase. The output must be valid,
+        the diagnostics must be reasonable, and any issues found are
+        recorded as GitHub issues. This runs in CI when possible.
+
+  coverage:
+    target: "89%"
+    policy: |
+      89% line coverage minimum. Every diagnostic pattern must have:
+      1. A test that proves it detects a real issue (true positive)
+      2. A test that proves it doesn't fire on clean code (true negative)
+      3. An adversarial test that tries to trigger a false positive
+
+      Coverage is measured by cargo tarpaulin or similar. Untested code
+      is unfinished code.
+
+  broken_test_policy: |
+    Broken tests are never deferred, even if unrelated to current work.
+    If an agent encounters a broken test:
+    1. If the fix is simple and obvious — fix it immediately
+    2. If the fix is complex — collect diagnostic info and create a
+       GitHub issue with reproduction steps, expected vs actual, and
+       any relevant context
+    3. Never skip, ignore, or mark a broken test as #[ignore] without
+       a GitHub issue tracking it
+
+  issue_reporting_policy: |
+    Issues found during development — bugs, unexpected behavior,
+    diagnostic false positives/negatives, performance regressions —
+    are recorded as GitHub issues. Never ignored. Never deferred
+    without a tracking issue. The issue must include:
+    - What was observed
+    - What was expected
+    - Steps to reproduce
+    - Relevant context (Flowspec version, target project, OS)
+
+  dogfooding: |
+    Flowspec analyzes its own codebase during development. When this
+    becomes possible (after the core analysis pipeline works):
+    1. Run flowspec analyze on the Flowspec source as a CI check
+    2. All diagnostics produced must be triaged:
+       - True positives: fix them or file a GitHub issue
+       - False positives: file a GitHub issue to improve the diagnostic
+       - Neither should be ignored
+    3. The dogfood run validates that Flowspec works on a real Rust
+       project, not just synthetic fixtures
+
+  validation_hierarchy: |
+    From strongest to weakest validation:
+    1. Functional checks against fixture — manifest contains known facts
+       that can only come from real analysis (unfudgeable)
+    2. Dogfood — Flowspec analyzes itself successfully (proves real-world use)
+    3. Adversarial tests — tool handles malformed/edge-case input correctly
+    4. cargo test — all tests pass (necessary but insufficient)
+    5. cargo clippy + cargo fmt — code quality (secondary)
+    6. Coverage percentage — quantitative bar (tertiary)
+
+  definition_of_done:
+    per_feature: |
+      A feature is done when:
+      - It works correctly on the fixture project (integration test passes)
+      - It handles adversarial input without crashing (adversarial tests pass)
+      - It has unit tests for non-trivial internal logic
+      - It has /// documentation on all public functions
+      - cargo clippy and cargo fmt are clean
+      - An agent has actually run it end-to-end and verified the output
+      - Any issues found during development are filed as GitHub issues
+    per_diagnostic: |
+      A diagnostic pattern is done when:
+      - It detects the planted issue in the fixture (true positive test)
+      - It doesn't fire on clean code (true negative test)
+      - It handles edge cases (adversarial test)
+      - It produces accurate evidence and actionable suggestions
+      - Its confidence level is calibrated (tested against known examples)
+      - False positive rate is documented
+    per_release: |
+      A release is done when:
+      - All tests pass (cargo test --all)
+      - Coverage >= 89%
+      - Clippy and fmt clean
+      - Dogfood run on Flowspec's own codebase passes
+      - Fixture project analysis produces correct manifest
+      - All known issues are either fixed or tracked in GitHub
+      - README has accurate usage documentation
+      - CHANGELOG documents what changed
+
+data:
+  coverage_target: 89
+  coverage_tool: "cargo-tarpaulin"
+
+  test_types:
+    - "integration"
+    - "unit"
+    - "snapshot"
+    - "adversarial"
+    - "dogfood"
+
+  fixture_project:
+    type: "multi-language"
+    languages: ["python", "javascript", "rust"]
+    purpose: "test-oracle-with-known-properties"
+
+  broken_test_policy: "never-defer-always-fix-or-issue"
+  issue_reporting: "always-file-never-ignore"
+  dogfooding: "ci-check-when-possible"
+
+  validation_strength_order:
+    - "functional-fixture-checks"
+    - "dogfood-self-analysis"
+    - "adversarial-tests"
+    - "cargo-test"
+    - "clippy-fmt"
+    - "coverage-percentage"
