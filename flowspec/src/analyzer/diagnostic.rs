@@ -318,8 +318,14 @@ mod tests {
 
     #[test]
     fn test_severity_from_str_checked() {
-        assert_eq!(Severity::from_str_checked("critical"), Some(Severity::Critical));
-        assert_eq!(Severity::from_str_checked("warning"), Some(Severity::Warning));
+        assert_eq!(
+            Severity::from_str_checked("critical"),
+            Some(Severity::Critical)
+        );
+        assert_eq!(
+            Severity::from_str_checked("warning"),
+            Some(Severity::Warning)
+        );
         assert_eq!(Severity::from_str_checked("info"), Some(Severity::Info));
         assert_eq!(Severity::from_str_checked("unknown"), None);
     }
@@ -327,7 +333,10 @@ mod tests {
     #[test]
     fn test_confidence_from_str_checked() {
         assert_eq!(Confidence::from_str_checked("high"), Some(Confidence::High));
-        assert_eq!(Confidence::from_str_checked("moderate"), Some(Confidence::Moderate));
+        assert_eq!(
+            Confidence::from_str_checked("moderate"),
+            Some(Confidence::Moderate)
+        );
         assert_eq!(Confidence::from_str_checked("low"), Some(Confidence::Low));
         assert_eq!(Confidence::from_str_checked("unknown"), None);
     }
