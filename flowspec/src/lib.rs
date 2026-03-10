@@ -22,9 +22,18 @@ pub mod graph;
 pub mod manifest;
 pub mod parser;
 
+#[cfg(test)]
+pub mod test_utils;
+
 // Re-export key public types
+pub use analyzer::diagnostic::{
+    Confidence as AnalyzerConfidence, Diagnostic, DiagnosticPattern, Evidence,
+    Severity as AnalyzerSeverity,
+};
+pub use analyzer::patterns::{run_all_patterns, run_patterns, PatternFilter};
 pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
+pub use graph::Graph;
 pub use manifest::types::*;
 pub use manifest::{OutputFormatter, YamlFormatter};
 
