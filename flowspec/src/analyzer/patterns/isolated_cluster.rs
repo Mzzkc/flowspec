@@ -44,6 +44,17 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
             continue;
         }
 
+        // Skip if the component contains a known entry point
+        let has_entry_point = component.iter().any(|&id| {
+            graph
+                .get_symbol(id)
+                .map(|s| is_entry_point(&s.name))
+                .unwrap_or(false)
+        });
+        if has_entry_point {
+            continue;
+        }
+
         // Check if the entire component is in a test file
         let all_test_file = component.iter().all(|&id| {
             graph
@@ -158,6 +169,11 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+/// Check if a symbol name indicates an entry point.
+fn is_entry_point(name: &str) -> bool {
+    name == "main" || name == "__main__" || name == "if_name_main"
 }
 
 /// Check if a symbol is in a test or example file.

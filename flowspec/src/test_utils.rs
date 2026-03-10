@@ -44,6 +44,19 @@ pub fn make_import(name: &str, file: &str, line: u32) -> Symbol {
     sym
 }
 
+/// Create an entry point Symbol (annotated with "entry_point").
+pub fn make_entry_point(
+    name: &str,
+    kind: SymbolKind,
+    vis: Visibility,
+    file: &str,
+    line: u32,
+) -> Symbol {
+    let mut sym = make_symbol(name, kind, vis, file, line);
+    sym.annotations.push("entry_point".to_string());
+    sym
+}
+
 /// Add a reference edge between two symbols in the graph.
 pub fn add_ref(graph: &mut Graph, from: SymbolId, to: SymbolId, kind: ReferenceKind, file: &str) {
     graph.add_reference(Reference {
@@ -93,7 +106,7 @@ pub fn build_dead_code_graph() -> Graph {
         f,
         18,
     ));
-    let s4 = g.add_symbol(make_symbol(
+    let s4 = g.add_symbol(make_entry_point(
         "main_handler",
         SymbolKind::Function,
         Visibility::Public,
@@ -218,7 +231,7 @@ pub fn build_clean_code_graph() -> Graph {
         f,
         11,
     ));
-    let f3 = g.add_symbol(make_symbol(
+    let f3 = g.add_symbol(make_entry_point(
         "main",
         SymbolKind::Function,
         Visibility::Public,
@@ -266,7 +279,7 @@ pub fn build_test_module_graph() -> Graph {
         prod,
         18,
     ));
-    let s4 = g.add_symbol(make_symbol(
+    let s4 = g.add_symbol(make_entry_point(
         "main_handler",
         SymbolKind::Function,
         Visibility::Public,
@@ -489,7 +502,7 @@ pub fn build_all_fixtures_graph() -> Graph {
         dc,
         18,
     ));
-    let s4 = g.add_symbol(make_symbol(
+    let s4 = g.add_symbol(make_entry_point(
         "main_handler",
         SymbolKind::Function,
         Visibility::Public,
@@ -582,7 +595,7 @@ pub fn build_all_fixtures_graph() -> Graph {
         cc,
         11,
     ));
-    let cf3 = g.add_symbol(make_symbol(
+    let cf3 = g.add_symbol(make_entry_point(
         "main",
         SymbolKind::Function,
         Visibility::Public,

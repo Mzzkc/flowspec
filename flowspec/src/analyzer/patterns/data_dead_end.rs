@@ -97,6 +97,11 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
 
 /// Check if a symbol should be excluded from dead-end detection.
 fn is_excluded(symbol: &crate::parser::ir::Symbol) -> bool {
+    // Skip entry points (explicitly marked as called from outside analysis scope)
+    if symbol.annotations.contains(&"entry_point".to_string()) {
+        return true;
+    }
+
     // Skip import symbols (handled by phantom_dependency)
     if symbol.annotations.contains(&"import".to_string()) {
         return true;
@@ -112,8 +117,13 @@ fn is_excluded(symbol: &crate::parser::ir::Symbol) -> bool {
         return true;
     }
 
-    // Skip entry points
-    if symbol.name == "main" || symbol.name == "__main__" || symbol.name == "if_name_main" {
+    // Skip entry points (main, main_handler, __main__, etc.)
+    if symbol.name == "main"
+        || symbol.name == "__main__"
+        || symbol.name == "if_name_main"
+        || symbol.name.starts_with("main_")
+        || symbol.name.ends_with("_main")
+    {
         return true;
     }
 
