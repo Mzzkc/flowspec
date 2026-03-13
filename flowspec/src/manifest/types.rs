@@ -128,6 +128,22 @@ pub struct EntityEntry {
     pub annotations: Vec<String>,
 }
 
+/// A single piece of evidence supporting a diagnostic finding.
+///
+/// Mirrors `analyzer::diagnostic::Evidence` in the manifest namespace.
+/// Uses `skip_serializing_if` to keep YAML clean when optional fields are absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceEntry {
+    /// What Flowspec observed.
+    pub observation: String,
+    /// Source location relevant to this observation (e.g., "src/utils.py:42").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Additional context about the observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
 /// A single diagnostic entry with all required fields including confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticEntry {
@@ -143,8 +159,8 @@ pub struct DiagnosticEntry {
     pub entity: String,
     /// Human/agent-readable description of the issue.
     pub message: String,
-    /// Specific proof — what Flowspec observed.
-    pub evidence: String,
+    /// Structured evidence — what Flowspec observed to support this diagnostic.
+    pub evidence: Vec<EvidenceEntry>,
     /// Actionable fix suggestion.
     pub suggestion: String,
     /// Primary file:line location.
@@ -377,7 +393,11 @@ impl DiagnosticEntry {
             confidence: "high".to_string(),
             entity: "module::dead_function".to_string(),
             message: "Function dead_function is never called".to_string(),
-            evidence: "Function `dead_function` at `dead_code.py:8` has 0 callers across 2 analyzed files".to_string(),
+            evidence: vec![EvidenceEntry {
+                observation: "Function `dead_function` at `dead_code.py:8` has 0 callers across 2 analyzed files".to_string(),
+                location: Some("dead_code.py:8".to_string()),
+                context: Some("function is public but never called".to_string()),
+            }],
             suggestion: "Remove the function or add a caller. If intentionally unused, add a # flowspec:ignore comment.".to_string(),
             loc: "dead_code.py:8".to_string(),
         }
@@ -392,9 +412,154 @@ impl DiagnosticEntry {
             confidence: "high".to_string(),
             entity: "dead_code::dead_function".to_string(),
             message: "Function dead_function is never called".to_string(),
-            evidence: "Function `dead_function` at `dead_code.py:8` has 0 callers across 2 analyzed files".to_string(),
+            evidence: vec![EvidenceEntry {
+                observation: "Function `dead_function` at `dead_code.py:8` has 0 callers across 2 analyzed files".to_string(),
+                location: Some("dead_code.py:8".to_string()),
+                context: None,
+            }],
             suggestion: "Remove the function or add a caller. If intentionally unused, add a # flowspec:ignore comment.".to_string(),
             loc: "dead_code.py:8".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evidence_entry_construction() {
+        let entry = EvidenceEntry {
+            observation: "0 callers in 15 analyzed files".to_string(),
+            location: Some("src/utils.py:42".to_string()),
+            context: Some("function is private".to_string()),
+        };
+        assert!(!entry.observation.is_empty());
+        assert!(entry.location.is_some());
+        assert!(entry.context.is_some());
+    }
+
+    #[test]
+    fn test_diagnostic_entry_structured_evidence_yaml() {
+        let entry = DiagnosticEntry {
+            id: "D001".to_string(),
+            pattern: "data_dead_end".to_string(),
+            severity: "warning".to_string(),
+            confidence: "high".to_string(),
+            entity: "module::dead_fn".to_string(),
+            message: "Function is never called".to_string(),
+            evidence: vec![
+                EvidenceEntry {
+                    observation: "0 callers in 5 files".to_string(),
+                    location: Some("mod.py:10".to_string()),
+                    context: Some("private function".to_string()),
+                },
+                EvidenceEntry {
+                    observation: "defined but not exported".to_string(),
+                    location: None,
+                    context: None,
+                },
+            ],
+            suggestion: "Remove or add a caller".to_string(),
+            loc: "mod.py:10".to_string(),
+        };
+
+        let yaml = serde_yaml::to_string(&entry).expect("must serialize");
+
+        // Evidence must be a YAML list, not a flat string
+        assert!(
+            yaml.contains("- observation:"),
+            "Evidence must serialize as list of objects, got:\n{}",
+            yaml
+        );
+        assert!(yaml.contains("0 callers in 5 files"));
+        assert!(yaml.contains("defined but not exported"));
+    }
+
+    #[test]
+    fn test_evidence_entry_none_fields_clean_yaml() {
+        let entry = EvidenceEntry {
+            observation: "test observation".to_string(),
+            location: None,
+            context: None,
+        };
+
+        let yaml = serde_yaml::to_string(&entry).expect("must serialize");
+        assert!(
+            !yaml.contains("location:"),
+            "None location must be omitted, got:\n{}",
+            yaml
+        );
+        assert!(
+            !yaml.contains("context:"),
+            "None context must be omitted, got:\n{}",
+            yaml
+        );
+        assert!(yaml.contains("observation:"));
+    }
+
+    #[test]
+    fn test_evidence_roundtrip_yaml() {
+        let original = vec![
+            EvidenceEntry {
+                observation: "found 0 callers".to_string(),
+                location: Some("main.py:5".to_string()),
+                context: Some("function is public".to_string()),
+            },
+            EvidenceEntry {
+                observation: "3 internal refs".to_string(),
+                location: None,
+                context: None,
+            },
+        ];
+
+        let yaml = serde_yaml::to_string(&original).expect("serialize");
+        let deserialized: Vec<EvidenceEntry> = serde_yaml::from_str(&yaml).expect("deserialize");
+
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0].observation, "found 0 callers");
+        assert_eq!(deserialized[0].location, Some("main.py:5".to_string()));
+        assert_eq!(deserialized[1].context, None);
+    }
+
+    #[test]
+    fn test_sample_critical_uses_structured_evidence() {
+        let entry = DiagnosticEntry::sample_critical();
+        assert!(
+            !entry.evidence.is_empty(),
+            "sample_critical must have at least one evidence entry"
+        );
+        assert!(!entry.evidence[0].observation.is_empty());
+    }
+
+    #[test]
+    fn test_sample_warning_uses_structured_evidence() {
+        let entry = DiagnosticEntry::sample_warning();
+        assert!(
+            !entry.evidence.is_empty(),
+            "sample_warning must have at least one evidence entry"
+        );
+        assert!(!entry.evidence[0].observation.is_empty());
+    }
+
+    #[test]
+    fn test_full_manifest_sample_evidence_in_yaml() {
+        let manifest = Manifest::sample_full();
+        let yaml = serde_yaml::to_string(&manifest).expect("serialize manifest");
+
+        // Diagnostics in the YAML must have list-style evidence
+        assert!(
+            yaml.contains("- observation:"),
+            "Manifest YAML must have structured evidence entries"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_entry_evidence_is_not_string() {
+        // Compile-time check: evidence is Vec<EvidenceEntry>, not String
+        let entry = DiagnosticEntry::sample_critical();
+        let _evidence_vec: &Vec<EvidenceEntry> = &entry.evidence;
+        let _first: &EvidenceEntry = &entry.evidence[0];
+        let _obs: &str = &_first.observation;
     }
 }

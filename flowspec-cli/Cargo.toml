@@ -6,7 +6,7 @@ license = "AGPL-3.0-or-later"
 description = "CLI for Flowspec static code analyzer"
 
 [[bin]]
-name = "flowspec-cli"
+name = "flowspec"
 path = "src/main.rs"
 
 [dependencies]

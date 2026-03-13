@@ -10,6 +10,10 @@
 //! Design follows the ECS-inspired pattern: symbols are IDs, properties are
 //! data alongside, and the graph is a passive data store that analyzers query.
 
+mod populate;
+
+pub use populate::populate_graph;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 

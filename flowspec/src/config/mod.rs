@@ -56,3 +56,70 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_load_no_config_file_returns_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config::load(tmp.path(), None).unwrap();
+
+        assert!(
+            config.config_path.is_none(),
+            "No config file → config_path should be None"
+        );
+        assert!(
+            config.languages.is_empty(),
+            "Default config should have empty languages"
+        );
+    }
+
+    #[test]
+    fn test_config_load_nonexistent_explicit_path_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad_path = tmp.path().join("nonexistent.yaml");
+
+        let result = Config::load(tmp.path(), Some(&bad_path));
+        assert!(
+            result.is_err(),
+            "Loading nonexistent explicit config must fail"
+        );
+
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not found"),
+            "Error message must mention 'not found', got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_config_load_with_existing_config_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flowspec_dir = tmp.path().join(".flowspec");
+        std::fs::create_dir_all(&flowspec_dir).unwrap();
+        std::fs::write(flowspec_dir.join("config.yaml"), "languages: [python]").unwrap();
+
+        let config = Config::load(tmp.path(), None).unwrap();
+        assert!(
+            config.config_path.is_some(),
+            "Existing .flowspec/config.yaml must be found"
+        );
+    }
+
+    #[test]
+    fn test_config_load_explicit_path_overrides_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom_config = tmp.path().join("custom.yaml");
+        std::fs::write(&custom_config, "languages: [rust]").unwrap();
+
+        let config = Config::load(tmp.path(), Some(&custom_config)).unwrap();
+        assert_eq!(
+            config.config_path,
+            Some(custom_config),
+            "Explicit path must be used over default"
+        );
+    }
+}

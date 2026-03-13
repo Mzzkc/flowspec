@@ -556,13 +556,14 @@ fn analyze_python_files(
                     confidence: "high".to_string(),
                     entity: id.clone(),
                     message: format!("Function {} is never called", name),
-                    evidence: format!(
-                        "Function `{}` at `{}:{}` has 0 callers across {} analyzed files",
-                        name,
-                        file_rel,
-                        line,
-                        py_files.len()
-                    ),
+                    evidence: vec![EvidenceEntry {
+                        observation: format!(
+                            "Function `{}` at `{}:{}` has 0 callers across {} analyzed files",
+                            name, file_rel, line, py_files.len()
+                        ),
+                        location: Some(format!("{}:{}", file_rel, line)),
+                        context: None,
+                    }],
                     suggestion: "Remove the function or add a caller. If intentionally unused, mark as entry point.".to_string(),
                     loc: format!("{}:{}", file_rel, line),
                 });
@@ -590,11 +591,14 @@ fn analyze_python_files(
                 confidence: "high".to_string(),
                 entity: import_name.clone(),
                 message: format!("Import '{}' is never used", import_name),
-                evidence: format!(
-                    "Import `{}` at `{}:{}` — imported symbol has 0 references in {} analyzed files",
-                    import_name, file_rel, line,
-                    py_files.len()
-                ),
+                evidence: vec![EvidenceEntry {
+                    observation: format!(
+                        "Import `{}` at `{}:{}` — imported symbol has 0 references in {} analyzed files",
+                        import_name, file_rel, line, py_files.len()
+                    ),
+                    location: Some(format!("{}:{}", file_rel, line)),
+                    context: None,
+                }],
                 suggestion: "Remove the unused import to reduce phantom dependencies.".to_string(),
                 loc: format!("{}:{}", file_rel, line),
             });
