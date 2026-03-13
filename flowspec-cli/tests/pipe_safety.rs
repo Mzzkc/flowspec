@@ -25,7 +25,7 @@ if __name__ == "__main__":
 #[test]
 fn stdout_contains_only_yaml() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -57,7 +57,7 @@ fn stdout_contains_only_yaml() {
 #[test]
 fn stderr_contains_logs_when_verbose() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap(), "--verbose"])
         .output()
@@ -73,7 +73,7 @@ fn stderr_contains_logs_when_verbose() {
 #[test]
 fn stderr_empty_when_quiet_and_no_errors() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap(), "--quiet"])
         .output()
@@ -93,7 +93,7 @@ fn output_flag_writes_to_file_not_stdout() {
     let output_file = tempfile::NamedTempFile::new().unwrap();
     let output_path = output_file.path().to_str().unwrap();
 
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args([
             "analyze",
@@ -125,7 +125,7 @@ fn output_flag_writes_to_file_not_stdout() {
 fn output_file_matches_stdout_content() {
     let project = create_clean_project();
 
-    let mut cmd1 = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd1 = Command::cargo_bin("flowspec").unwrap();
     let stdout_output = cmd1
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -134,7 +134,7 @@ fn output_file_matches_stdout_content() {
 
     let output_file = tempfile::NamedTempFile::new().unwrap();
     let output_path = output_file.path().to_str().unwrap();
-    let mut cmd2 = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd2 = Command::cargo_bin("flowspec").unwrap();
     cmd2.args([
         "analyze",
         project.path().to_str().unwrap(),

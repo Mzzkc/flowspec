@@ -51,7 +51,7 @@ def main():
 #[test]
 fn manifest_output_is_valid_yaml() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -70,7 +70,7 @@ fn manifest_output_is_valid_yaml() {
 #[test]
 fn manifest_has_all_eight_required_sections() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -105,7 +105,7 @@ fn manifest_has_all_eight_required_sections() {
 #[test]
 fn manifest_sections_present_even_when_empty() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -132,7 +132,7 @@ fn manifest_sections_present_even_when_empty() {
 #[test]
 fn metadata_has_required_fields() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -167,7 +167,7 @@ fn metadata_has_required_fields() {
 #[test]
 fn metadata_analyzed_at_is_iso8601() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -189,7 +189,7 @@ fn metadata_analyzed_at_is_iso8601() {
 #[test]
 fn entity_uses_abbreviated_field_names() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -227,7 +227,7 @@ fn entity_uses_abbreviated_field_names() {
 #[test]
 fn entity_kind_uses_abbreviated_values() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -266,7 +266,7 @@ fn entity_kind_uses_abbreviated_values() {
 #[test]
 fn entity_loc_format_is_file_colon_line() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -297,7 +297,7 @@ fn entity_loc_format_is_file_colon_line() {
 #[test]
 fn diagnostic_entries_include_confidence() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -330,7 +330,7 @@ fn diagnostic_entries_include_confidence() {
 #[test]
 fn diagnostic_entries_have_all_required_fields() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -367,7 +367,7 @@ fn diagnostic_entries_have_all_required_fields() {
 #[test]
 fn diagnostic_evidence_is_specific_not_vague() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -396,7 +396,7 @@ fn diagnostic_evidence_is_specific_not_vague() {
 #[test]
 fn diagnostic_suggestion_is_actionable() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -421,7 +421,7 @@ fn diagnostic_suggestion_is_actionable() {
 #[test]
 fn summary_diagnostic_summary_has_severity_counts() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -467,7 +467,7 @@ fn manifest_does_not_exceed_10x_source_size() {
         .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -486,7 +486,7 @@ fn manifest_does_not_exceed_10x_source_size() {
 #[test]
 fn summary_section_fits_2k_token_budget() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()

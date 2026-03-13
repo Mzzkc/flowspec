@@ -3,35 +3,35 @@ use predicates::prelude::*;
 
 #[test]
 fn analyze_command_accepted() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let assert = cmd.arg("analyze").arg(".").assert();
     assert.stderr(predicate::str::contains("Usage").not());
 }
 
 #[test]
 fn diagnose_command_accepted() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let assert = cmd.arg("diagnose").arg(".").assert();
     assert.stderr(predicate::str::contains("Usage").not());
 }
 
 #[test]
 fn analyze_defaults_path_to_current_dir() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let assert = cmd.arg("analyze").assert();
     assert.stderr(predicate::str::contains("required").not());
 }
 
 #[test]
 fn diagnose_defaults_path_to_current_dir() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let assert = cmd.arg("diagnose").assert();
     assert.stderr(predicate::str::contains("required").not());
 }
 
 #[test]
 fn version_flag_prints_version() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.arg("--version")
         .assert()
         .success()
@@ -40,7 +40,7 @@ fn version_flag_prints_version() {
 
 #[test]
 fn help_flag_prints_help() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.arg("--help")
         .assert()
         .success()
@@ -50,7 +50,7 @@ fn help_flag_prints_help() {
 
 #[test]
 fn analyze_help_shows_command_flags() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", "--help"])
         .assert()
         .success()
@@ -61,7 +61,7 @@ fn analyze_help_shows_command_flags() {
 
 #[test]
 fn diagnose_help_shows_command_flags() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", "--help"])
         .assert()
         .success()
@@ -72,7 +72,7 @@ fn diagnose_help_shows_command_flags() {
 
 #[test]
 fn format_flag_yaml_accepted() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "yaml"])
         .assert()
         .stderr(predicate::str::contains("Usage").not());
@@ -80,7 +80,7 @@ fn format_flag_yaml_accepted() {
 
 #[test]
 fn output_flag_sets_file_path() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--output", "/tmp/flowspec-test-output.yaml"])
         .assert()
         .stderr(predicate::str::contains("Usage").not());
@@ -90,7 +90,7 @@ fn output_flag_sets_file_path() {
 
 #[test]
 fn verbose_and_quiet_conflict() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--verbose", "--quiet"])
         .assert()
         .failure()
@@ -99,7 +99,7 @@ fn verbose_and_quiet_conflict() {
 
 #[test]
 fn invalid_format_enum_rejected() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "xml"])
         .assert()
         .failure()
@@ -108,7 +108,7 @@ fn invalid_format_enum_rejected() {
 
 #[test]
 fn invalid_severity_rejected() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", ".", "--severity", "extreme"])
         .assert()
         .failure()
@@ -117,7 +117,7 @@ fn invalid_severity_rejected() {
 
 #[test]
 fn invalid_confidence_rejected() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", ".", "--confidence", "very-high"])
         .assert()
         .failure()
@@ -126,7 +126,7 @@ fn invalid_confidence_rejected() {
 
 #[test]
 fn unknown_command_shows_error_and_suggestions() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.arg("unknown")
         .assert()
         .failure()
@@ -135,7 +135,7 @@ fn unknown_command_shows_error_and_suggestions() {
 
 #[test]
 fn no_subcommand_shows_help_or_error() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.assert().failure().stderr(
         predicate::str::contains("analyze")
             .or(predicate::str::contains("Usage"))
@@ -147,14 +147,14 @@ fn no_subcommand_shows_help_or_error() {
 
 #[test]
 fn empty_path_argument_handled() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let assert = cmd.args(["analyze", ""]).assert();
     assert.code(1);
 }
 
 #[test]
 fn nonexistent_path_gives_error_with_path() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", "/nonexistent/path/to/project"])
         .assert()
         .code(1)
@@ -163,7 +163,7 @@ fn nonexistent_path_gives_error_with_path() {
 
 #[test]
 fn diagnose_empty_checks_flag_handled() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", ".", "--checks", ""])
         .assert()
         .stderr(predicate::str::contains("panic").not());
@@ -171,7 +171,7 @@ fn diagnose_empty_checks_flag_handled() {
 
 #[test]
 fn diagnose_invalid_pattern_name_in_checks() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", ".", "--checks", "nonexistent-pattern"])
         .assert()
         .code(1)
@@ -180,7 +180,7 @@ fn diagnose_invalid_pattern_name_in_checks() {
 
 #[test]
 fn language_flag_with_unsupported_language() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--language", "haskell"])
         .assert()
         .code(1)
@@ -189,7 +189,7 @@ fn language_flag_with_unsupported_language() {
 
 #[test]
 fn unimplemented_format_gives_clear_error() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "json"])
         .assert()
         .code(1)
@@ -201,7 +201,7 @@ fn unimplemented_format_gives_clear_error() {
 
 #[test]
 fn unimplemented_format_sarif_gives_clear_error() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "sarif"])
         .assert()
         .code(1)
@@ -214,7 +214,7 @@ fn unimplemented_format_sarif_gives_clear_error() {
 #[test]
 fn deferred_commands_give_not_implemented_error() {
     for cmd_name in &["trace", "diff", "init", "watch"] {
-        let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+        let mut cmd = Command::cargo_bin("flowspec").unwrap();
         let assert = if *cmd_name == "diff" {
             // diff requires two path arguments
             cmd.args([cmd_name, "/tmp/a", "/tmp/b"]).assert()

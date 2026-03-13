@@ -28,7 +28,7 @@ def main():
 #[test]
 fn diagnose_outputs_diagnostics_only_not_full_manifest() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["diagnose", project.path().to_str().unwrap()])
         .output()
@@ -55,7 +55,7 @@ fn diagnose_outputs_diagnostics_only_not_full_manifest() {
 fn diagnose_severity_filter_excludes_lower_severity() {
     let project = create_project_with_issues();
 
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args([
             "diagnose",
@@ -86,7 +86,7 @@ fn diagnose_severity_filter_excludes_lower_severity() {
 fn diagnose_confidence_filter_excludes_lower_confidence() {
     let project = create_project_with_issues();
 
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args([
             "diagnose",
@@ -117,7 +117,7 @@ fn diagnose_confidence_filter_excludes_lower_confidence() {
 fn diagnose_checks_filter_limits_to_named_patterns() {
     let project = create_project_with_issues();
 
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args([
             "diagnose",

@@ -2,7 +2,7 @@ use assert_cmd::Command;
 
 #[test]
 fn io_error_includes_file_path() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", "/tmp/flowspec-nonexistent-project-dir-12345"])
         .output()
@@ -18,7 +18,7 @@ fn io_error_includes_file_path() {
 
 #[test]
 fn error_messages_include_fix_suggestion() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", "/tmp/flowspec-nonexistent-project-dir-12345"])
         .output()
@@ -40,7 +40,7 @@ fn error_messages_include_fix_suggestion() {
 
 #[test]
 fn config_error_names_the_config_file() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args([
             "analyze",
@@ -61,7 +61,7 @@ fn config_error_names_the_config_file() {
 
 #[test]
 fn error_messages_never_contain_rust_panic_traces() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd.args(["analyze", "/dev/null"]).output().unwrap();
 
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -79,7 +79,7 @@ fn error_messages_never_contain_rust_panic_traces() {
 
 #[test]
 fn error_messages_never_contain_rust_debug_output() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", "/tmp/flowspec-nonexistent-project-dir-12345"])
         .output()

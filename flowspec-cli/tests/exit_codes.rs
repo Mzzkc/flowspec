@@ -48,7 +48,7 @@ def main():
 #[test]
 fn exit_0_on_clean_project() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", project.path().to_str().unwrap()])
         .assert()
         .code(0);
@@ -60,7 +60,7 @@ fn exit_2_on_project_with_critical_diagnostics() {
     // So analyze should return exit 0 (success, no critical diagnostics)
     // But the project still has findings — diagnose would return exit 2
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     // analyze exits 2 only for critical, ours are warnings
     // Use diagnose to check for findings
     cmd.args(["diagnose", project.path().to_str().unwrap()])
@@ -70,7 +70,7 @@ fn exit_2_on_project_with_critical_diagnostics() {
 
 #[test]
 fn exit_1_on_nonexistent_path() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", "/tmp/flowspec-no-such-project-ever"])
         .assert()
         .code(1);
@@ -79,7 +79,7 @@ fn exit_1_on_nonexistent_path() {
 #[test]
 fn exit_1_on_unimplemented_format() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args([
         "analyze",
         project.path().to_str().unwrap(),
@@ -93,7 +93,7 @@ fn exit_1_on_unimplemented_format() {
 #[test]
 fn diagnose_exit_0_when_no_findings_above_threshold() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args([
         "diagnose",
         project.path().to_str().unwrap(),
@@ -107,7 +107,7 @@ fn diagnose_exit_0_when_no_findings_above_threshold() {
 #[test]
 fn diagnose_exit_2_when_findings_above_threshold() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args([
         "diagnose",
         project.path().to_str().unwrap(),
@@ -120,7 +120,7 @@ fn diagnose_exit_2_when_findings_above_threshold() {
 
 #[test]
 fn diagnose_exit_1_on_analysis_failure() {
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", "/tmp/flowspec-no-such-project-ever"])
         .assert()
         .code(1);
@@ -129,7 +129,7 @@ fn diagnose_exit_1_on_analysis_failure() {
 #[test]
 fn diagnose_confidence_filter_affects_exit_code() {
     let project = create_project_with_issues();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args([
             "diagnose",
@@ -150,7 +150,7 @@ fn diagnose_confidence_filter_affects_exit_code() {
 #[test]
 fn exit_codes_are_only_0_1_2() {
     let project = create_clean_project();
-    let mut cmd = Command::cargo_bin("flowspec-cli").unwrap();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
     let output = cmd
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
