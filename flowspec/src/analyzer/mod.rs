@@ -7,5 +7,7 @@
 //! cycle-1 patterns are: `isolated_cluster`, `data_dead_end`, and
 //! `phantom_dependency`.
 
+pub mod conversion;
 pub mod diagnostic;
+pub mod extraction;
 pub mod patterns;

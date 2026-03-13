@@ -114,6 +114,16 @@ pub enum Confidence {
     High,
 }
 
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Info => write!(f, "info"),
+            Severity::Warning => write!(f, "warning"),
+            Severity::Critical => write!(f, "critical"),
+        }
+    }
+}
+
 impl Severity {
     /// Parse a severity string (for CLI filter compatibility).
     pub fn from_str_checked(s: &str) -> Option<Self> {
@@ -122,6 +132,16 @@ impl Severity {
             "warning" => Some(Severity::Warning),
             "info" => Some(Severity::Info),
             _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Confidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Confidence::Low => write!(f, "low"),
+            Confidence::Moderate => write!(f, "moderate"),
+            Confidence::High => write!(f, "high"),
         }
     }
 }
