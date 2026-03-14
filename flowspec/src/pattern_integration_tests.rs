@@ -24,14 +24,17 @@ use crate::analyzer::patterns;
 use crate::analyzer::patterns::circular_dependency;
 use crate::analyzer::patterns::data_dead_end;
 use crate::analyzer::patterns::isolated_cluster;
+use crate::analyzer::patterns::layer_violation;
 use crate::analyzer::patterns::missing_reexport;
 use crate::analyzer::patterns::orphaned_implementation;
 use crate::analyzer::patterns::phantom_dependency;
 use crate::config::Config;
 use crate::graph::populate_graph;
 use crate::graph::Graph;
+use crate::parser::ir::ReferenceKind;
 use crate::parser::python::PythonAdapter;
 use crate::parser::LanguageAdapter;
+use crate::test_utils::{add_ref, make_symbol};
 use crate::{analyze, Confidence, DiagnosticPattern, Severity};
 
 /// Parse a fixture file through the real pipeline and return the populated graph.
@@ -1391,5 +1394,336 @@ fn test_entity_id_no_extension_no_panic() {
     assert!(
         hello.is_some(),
         "Must extract function even from extensionless file"
+    );
+}
+
+// =========================================================================
+// Category 15: layer_violation Fixture Integration Tests (Cycle 6)
+// =========================================================================
+
+/// Resolve fixture path for layered Python fixtures.
+fn layer_fixture_path(relative: &str) -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python")
+        .join(relative)
+}
+
+/// True positive: API→Data cross-file reference MUST produce a layer violation.
+///
+/// Uses Approach B: real parsing through PythonAdapter + synthetic cross-file edge
+/// (simulating M5 resolution). Tests the detect() function works through the real
+/// pipeline once M5 supplies resolved cross-file edges.
+#[test]
+fn test_layer_violation_fixture_true_positive() {
+    let adapter = PythonAdapter::new();
+    let mut graph = Graph::new();
+
+    // Parse api/routes.py with synthetic path fixtures/api/routes.py
+    let api_path = layer_fixture_path("api/routes.py");
+    let api_content = std::fs::read_to_string(&api_path).unwrap();
+    let api_result = adapter
+        .parse_file(Path::new("fixtures/api/routes.py"), &api_content)
+        .unwrap();
+    populate_graph(&mut graph, &api_result);
+
+    // Parse db/models.py with synthetic path fixtures/db/models.py
+    let db_path = layer_fixture_path("db/models.py");
+    let db_content = std::fs::read_to_string(&db_path).unwrap();
+    let db_result = adapter
+        .parse_file(Path::new("fixtures/db/models.py"), &db_content)
+        .unwrap();
+    populate_graph(&mut graph, &db_result);
+
+    // Find real SymbolIds for the cross-file edge (non-import function symbols)
+    let api_fn_id = graph
+        .all_symbols()
+        .find(|(_, s)| {
+            s.location.file.to_string_lossy().contains("api/")
+                && !s.annotations.contains(&"import".to_string())
+                && s.kind == crate::parser::ir::SymbolKind::Function
+        })
+        .map(|(id, _)| id)
+        .expect("Must have at least one function symbol from api/routes.py");
+
+    let db_fn_id = graph
+        .all_symbols()
+        .find(|(_, s)| {
+            s.location.file.to_string_lossy().contains("db/")
+                && !s.annotations.contains(&"import".to_string())
+                && s.kind == crate::parser::ir::SymbolKind::Function
+        })
+        .map(|(id, _)| id)
+        .expect("Must have at least one function symbol from db/models.py");
+
+    // Add synthetic cross-file edge (simulating M5 resolution)
+    add_ref(
+        &mut graph,
+        api_fn_id,
+        db_fn_id,
+        ReferenceKind::Call,
+        "fixtures/api/routes.py",
+    );
+
+    let diagnostics = layer_violation::detect(&graph, Path::new(""));
+    let violations: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.pattern == DiagnosticPattern::LayerViolation)
+        .collect();
+
+    assert!(
+        !violations.is_empty(),
+        "API→Data cross-file reference MUST produce a layer violation"
+    );
+    assert_eq!(
+        violations[0].confidence,
+        Confidence::Moderate,
+        "Convention-based detection must be Moderate confidence"
+    );
+    assert_eq!(
+        violations[0].evidence.len(),
+        3,
+        "Must have 3 evidence entries"
+    );
+}
+
+/// True negative: API→Service (valid layering) should produce zero violations.
+#[test]
+fn test_layer_violation_fixture_true_negative() {
+    let adapter = PythonAdapter::new();
+    let mut graph = Graph::new();
+
+    // Parse api/routes.py
+    let api_path = layer_fixture_path("api/routes.py");
+    let api_content = std::fs::read_to_string(&api_path).unwrap();
+    let api_result = adapter
+        .parse_file(Path::new("fixtures/api/routes.py"), &api_content)
+        .unwrap();
+    populate_graph(&mut graph, &api_result);
+
+    // Parse service/logic.py
+    let svc_path = layer_fixture_path("service/logic.py");
+    let svc_content = std::fs::read_to_string(&svc_path).unwrap();
+    let svc_result = adapter
+        .parse_file(Path::new("fixtures/service/logic.py"), &svc_content)
+        .unwrap();
+    populate_graph(&mut graph, &svc_result);
+
+    // Add synthetic cross-file edge api → service (valid layering)
+    let api_fn_id = graph
+        .all_symbols()
+        .find(|(_, s)| {
+            s.location.file.to_string_lossy().contains("api/")
+                && !s.annotations.contains(&"import".to_string())
+                && s.kind == crate::parser::ir::SymbolKind::Function
+        })
+        .map(|(id, _)| id)
+        .expect("Must have function symbol from api/");
+
+    let svc_fn_id = graph
+        .all_symbols()
+        .find(|(_, s)| {
+            s.location.file.to_string_lossy().contains("service/")
+                && !s.annotations.contains(&"import".to_string())
+                && s.kind == crate::parser::ir::SymbolKind::Function
+        })
+        .map(|(id, _)| id)
+        .expect("Must have function symbol from service/");
+
+    add_ref(
+        &mut graph,
+        api_fn_id,
+        svc_fn_id,
+        ReferenceKind::Call,
+        "fixtures/api/routes.py",
+    );
+
+    let diagnostics = layer_violation::detect(&graph, Path::new(""));
+    let violations: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.pattern == DiagnosticPattern::LayerViolation)
+        .collect();
+
+    assert!(
+        violations.is_empty(),
+        "API→Service reference must NOT produce a layer violation, got {} violations",
+        violations.len()
+    );
+}
+
+/// Adversarial: SymbolId::default() edges must be skipped (no false positives
+/// from unresolved cross-file imports).
+#[test]
+fn test_layer_violation_skips_default_symbol_id_edges() {
+    use crate::parser::ir::*;
+
+    let mut g = Graph::new();
+
+    let handler = g.add_symbol(make_symbol(
+        "handle",
+        SymbolKind::Function,
+        Visibility::Public,
+        "api/handler.py",
+        1,
+    ));
+
+    // Add edge with SymbolId::default() as target (unresolved import)
+    g.add_reference(Reference {
+        id: ReferenceId::default(),
+        from: handler,
+        to: SymbolId::default(),
+        kind: ReferenceKind::Import,
+        location: Location {
+            file: PathBuf::from("api/handler.py"),
+            line: 2,
+            column: 1,
+            end_line: 2,
+            end_column: 30,
+        },
+        resolution: ResolutionStatus::Unresolved,
+    });
+
+    let diagnostics = layer_violation::detect(&g, Path::new(""));
+    assert!(
+        diagnostics.is_empty(),
+        "Edges targeting SymbolId::default() must be skipped — no false positives from unresolved imports"
+    );
+}
+
+/// Same-layer references (API→API) must NOT be flagged.
+#[test]
+fn test_layer_violation_same_layer_no_finding() {
+    use crate::parser::ir::*;
+
+    let mut g = Graph::new();
+    let a = g.add_symbol(make_symbol(
+        "handler_a",
+        SymbolKind::Function,
+        Visibility::Public,
+        "api/routes.py",
+        1,
+    ));
+    let b = g.add_symbol(make_symbol(
+        "handler_b",
+        SymbolKind::Function,
+        Visibility::Public,
+        "api/utils.py",
+        1,
+    ));
+    add_ref(&mut g, a, b, ReferenceKind::Call, "api/routes.py");
+
+    let diagnostics = layer_violation::detect(&g, Path::new(""));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.pattern != DiagnosticPattern::LayerViolation),
+        "Same-layer (API→API) reference must NOT be flagged"
+    );
+}
+
+/// Regression: mock-based and pipeline-based layer_violation tests must agree.
+/// The mock test `test_layer_violation_api_imports_db_directly` fires at Moderate.
+/// The fixture test must also fire at Moderate for the same logical scenario.
+#[test]
+fn test_layer_violation_mock_vs_pipeline_parity() {
+    use crate::parser::ir::*;
+
+    // Mock graph (same as unit test in layer_violation.rs)
+    let mut mock_g = Graph::new();
+    let mock_handler = mock_g.add_symbol(make_symbol(
+        "handle_request",
+        SymbolKind::Function,
+        Visibility::Public,
+        "api/handler.py",
+        1,
+    ));
+    let mock_db = mock_g.add_symbol(make_symbol(
+        "query_db",
+        SymbolKind::Function,
+        Visibility::Public,
+        "db/models.py",
+        1,
+    ));
+    add_ref(
+        &mut mock_g,
+        mock_handler,
+        mock_db,
+        ReferenceKind::Call,
+        "api/handler.py",
+    );
+    let mock_diags = layer_violation::detect(&mock_g, Path::new(""));
+
+    // Pipeline graph
+    let adapter = PythonAdapter::new();
+    let mut pipeline_g = Graph::new();
+
+    let api_path = layer_fixture_path("api/routes.py");
+    let api_content = std::fs::read_to_string(&api_path).unwrap();
+    let api_result = adapter
+        .parse_file(Path::new("fixtures/api/routes.py"), &api_content)
+        .unwrap();
+    populate_graph(&mut pipeline_g, &api_result);
+
+    let db_path = layer_fixture_path("db/models.py");
+    let db_content = std::fs::read_to_string(&db_path).unwrap();
+    let db_result = adapter
+        .parse_file(Path::new("fixtures/db/models.py"), &db_content)
+        .unwrap();
+    populate_graph(&mut pipeline_g, &db_result);
+
+    let api_fn_id = pipeline_g
+        .all_symbols()
+        .find(|(_, s)| {
+            s.location.file.to_string_lossy().contains("api/")
+                && !s.annotations.contains(&"import".to_string())
+                && s.kind == crate::parser::ir::SymbolKind::Function
+        })
+        .map(|(id, _)| id)
+        .expect("Must have function symbol from api/");
+
+    let db_fn_id = pipeline_g
+        .all_symbols()
+        .find(|(_, s)| {
+            s.location.file.to_string_lossy().contains("db/")
+                && !s.annotations.contains(&"import".to_string())
+                && s.kind == crate::parser::ir::SymbolKind::Function
+        })
+        .map(|(id, _)| id)
+        .expect("Must have function symbol from db/");
+
+    add_ref(
+        &mut pipeline_g,
+        api_fn_id,
+        db_fn_id,
+        ReferenceKind::Call,
+        "fixtures/api/routes.py",
+    );
+    let pipeline_diags = layer_violation::detect(&pipeline_g, Path::new(""));
+
+    // Both must fire
+    let mock_violations: Vec<_> = mock_diags
+        .iter()
+        .filter(|d| d.pattern == DiagnosticPattern::LayerViolation)
+        .collect();
+    let pipeline_violations: Vec<_> = pipeline_diags
+        .iter()
+        .filter(|d| d.pattern == DiagnosticPattern::LayerViolation)
+        .collect();
+
+    assert!(
+        !mock_violations.is_empty(),
+        "Mock graph must produce layer violation"
+    );
+    assert!(
+        !pipeline_violations.is_empty(),
+        "Pipeline graph must produce layer violation"
+    );
+
+    // Both must be Moderate confidence
+    assert_eq!(
+        mock_violations[0].confidence, pipeline_violations[0].confidence,
+        "Mock and pipeline must agree on confidence level"
     );
 }

@@ -8,6 +8,7 @@
 pub mod ir;
 pub mod javascript;
 pub mod python;
+pub mod rust;
 
 use std::path::Path;
 
