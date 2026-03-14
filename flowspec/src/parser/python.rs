@@ -66,7 +66,7 @@ impl LanguageAdapter for PythonAdapter {
 
         let content_bytes = content.as_bytes();
         let file_stem = path
-            .file_stem()
+            .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -95,6 +95,9 @@ impl LanguageAdapter for PythonAdapter {
 
         // Extract all function/method calls from the AST
         extract_all_calls(&mut result, content_bytes, path, root);
+
+        // Extract attribute accesses to track import usage (e.g., os.path.join, sys.argv)
+        extract_attribute_accesses(&mut result, content_bytes, path, root);
 
         Ok(result)
     }
@@ -372,7 +375,7 @@ fn extract_class(
 /// references), not the original module name.
 fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
-        .file_stem()
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -431,7 +434,7 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
 /// specific name to track).
 fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
-        .file_stem()
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -719,6 +722,75 @@ fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
             }
         }
         _ => None,
+    }
+}
+
+/// Recursively walks the AST to extract attribute access references.
+///
+/// For each `attribute` node (e.g., `os.path.join`, `sys.argv`), extracts the
+/// root identifier by walking the `object` field chain. If the root identifier
+/// matches an import symbol name, creates a `ReferenceKind::Read` reference with
+/// `ResolutionStatus::Partial("attribute_access:<root>")`. This enables
+/// `phantom_dependency` to see that the import is actually used.
+///
+/// Only creates references for root identifiers that match import symbol names,
+/// avoiding false matches on local variables.
+fn extract_attribute_accesses(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    if node.kind() == "attribute" {
+        if let Some(root_name) = extract_attribute_root_identifier(content, node) {
+            // Only create a reference if the root matches a known import symbol
+            let has_import = result
+                .symbols
+                .iter()
+                .any(|s| s.name == root_name && s.annotations.contains(&"import".to_string()));
+
+            if has_import {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!(
+                        "attribute_access:{}",
+                        root_name
+                    )),
+                });
+            }
+        }
+        // Don't recurse into this attribute's children — the root is already handled.
+        // But we DO need to recurse into siblings, which the caller handles.
+        return;
+    }
+
+    // Recurse into all children
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        extract_attribute_accesses(result, content, path, child);
+    }
+}
+
+/// Extracts the root identifier from an attribute access chain.
+///
+/// Walks the `object` field recursively until reaching an `identifier` node.
+/// For `os.path.join`, the chain is:
+///   attribute(object: attribute(object: identifier("os"), attr: "path"), attr: "join")
+/// This function returns `Some("os")`.
+///
+/// Returns `None` if the root is not a simple identifier (e.g., `func().attr`).
+fn extract_attribute_root_identifier(content: &[u8], node: Node) -> Option<String> {
+    let object = node.child_by_field_name("object")?;
+    match object.kind() {
+        "identifier" => {
+            let name = node_text(content, object);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        "attribute" => extract_attribute_root_identifier(content, object),
+        _ => None, // func().attr, subscript, etc. — not a simple identifier root
     }
 }
 

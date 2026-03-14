@@ -141,8 +141,25 @@ pub fn analyze(
         .unwrap_or_else(|| "unknown".to_string());
 
     // Stage 1: Parse source files and populate the analysis graph
-    let adapters: Vec<Box<dyn LanguageAdapter>> =
+    let all_adapters: Vec<Box<dyn LanguageAdapter>> =
         vec![Box::new(PythonAdapter::new()), Box::new(JsAdapter::new())];
+
+    // Filter adapters when --language is specified.
+    // "typescript" maps to the JS adapter (language_name: "javascript").
+    let adapters: Vec<&Box<dyn LanguageAdapter>> = if languages.is_empty() {
+        all_adapters.iter().collect()
+    } else {
+        let requested: HashSet<&str> = languages.iter().map(|s| s.as_str()).collect();
+        all_adapters
+            .iter()
+            .filter(|a| {
+                let name = a.language_name();
+                requested.contains(name)
+                    || (name == "javascript" && requested.contains("typescript"))
+            })
+            .collect()
+    };
+
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
 
@@ -164,6 +181,17 @@ pub fn analyze(
                     tracing::warn!("Failed to parse {}: {}", file.display(), e);
                 }
             }
+        }
+    }
+
+    // Warn when explicitly requested languages produce no analysis results
+    if !languages.is_empty() && parsed_file_count == 0 {
+        for lang in languages {
+            tracing::warn!(
+                "--language {} produced no analysis results. \
+                 Verify that a working adapter exists for this language.",
+                lang
+            );
         }
     }
 

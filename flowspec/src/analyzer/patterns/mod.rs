@@ -11,6 +11,7 @@ pub mod circular_dependency;
 pub mod data_dead_end;
 pub mod exclusion;
 pub mod isolated_cluster;
+pub mod layer_violation;
 pub mod missing_reexport;
 pub mod orphaned_implementation;
 pub mod phantom_dependency;
@@ -75,6 +76,10 @@ pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) 
         (
             DiagnosticPattern::MissingReexport,
             missing_reexport::detect(graph, project_root),
+        ),
+        (
+            DiagnosticPattern::LayerViolation,
+            layer_violation::detect(graph, project_root),
         ),
         // Unimplemented patterns return empty Vec (registered but inactive)
     ];

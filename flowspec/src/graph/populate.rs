@@ -310,6 +310,19 @@ fn insert_references(
                 new_ref.to =
                     resolve_callee(callee_name, &new_ref.from, graph, symbol_id_map, symbols);
             }
+            ResolutionStatus::Partial(info) if info.starts_with("attribute_access:") => {
+                let root_name = &info["attribute_access:".len()..];
+
+                // Resolve from: find the containing function/method
+                new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                    .unwrap_or_else(|| {
+                        *module_symbol_id
+                            .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
+                    });
+
+                // Resolve to: find the import symbol with matching name
+                new_ref.to = resolve_import_by_name(root_name, symbol_id_map, symbols);
+            }
             _ => {
                 // Non-call references: keep existing behavior
                 if new_ref.from == SymbolId::default() && !symbol_id_map.is_empty() {
@@ -331,7 +344,7 @@ fn insert_references(
 fn create_module_symbol(graph: &mut Graph, ref_location: &Location) -> SymbolId {
     let file_stem = ref_location
         .file
-        .file_stem()
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -465,6 +478,24 @@ fn resolve_callee(
             candidates[0].1
         }
     }
+}
+
+/// Resolves an import symbol by name for attribute access references.
+///
+/// Searches the symbol list for an import symbol (annotated with `"import"`) whose
+/// name matches the given root identifier. Returns `SymbolId::default()` if no match.
+fn resolve_import_by_name(
+    root_name: &str,
+    symbol_id_map: &[(usize, SymbolId)],
+    symbols: &[Symbol],
+) -> SymbolId {
+    for &(idx, real_id) in symbol_id_map {
+        let sym = &symbols[idx];
+        if sym.name == root_name && sym.annotations.contains(&"import".to_string()) {
+            return real_id;
+        }
+    }
+    SymbolId::default()
 }
 
 /// Inserts boundaries with scope ID remapping.

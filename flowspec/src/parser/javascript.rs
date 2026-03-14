@@ -71,7 +71,7 @@ impl LanguageAdapter for JsAdapter {
 
         let content_bytes = content.as_bytes();
         let file_stem = path
-            .file_stem()
+            .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -269,7 +269,49 @@ fn visit_export_statement(
                     true,
                 );
             }
+            "export_clause" => {
+                // `export { foo, bar }` or `export { foo as bar }`
+                // Skip re-exports: `export { foo } from './module'` — has a string source
+                let has_source = {
+                    let mut src_cursor = node.walk();
+                    let result = node.children(&mut src_cursor).any(|c| c.kind() == "string");
+                    result
+                };
+                if !has_source {
+                    apply_export_clause_visibility(result, content, child);
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+/// Updates visibility to `Public` for symbols named in an `export_clause`.
+///
+/// Handles `export { foo }` and `export { foo as bar }` syntax. For each
+/// `export_specifier`, extracts the local name (the `name` field) and updates
+/// the matching symbol's visibility. Unknown names are silently skipped.
+fn apply_export_clause_visibility(result: &mut ParseResult, content: &[u8], clause_node: Node) {
+    let mut cursor = clause_node.walk();
+    for child in clause_node.children(&mut cursor) {
+        if child.kind() == "export_specifier" {
+            // The local name is the `name` field; `alias` is the exported-as name
+            let local_name = child
+                .child_by_field_name("name")
+                .map(|n| node_text(content, n).to_string())
+                .unwrap_or_default();
+
+            if local_name.is_empty() {
+                continue;
+            }
+
+            // Find the symbol with this name and update its visibility
+            for sym in result.symbols.iter_mut() {
+                if sym.name == local_name {
+                    sym.visibility = Visibility::Public;
+                    break;
+                }
+            }
         }
     }
 }
@@ -615,7 +657,7 @@ fn extract_method_definition(
 /// annotation so that `phantom_dependency` can find and check import symbols.
 fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
-        .file_stem()
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 

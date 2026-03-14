@@ -12,28 +12,65 @@ use std::path::Path;
 
 use crate::parser::ir::Symbol;
 
-/// Check if a file path indicates a test file by filename convention.
+/// Check if a file path indicates a test file by filename or directory convention.
 ///
-/// Normalizes backslashes for Windows path compatibility, then extracts
-/// the filename component and checks for test file patterns:
-/// - `test_` prefix (e.g., `test_module.py`)
-/// - `conftest` prefix (pytest convention)
+/// Normalizes backslashes for Windows path compatibility, then checks:
+///
+/// **Filename-based patterns** (extracted via `rsplit('/')`):
+/// - `test_` prefix (e.g., `test_module.py`) — Python convention
+/// - `conftest` prefix — pytest convention
 /// - `_test.py` / `_test.rs` suffix (e.g., `utils_test.py`)
 /// - `_tests.py` / `_tests.rs` suffix (plural variant)
+/// - `.test.js` / `.test.ts` / `.test.jsx` / `.test.tsx` — Jest/Vitest convention
+/// - `.spec.js` / `.spec.ts` / `.spec.jsx` / `.spec.tsx` — Angular/Jasmine convention
 ///
-/// Only the filename is checked — directory names like `/tests/` do NOT
-/// trigger this function. A file at `tests/fixtures/dead_code.py` is a
-/// fixture, not a test file.
+/// **Directory-based pattern** (exception to filename-only rule):
+/// - `__tests__/` as a path segment — Jest convention where ALL files inside
+///   are test files by definition. Unlike generic `/tests/`, this is unambiguous.
+///
+/// Generic directory names like `/tests/` do NOT trigger this function.
+/// A file at `tests/fixtures/dead_code.py` is a fixture, not a test file.
 pub fn is_test_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let filename = normalized.rsplit('/').next().unwrap_or(&normalized);
 
+    // Filename-based patterns (Python/Rust)
     filename.starts_with("test_")
         || filename.starts_with("conftest")
         || filename.ends_with("_test.py")
         || filename.ends_with("_test.rs")
         || filename.ends_with("_tests.py")
         || filename.ends_with("_tests.rs")
+        // Filename-based patterns (JS/TS)
+        || filename.ends_with(".test.js")
+        || filename.ends_with(".test.ts")
+        || filename.ends_with(".test.jsx")
+        || filename.ends_with(".test.tsx")
+        || filename.ends_with(".spec.js")
+        || filename.ends_with(".spec.ts")
+        || filename.ends_with(".spec.jsx")
+        || filename.ends_with(".spec.tsx")
+        // Directory-based pattern: __tests__/ as a path segment (Jest convention)
+        || has_tests_dir_segment(&normalized)
+}
+
+/// Check if a normalized path contains `__tests__/` as a proper path segment.
+///
+/// Matches `__tests__/` at the start of the path or after a `/` separator.
+/// Does NOT match `__tests__` as a bare filename (no child path) or as part
+/// of another directory name (e.g., `my__tests__dir/`).
+fn has_tests_dir_segment(normalized: &str) -> bool {
+    // Must have something after __tests__/ (it must be a directory, not a file)
+    if normalized.starts_with("__tests__/") && normalized.len() > "__tests__/".len() {
+        return true;
+    }
+    // __tests__/ as a segment within the path
+    if let Some(pos) = normalized.find("/__tests__/") {
+        // Verify there's content after /__tests__/
+        let after = pos + "/__tests__/".len();
+        return after < normalized.len();
+    }
+    false
 }
 
 /// Check if a symbol should be excluded from diagnostic detection.
@@ -676,5 +713,199 @@ mod tests {
         let root = Path::new("");
         // strip_prefix("") on "module.py" → "module.py"
         assert_eq!(relativize_path(path, root), "module.py");
+    }
+
+    // =========================================================================
+    // QA-2: JS test conventions in is_test_path (Cycle 5)
+    // =========================================================================
+
+    // -- Standard JS/TS test patterns — true positives --
+
+    #[test]
+    fn test_is_test_path_jest_test_js() {
+        assert!(is_test_path("App.test.js"), "Jest .test.js convention");
+    }
+
+    #[test]
+    fn test_is_test_path_jest_test_ts() {
+        assert!(is_test_path("App.test.ts"), "Jest .test.ts convention");
+    }
+
+    #[test]
+    fn test_is_test_path_jest_test_jsx() {
+        assert!(
+            is_test_path("Component.test.jsx"),
+            "Jest .test.jsx convention"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_jest_test_tsx() {
+        assert!(
+            is_test_path("Component.test.tsx"),
+            "Vitest .test.tsx convention"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_angular_spec_js() {
+        assert!(
+            is_test_path("app.spec.js"),
+            "Angular/Jasmine .spec.js convention"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_angular_spec_ts() {
+        assert!(is_test_path("app.spec.ts"), "Angular .spec.ts convention");
+    }
+
+    #[test]
+    fn test_is_test_path_angular_spec_jsx() {
+        assert!(is_test_path("Component.spec.jsx"), ".spec.jsx convention");
+    }
+
+    #[test]
+    fn test_is_test_path_angular_spec_tsx() {
+        assert!(is_test_path("Component.spec.tsx"), ".spec.tsx convention");
+    }
+
+    // -- __tests__/ directory convention — true positives --
+
+    #[test]
+    fn test_is_test_path_jest_tests_dir() {
+        assert!(
+            is_test_path("__tests__/App.js"),
+            "Files inside __tests__/ are test files by Jest convention"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_jest_tests_dir_nested() {
+        assert!(
+            is_test_path("__tests__/helpers/setup.js"),
+            "Nested files inside __tests__/ are still test files"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_jest_tests_dir_deep_nested() {
+        assert!(
+            is_test_path("src/components/__tests__/Button.tsx"),
+            "__tests__/ can appear anywhere in path — Jest convention"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_jest_tests_dir_windows() {
+        assert!(
+            is_test_path("src\\components\\__tests__\\Button.tsx"),
+            "__tests__/ detection must work with Windows backslashes"
+        );
+    }
+
+    // -- JS substring false positive guards — true negatives --
+
+    #[test]
+    fn test_is_test_path_testament_js_not_test() {
+        assert!(
+            !is_test_path("testament.js"),
+            "testament.js does NOT end with .test.js — not a test file"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_testify_ts_not_test() {
+        assert!(
+            !is_test_path("testify.ts"),
+            "testify.ts does NOT end with .test.ts — not a test file"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_app_test_module_js_not_test() {
+        assert!(
+            !is_test_path("app.test.module.js"),
+            "app.test.module.js — .test. is NOT immediately before final extension"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_spectacle_js_not_test() {
+        assert!(
+            !is_test_path("spectacle.js"),
+            "spectacle.js does not end with .spec.js"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_inspect_ts_not_test() {
+        assert!(
+            !is_test_path("inspect.ts"),
+            "inspect.ts does not end with .spec.ts"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_my_tests_dir_not_test() {
+        assert!(
+            !is_test_path("my__tests__dir/file.js"),
+            "my__tests__dir is not __tests__/ as a path segment"
+        );
+    }
+
+    // -- Edge cases and boundary conditions --
+
+    #[test]
+    fn test_is_test_path_bare_dot_test_js() {
+        assert!(
+            is_test_path(".test.js"),
+            ".test.js ends with .test.js — technically matches"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_tests_dir_at_root() {
+        assert!(
+            is_test_path("__tests__/file.js"),
+            "__tests__/ at root must match"
+        );
+    }
+
+    #[test]
+    fn test_is_test_path_file_named_underscore_tests_underscore() {
+        assert!(
+            !is_test_path("__tests__"),
+            "Bare __tests__ without a child file path is not meaningful as test path"
+        );
+    }
+
+    // -- Integration: is_excluded_symbol with JS test conventions --
+
+    #[test]
+    fn test_excluded_symbol_in_jest_test_file() {
+        let sym = make_sym_in_file("renderButton", "src/components/__tests__/Button.test.tsx");
+        assert!(
+            is_excluded_symbol(&sym),
+            "Symbol in __tests__/Button.test.tsx must be excluded from diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_excluded_symbol_in_spec_file() {
+        let sym = make_sym_in_file("setupTest", "src/App.spec.ts");
+        assert!(
+            is_excluded_symbol(&sym),
+            "Symbol in App.spec.ts must be excluded from diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_not_excluded_symbol_in_testament_file() {
+        let sym = make_sym_in_file("processInput", "testament.js");
+        assert!(
+            !is_excluded_symbol(&sym),
+            "Symbol in testament.js must NOT be excluded — not a test file"
+        );
     }
 }

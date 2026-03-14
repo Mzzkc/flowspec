@@ -160,7 +160,6 @@ fn mixed_dir_metadata_lists_both_languages() {
 }
 
 #[test]
-#[ignore = "Requires JS adapter and multi-language dispatch (issue #9)"]
 fn mixed_dir_entities_from_both_languages() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("hello.py"), "def hello():\n    return 1\n").unwrap();
@@ -202,7 +201,6 @@ fn mixed_dir_entities_from_both_languages() {
 }
 
 #[test]
-#[ignore = "Requires JS adapter (issue #9)"]
 fn js_only_analysis_has_entities() {
     let dir = TempDir::new().unwrap();
     fs::write(
@@ -595,7 +593,6 @@ fn python_exit_codes_unchanged_by_js_adapter() {
 // === Category 6: Diagnose Command with JS (P1) ===
 
 #[test]
-#[ignore = "Requires JS adapter with dead code detection (issue #9)"]
 fn js_dead_code_diagnose_exit_2() {
     let dir = TempDir::new().unwrap();
     fs::write(

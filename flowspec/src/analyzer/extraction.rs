@@ -101,7 +101,7 @@ pub fn infer_module_role(graph: &Graph, file_path: &Path) -> String {
 
     // Check for test module (by file path or function names)
     let file_str = file_path.to_string_lossy();
-    let is_test_file = file_str.contains("test_") || file_str.contains("_test.");
+    let is_test_file = crate::analyzer::patterns::exclusion::is_test_path(&file_str);
     let test_fn_count = symbols
         .iter()
         .filter(|s| {
@@ -834,5 +834,260 @@ mod tests {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // QA-2: infer_module_role regression tests (Cycle 5)
+    // =========================================================================
+
+    // -- Substring false positive regression --
+
+    #[test]
+    fn test_infer_module_role_contest_results_is_not_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "calculate_score",
+            SymbolKind::Function,
+            Visibility::Public,
+            "contest_results.py",
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "rank_contestants",
+            SymbolKind::Function,
+            Visibility::Public,
+            "contest_results.py",
+            10,
+        ));
+
+        let role = infer_module_role(&g, Path::new("contest_results.py"));
+        assert!(
+            !role.to_lowercase().contains("test"),
+            "contest_results.py must NOT be classified as test module, got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_latest_test_data_is_not_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "load_data",
+            SymbolKind::Function,
+            Visibility::Public,
+            "src/latest_test_data.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("src/latest_test_data.py"));
+        assert!(
+            !role.to_lowercase().contains("test"),
+            "latest_test_data.py must NOT be classified as test module — 'test_' is a \
+             substring, not a prefix. Got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_testing_utils_is_not_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "setup_mock",
+            SymbolKind::Function,
+            Visibility::Public,
+            "testing_utils.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("testing_utils.py"));
+        assert!(
+            !role.to_lowercase().contains("test"),
+            "testing_utils.py must NOT be test module — 'testing_' != 'test_'. Got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_protest_module_is_not_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "organize_protest",
+            SymbolKind::Function,
+            Visibility::Public,
+            "protest.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("protest.py"));
+        assert!(
+            !role.to_lowercase().contains("test"),
+            "protest.py must NOT be test module. Got: '{}'",
+            role
+        );
+    }
+
+    // -- Fixture path regression --
+
+    #[test]
+    fn test_infer_module_role_fixture_dead_code_is_not_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "unused_helper",
+            SymbolKind::Function,
+            Visibility::Private,
+            "tests/fixtures/python/dead_code.py",
+            11,
+        ));
+        g.add_symbol(make_symbol(
+            "active_function",
+            SymbolKind::Function,
+            Visibility::Public,
+            "tests/fixtures/python/dead_code.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("tests/fixtures/python/dead_code.py"));
+        assert!(
+            !role.to_lowercase().contains("test"),
+            "Fixture dead_code.py must NOT be 'Test module' — it's a fixture. Got: '{}'",
+            role
+        );
+    }
+
+    // -- True positive guards --
+
+    #[test]
+    fn test_infer_module_role_test_prefix_file_is_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "test_create",
+            SymbolKind::Function,
+            Visibility::Private,
+            "test_api.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("test_api.py"));
+        assert!(
+            role.to_lowercase().contains("test"),
+            "test_api.py MUST be classified as test module. Got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_suffix_test_py_is_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Public,
+            "handler_test.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("handler_test.py"));
+        assert!(
+            role.to_lowercase().contains("test"),
+            "handler_test.py MUST be test module (suffix match). Got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_conftest_is_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "shared_fixture",
+            SymbolKind::Function,
+            Visibility::Public,
+            "conftest.py",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("conftest.py"));
+        assert!(
+            role.to_lowercase().contains("test"),
+            "conftest.py MUST be test module. Got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_test_functions_without_test_path() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "test_create_user",
+            SymbolKind::Function,
+            Visibility::Private,
+            "api_checks.py",
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "test_delete_user",
+            SymbolKind::Function,
+            Visibility::Private,
+            "api_checks.py",
+            10,
+        ));
+
+        let role = infer_module_role(&g, Path::new("api_checks.py"));
+        assert!(
+            role.to_lowercase().contains("test"),
+            "Module with only test_* functions MUST be test module regardless of path. Got: '{}'",
+            role
+        );
+    }
+
+    // -- Empty module edge case --
+
+    #[test]
+    fn test_infer_module_role_empty_contest_file_is_not_test() {
+        let g = Graph::new();
+        let role = infer_module_role(&g, Path::new("contest_results.py"));
+        assert_eq!(
+            role, "Empty module",
+            "Empty file should be 'Empty module' regardless of path"
+        );
+    }
+
+    // -- JS test convention integration with infer_module_role --
+
+    #[test]
+    fn test_infer_module_role_jest_test_file_is_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "describe_block",
+            SymbolKind::Function,
+            Visibility::Public,
+            "Button.test.tsx",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("Button.test.tsx"));
+        assert!(
+            role.to_lowercase().contains("test"),
+            "Button.test.tsx MUST be classified as test module after JS conventions added. Got: '{}'",
+            role
+        );
+    }
+
+    #[test]
+    fn test_infer_module_role_spec_file_is_test() {
+        let mut g = Graph::new();
+        g.add_symbol(make_symbol(
+            "it_block",
+            SymbolKind::Function,
+            Visibility::Public,
+            "app.spec.ts",
+            1,
+        ));
+
+        let role = infer_module_role(&g, Path::new("app.spec.ts"));
+        assert!(
+            role.to_lowercase().contains("test"),
+            "app.spec.ts MUST be test module. Got: '{}'",
+            role
+        );
     }
 }
