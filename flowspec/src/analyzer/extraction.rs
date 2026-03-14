@@ -14,11 +14,13 @@ use crate::parser::ir::{Symbol, SymbolId, SymbolKind, Visibility};
 /// Extracts the qualified names of all symbols called by the given symbol.
 ///
 /// Uses `graph.callees()` which returns outgoing edges with `EdgeKind::Calls`.
-/// Symbols whose IDs cannot be resolved are silently skipped (defensive).
+/// Filters `SymbolId::default()` phantom entries (unresolved cross-file
+/// references) and symbols whose IDs cannot be resolved (defensive).
 pub fn extract_calls(graph: &Graph, symbol_id: SymbolId) -> Vec<String> {
     graph
         .callees(symbol_id)
         .iter()
+        .filter(|&&callee_id| callee_id != SymbolId::default())
         .filter_map(|&callee_id| {
             graph
                 .get_symbol(callee_id)
@@ -30,11 +32,13 @@ pub fn extract_calls(graph: &Graph, symbol_id: SymbolId) -> Vec<String> {
 /// Extracts the qualified names of all symbols that call the given symbol.
 ///
 /// Uses `graph.callers()` which returns incoming edges with `EdgeKind::Calls`.
-/// Symbols whose IDs cannot be resolved are silently skipped (defensive).
+/// Filters `SymbolId::default()` phantom entries (unresolved cross-file
+/// references) and symbols whose IDs cannot be resolved (defensive).
 pub fn extract_called_by(graph: &Graph, symbol_id: SymbolId) -> Vec<String> {
     graph
         .callers(symbol_id)
         .iter()
+        .filter(|&&caller_id| caller_id != SymbolId::default())
         .filter_map(|&caller_id| {
             graph
                 .get_symbol(caller_id)
@@ -624,6 +628,138 @@ mod tests {
             role
         );
         assert!(!role.is_empty(), "Module role must not be empty");
+    }
+
+    // -- Edge endpoint validation: SymbolId::default() filtering --
+
+    #[test]
+    fn test_extract_calls_filters_default_symbol_id() {
+        let mut g = Graph::new();
+        let caller = g.add_symbol(make_symbol(
+            "do_work",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        let real_callee = g.add_symbol(make_symbol(
+            "helper",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            5,
+        ));
+
+        // Real edge: caller → helper
+        add_ref(
+            &mut g,
+            caller,
+            real_callee,
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+        // Phantom edge: caller → SymbolId::default() (unresolved cross-file)
+        add_ref(
+            &mut g,
+            caller,
+            SymbolId::default(),
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+
+        let calls = extract_calls(&g, caller);
+
+        assert!(
+            calls.iter().any(|c| c.contains("helper")),
+            "Real callee 'helper' must appear in calls"
+        );
+        assert_eq!(
+            calls.len(),
+            1,
+            "Phantom SymbolId::default() must be filtered — expected 1 call, got {}",
+            calls.len()
+        );
+    }
+
+    #[test]
+    fn test_extract_called_by_filters_default_symbol_id() {
+        let mut g = Graph::new();
+        let target = g.add_symbol(make_symbol(
+            "target_fn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        let real_caller = g.add_symbol(make_symbol(
+            "caller_fn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            5,
+        ));
+
+        // Real edge: caller → target
+        add_ref(
+            &mut g,
+            real_caller,
+            target,
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+        // Phantom edge: SymbolId::default() → target
+        add_ref(
+            &mut g,
+            SymbolId::default(),
+            target,
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+
+        let called_by = extract_called_by(&g, target);
+
+        assert!(
+            called_by.iter().any(|c| c.contains("caller_fn")),
+            "Real caller must appear"
+        );
+        assert_eq!(
+            called_by.len(),
+            1,
+            "Phantom SymbolId::default() caller must be filtered — expected 1, got {}",
+            called_by.len()
+        );
+    }
+
+    #[test]
+    fn test_default_symbol_id_does_not_remove_real_callees() {
+        let mut g = Graph::new();
+        let a = g.add_symbol(make_symbol(
+            "fn_a",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        let b = g.add_symbol(make_symbol(
+            "fn_b",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            5,
+        ));
+        let c = g.add_symbol(make_symbol(
+            "fn_c",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            9,
+        ));
+
+        add_ref(&mut g, a, b, crate::parser::ir::ReferenceKind::Call, "a.py");
+        add_ref(&mut g, a, c, crate::parser::ir::ReferenceKind::Call, "a.py");
+
+        let calls = extract_calls(&g, a);
+        assert_eq!(calls.len(), 2, "Both real callees must be preserved");
     }
 
     // -- Regression: visibility not hardcoded pub --

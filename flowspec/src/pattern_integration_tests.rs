@@ -933,8 +933,8 @@ fn test_windows_path_normalization_in_exclusion() {
     let dead_end = data_dead_end::detect(&graph, project_root);
     assert_eq!(
         dead_end.len(),
-        0,
-        "Backslash paths containing /tests/ must be excluded after normalization"
+        1,
+        "Directory-based /tests/ exclusion removed — only filename patterns like test_*.py trigger exclusion"
     );
 }
 

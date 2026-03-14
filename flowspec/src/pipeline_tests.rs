@@ -1584,3 +1584,113 @@ fn test_diagnose_severity_filter() {
         );
     }
 }
+
+// =========================================================================
+// 15. Multi-Language Dispatch Tests (P0) — Cycle 4
+// =========================================================================
+
+#[test]
+fn test_analyze_mixed_py_and_js() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hello.py"), "def greet():\n    pass\n").unwrap();
+    std::fs::write(dir.path().join("utils.js"), "function helper() {}\n").unwrap();
+
+    let config = Config::load(dir.path(), None).unwrap();
+    let result = analyze(dir.path(), &config, &[]).unwrap();
+
+    let py_entities: Vec<_> = result
+        .manifest
+        .entities
+        .iter()
+        .filter(|e| e.loc.contains(".py"))
+        .collect();
+    let js_entities: Vec<_> = result
+        .manifest
+        .entities
+        .iter()
+        .filter(|e| e.loc.contains(".js"))
+        .collect();
+
+    assert!(!py_entities.is_empty(), "Must have Python entities");
+    assert!(!js_entities.is_empty(), "Must have JavaScript entities");
+}
+
+#[test]
+fn test_analyze_js_file_count_in_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.py"), "def f(): pass\n").unwrap();
+    std::fs::write(dir.path().join("b.js"), "function g() {}\n").unwrap();
+
+    let config = Config::load(dir.path(), None).unwrap();
+    let result = analyze(dir.path(), &config, &[]).unwrap();
+
+    assert!(
+        result.manifest.metadata.file_count >= 2,
+        "file_count must include both .py and .js files, got {}",
+        result.manifest.metadata.file_count
+    );
+}
+
+#[test]
+fn test_analyze_languages_metadata_includes_js() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.js"), "function main() {}\n").unwrap();
+
+    let config = Config::load(dir.path(), None).unwrap();
+    let result = analyze(dir.path(), &config, &[]).unwrap();
+
+    assert!(
+        result
+            .manifest
+            .metadata
+            .languages
+            .iter()
+            .any(|l| l == "javascript"),
+        "metadata.languages must include 'javascript', got {:?}",
+        result.manifest.metadata.languages
+    );
+}
+
+#[test]
+fn test_python_regression_entity_count_after_js_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(dir.path(), None).unwrap();
+    let result = analyze(dir.path(), &config, &[]).unwrap();
+
+    assert!(
+        result.manifest.entities.len() >= 2,
+        "dead_code.py entity count must not regress: got {}",
+        result.manifest.entities.len()
+    );
+}
+
+#[test]
+fn test_js_only_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.js"),
+        "function start() {}\nconst run = () => {};\n",
+    )
+    .unwrap();
+
+    let config = Config::load(dir.path(), None).unwrap();
+    let result = analyze(dir.path(), &config, &[]).unwrap();
+
+    let fns: Vec<_> = result
+        .manifest
+        .entities
+        .iter()
+        .filter(|e| e.kind == "fn")
+        .collect();
+    assert!(
+        fns.len() >= 2,
+        "JS-only analysis must extract at least 2 functions, got {}",
+        fns.len()
+    );
+}

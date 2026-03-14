@@ -49,6 +49,7 @@ use analyzer::extraction::{
 };
 use graph::populate_graph;
 use parser::ir::SymbolKind;
+use parser::javascript::JsAdapter;
 use parser::python::PythonAdapter;
 use parser::LanguageAdapter;
 
@@ -57,7 +58,7 @@ use parser::LanguageAdapter;
 pub enum OutputFormat {
     /// YAML output (default, implemented).
     Yaml,
-    /// JSON output (not yet implemented).
+    /// JSON output.
     Json,
     /// SARIF output for CI integration (not yet implemented).
     Sarif,
@@ -140,24 +141,28 @@ pub fn analyze(
         .unwrap_or_else(|| "unknown".to_string());
 
     // Stage 1: Parse source files and populate the analysis graph
-    let adapter = PythonAdapter::new();
+    let adapters: Vec<Box<dyn LanguageAdapter>> =
+        vec![Box::new(PythonAdapter::new()), Box::new(JsAdapter::new())];
     let mut graph = Graph::new();
+    let mut parsed_file_count: u64 = 0;
 
-    let py_files: Vec<&PathBuf> = files.iter().filter(|f| adapter.can_handle(f)).collect();
-    let py_file_count = py_files.len() as u64;
-
-    for file in &py_files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Failed to read {}: {}", file.display(), e);
-                continue;
-            }
-        };
-        match adapter.parse_file(file, &content) {
-            Ok(result) => populate_graph(&mut graph, &result),
-            Err(e) => {
-                tracing::warn!("Failed to parse {}: {}", file.display(), e);
+    for file in &files {
+        if let Some(adapter) = adapters.iter().find(|a| a.can_handle(file)) {
+            let content = match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to read {}: {}", file.display(), e);
+                    continue;
+                }
+            };
+            match adapter.parse_file(file, &content) {
+                Ok(result) => {
+                    populate_graph(&mut graph, &result);
+                    parsed_file_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse {}: {}", file.display(), e);
+                }
             }
         }
     }
@@ -263,7 +268,12 @@ pub fn analyze(
         "Empty project with no analyzable source files.".to_string()
     } else {
         format!(
-            "Python project with {} module(s) and {} entities.",
+            "{} project with {} module(s) and {} entities.",
+            if active_languages.len() == 1 {
+                active_languages[0].clone()
+            } else {
+                format!("Multi-language ({})", active_languages.join(", "))
+            },
             modules.len(),
             entities.len()
         )
@@ -275,7 +285,7 @@ pub fn analyze(
             analyzed_at: chrono::Utc::now().to_rfc3339(),
             flowspec_version: env!("CARGO_PKG_VERSION").to_string(),
             languages: active_languages,
-            file_count: py_file_count,
+            file_count: parsed_file_count,
             entity_count: entities.len() as u64,
             flow_count: 0,
             diagnostic_count,

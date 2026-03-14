@@ -12,18 +12,28 @@ use std::path::Path;
 
 use crate::parser::ir::Symbol;
 
-/// Check if a file path indicates a test file.
+/// Check if a file path indicates a test file by filename convention.
 ///
-/// Normalizes backslashes for Windows path compatibility, then checks
-/// for common test file indicators: `test_` prefix, `/tests/` or `/test/`
-/// directory components, and `_test.py` / `_test.rs` suffixes.
+/// Normalizes backslashes for Windows path compatibility, then extracts
+/// the filename component and checks for test file patterns:
+/// - `test_` prefix (e.g., `test_module.py`)
+/// - `conftest` prefix (pytest convention)
+/// - `_test.py` / `_test.rs` suffix (e.g., `utils_test.py`)
+/// - `_tests.py` / `_tests.rs` suffix (plural variant)
+///
+/// Only the filename is checked — directory names like `/tests/` do NOT
+/// trigger this function. A file at `tests/fixtures/dead_code.py` is a
+/// fixture, not a test file.
 pub fn is_test_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized.contains("test_")
-        || normalized.contains("/tests/")
-        || normalized.contains("/test/")
-        || normalized.ends_with("_test.py")
-        || normalized.ends_with("_test.rs")
+    let filename = normalized.rsplit('/').next().unwrap_or(&normalized);
+
+    filename.starts_with("test_")
+        || filename.starts_with("conftest")
+        || filename.ends_with("_test.py")
+        || filename.ends_with("_test.rs")
+        || filename.ends_with("_tests.py")
+        || filename.ends_with("_tests.rs")
 }
 
 /// Check if a symbol should be excluded from diagnostic detection.
@@ -102,6 +112,7 @@ pub fn relativize_path(file: &Path, project_root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Graph;
     use crate::parser::ir::*;
     use std::path::PathBuf;
 
@@ -146,13 +157,15 @@ mod tests {
     }
 
     #[test]
-    fn test_is_test_path_tests_dir() {
-        assert!(is_test_path("src/tests/unit.py"));
+    fn test_is_test_path_tests_dir_filename_not_test() {
+        // Filename "unit.py" has no test pattern — directory should not matter
+        assert!(!is_test_path("src/tests/unit.py"));
     }
 
     #[test]
-    fn test_is_test_path_test_dir() {
-        assert!(is_test_path("src/test/integration.py"));
+    fn test_is_test_path_test_dir_filename_not_test() {
+        // Filename "integration.py" has no test pattern — directory should not matter
+        assert!(!is_test_path("src/test/integration.py"));
     }
 
     #[test]
@@ -166,8 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_test_path_windows() {
-        assert!(is_test_path("src\\tests\\unit.py"));
+    fn test_is_test_path_windows_filename_not_test() {
+        // Filename "unit.py" has no test pattern even through Windows path
+        assert!(!is_test_path("src\\tests\\unit.py"));
     }
 
     #[test]
@@ -181,17 +195,15 @@ mod tests {
     }
 
     #[test]
-    fn test_is_test_path_latest_version() {
-        // "latest_version" contains "test_" as substring ("atest_v")
-        // This is a known false positive of the contains("test_") heuristic
-        assert!(is_test_path("latest_version.py"));
+    fn test_is_test_path_latest_version_not_test() {
+        // "latest_version.py" does NOT start with "test_" — not a test file
+        assert!(!is_test_path("latest_version.py"));
     }
 
     #[test]
-    fn test_is_test_path_contest() {
-        // "contest_results.py" contains "test_" as substring via contains()
-        // This is a known limitation — contest_ triggers the test_ check
-        assert!(is_test_path("contest_results.py"));
+    fn test_is_test_path_contest_not_test() {
+        // "contest_results.py" does NOT start with "test_" — not a test file
+        assert!(!is_test_path("contest_results.py"));
     }
 
     // -- is_excluded_symbol tests --
@@ -242,8 +254,9 @@ mod tests {
     }
 
     #[test]
-    fn test_excluded_test_file_path() {
-        assert!(is_excluded_symbol(&make_sym_in_file(
+    fn test_excluded_test_file_path_filename_not_test() {
+        // mod.py is NOT a test file — filename has no test pattern
+        assert!(!is_excluded_symbol(&make_sym_in_file(
             "func",
             "src/tests/mod.py"
         )));
@@ -276,6 +289,344 @@ mod tests {
     fn test_excluded_test_underscore_only() {
         // "test_" starts_with("test_") → excluded
         assert!(is_excluded_symbol(&make_sym("test_")));
+    }
+
+    // -- is_test_path: fixture paths are NOT test paths (regression core) --
+
+    #[test]
+    fn test_fixture_dead_code_is_not_test_path() {
+        assert!(
+            !is_test_path("tests/fixtures/python/dead_code.py"),
+            "Fixture file dead_code.py must NOT be classified as test path"
+        );
+    }
+
+    #[test]
+    fn test_fixture_clean_code_is_not_test_path() {
+        assert!(
+            !is_test_path("tests/fixtures/python/clean_code.py"),
+            "Fixture file clean_code.py must NOT be classified as test path"
+        );
+    }
+
+    #[test]
+    fn test_fixture_isolated_module_is_not_test_path() {
+        assert!(
+            !is_test_path("tests/fixtures/python/isolated_module.py"),
+            "Fixture file isolated_module.py must NOT be classified as test path"
+        );
+    }
+
+    // -- is_test_path: substring false positives fixed --
+
+    #[test]
+    fn test_protest_is_not_test_path() {
+        assert!(
+            !is_test_path("protest.py"),
+            "'protest' does not start with 'test_'"
+        );
+    }
+
+    #[test]
+    fn test_attest_is_not_test_path() {
+        assert!(
+            !is_test_path("attest.py"),
+            "'attest' does not start with 'test_'"
+        );
+    }
+
+    #[test]
+    fn test_testing_utils_is_not_test_path() {
+        assert!(
+            !is_test_path("testing_utils.py"),
+            "testing_utils.py must NOT match — 'testing_' != 'test_'"
+        );
+    }
+
+    #[test]
+    fn test_my_test_utils_is_not_test_path() {
+        assert!(
+            !is_test_path("my_test_utils.py"),
+            "my_test_utils.py must NOT match — filename-based check only"
+        );
+    }
+
+    // -- is_test_path: directory-based matching removed --
+
+    #[test]
+    fn test_mod_py_in_tests_dir_is_not_test_path() {
+        assert!(
+            !is_test_path("src/tests/mod.py"),
+            "mod.py under /tests/ is NOT a test file"
+        );
+    }
+
+    // -- is_test_path: true positive guards --
+
+    #[test]
+    fn test_test_prefix_rs() {
+        assert!(
+            is_test_path("test_handler.rs"),
+            "test_ prefix must match for .rs"
+        );
+    }
+
+    #[test]
+    fn test_conftest_py() {
+        assert!(
+            is_test_path("conftest.py"),
+            "conftest.py is pytest convention"
+        );
+    }
+
+    #[test]
+    fn test_test_prefix_in_deep_path() {
+        assert!(
+            is_test_path("deeply/nested/path/to/test_module.py"),
+            "test_ prefix on filename must match regardless of directory depth"
+        );
+    }
+
+    #[test]
+    fn test_suffix_test_in_deep_path() {
+        assert!(
+            is_test_path("src/api/routes_test.py"),
+            "_test.py suffix must match regardless of directory depth"
+        );
+    }
+
+    #[test]
+    fn test_plural_suffix_tests_py() {
+        assert!(
+            is_test_path("utils_tests.py"),
+            "_tests.py plural suffix should match"
+        );
+    }
+
+    #[test]
+    fn test_plural_suffix_tests_rs() {
+        assert!(
+            is_test_path("handler_tests.rs"),
+            "_tests.rs plural suffix should match"
+        );
+    }
+
+    // -- is_test_path: adversarial edge cases --
+
+    #[test]
+    fn test_empty_string_is_not_test_path() {
+        assert!(
+            !is_test_path(""),
+            "Empty string must return false, not panic"
+        );
+    }
+
+    #[test]
+    fn test_just_slash_is_not_test_path() {
+        assert!(!is_test_path("/"), "Bare slash must return false");
+    }
+
+    #[test]
+    fn test_bare_test_underscore_is_test_path() {
+        assert!(
+            is_test_path("test_"),
+            "Bare 'test_' filename is a test file"
+        );
+    }
+
+    #[test]
+    fn test_bare_underscore_test_dot_py_is_test_path() {
+        assert!(
+            is_test_path("_test.py"),
+            "_test.py ends with _test.py suffix"
+        );
+    }
+
+    #[test]
+    fn test_windows_backslash_test_file() {
+        assert!(
+            is_test_path("src\\tests\\test_handler.py"),
+            "test_handler.py has test_ prefix even through Windows path"
+        );
+    }
+
+    #[test]
+    fn test_windows_backslash_fixture_not_test() {
+        assert!(
+            !is_test_path("src\\tests\\unit.py"),
+            "unit.py is not a test file even with Windows backslashes"
+        );
+    }
+
+    #[test]
+    fn test_no_extension_test_prefix() {
+        assert!(
+            is_test_path("test_something"),
+            "No extension, test_ prefix still matches"
+        );
+    }
+
+    #[test]
+    fn test_path_with_only_extension() {
+        assert!(!is_test_path(".py"), "Bare extension is not a test file");
+    }
+
+    #[test]
+    fn test_double_slash_path() {
+        assert!(
+            !is_test_path("src//fixtures//dead_code.py"),
+            "Double slashes — dead_code.py is not a test file"
+        );
+    }
+
+    #[test]
+    fn test_test_in_directory_name_only() {
+        assert!(
+            !is_test_path("test_data/config.py"),
+            "config.py is not a test file — test_ is in directory, not filename"
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_test_dirs_non_test_file() {
+        assert!(
+            !is_test_path("project/tests/integration/test_data/fixtures/sample.py"),
+            "sample.py is not a test file despite test directories in path"
+        );
+    }
+
+    // -- is_excluded_symbol: integration with is_test_path fix --
+
+    #[test]
+    fn test_symbol_in_fixture_not_excluded() {
+        let sym = make_sym_in_file("unused_helper", "tests/fixtures/python/dead_code.py");
+        assert!(
+            !is_excluded_symbol(&sym),
+            "Symbol in fixture file must NOT be excluded — fixture is not a test"
+        );
+    }
+
+    #[test]
+    fn test_symbol_in_test_file_still_excluded() {
+        let sym = make_sym_in_file("helper_fn", "test_module.py");
+        assert!(
+            is_excluded_symbol(&sym),
+            "Symbol in test_module.py must be excluded — test_ prefix on filename"
+        );
+    }
+
+    #[test]
+    fn test_contest_results_symbol_not_excluded() {
+        let sym = make_sym_in_file("score_calc", "contest_results.py");
+        assert!(
+            !is_excluded_symbol(&sym),
+            "Symbol in contest_results.py must NOT be excluded"
+        );
+    }
+
+    // -- Full pipeline regression: diagnostics fire on fixture files --
+
+    #[test]
+    fn test_dead_code_fixture_produces_diagnostics() {
+        use crate::analyzer::patterns::data_dead_end;
+
+        let graph = crate::test_utils::build_dead_code_graph();
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
+
+        assert!(
+            !diagnostics.is_empty(),
+            "dead_code.py fixture MUST produce data_dead_end diagnostics"
+        );
+
+        let dead_end_names: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
+        assert!(
+            dead_end_names.iter().any(|n| n.contains("unused_helper")),
+            "unused_helper must be flagged as dead end"
+        );
+        assert!(
+            dead_end_names.iter().any(|n| n.contains("_private_util")),
+            "_private_util must be flagged as dead end"
+        );
+    }
+
+    #[test]
+    fn test_clean_code_fixture_produces_zero_diagnostics() {
+        use crate::analyzer::patterns::run_all_patterns;
+
+        let graph = crate::test_utils::build_clean_code_graph();
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
+
+        assert!(
+            diagnostics.is_empty(),
+            "clean_code.py must produce ZERO diagnostics, got {}: {:?}",
+            diagnostics.len(),
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fixture_symbols_with_test_path_prefix_in_directory() {
+        use crate::analyzer::patterns::data_dead_end;
+        use crate::parser::ir::{SymbolKind, Visibility};
+
+        let mut g = Graph::new();
+        let _dead = g.add_symbol(crate::test_utils::make_symbol(
+            "unreachable_fn",
+            SymbolKind::Function,
+            Visibility::Private,
+            "tests/fixtures/python/dead_code.py",
+            7,
+        ));
+
+        let diagnostics = data_dead_end::detect(&g, Path::new(""));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.entity.contains("unreachable_fn")),
+            "unreachable_fn under tests/fixtures/ MUST be detected after is_test_path fix"
+        );
+    }
+
+    // -- Confidence calibration spot checks --
+
+    #[test]
+    fn test_private_dead_end_has_high_confidence() {
+        use crate::analyzer::diagnostic::Confidence;
+        use crate::analyzer::patterns::data_dead_end;
+
+        let graph = crate::test_utils::build_dead_code_graph();
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
+
+        let unused_helper_diag = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("unused_helper"))
+            .expect("unused_helper must be detected");
+
+        assert_eq!(
+            unused_helper_diag.confidence,
+            Confidence::High,
+            "Private function with zero callers must be HIGH confidence"
+        );
+    }
+
+    #[test]
+    fn test_public_dead_end_has_low_confidence() {
+        use crate::analyzer::diagnostic::Confidence;
+        use crate::analyzer::patterns::data_dead_end;
+
+        let graph = crate::test_utils::build_public_api_graph();
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
+
+        let public_diag = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("format_timestamp"))
+            .expect("format_timestamp must be detected");
+
+        assert_eq!(
+            public_diag.confidence,
+            Confidence::Low,
+            "Public function with zero callers must be LOW confidence"
+        );
     }
 
     // -- relativize_path tests --

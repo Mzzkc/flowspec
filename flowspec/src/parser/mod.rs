@@ -6,6 +6,7 @@
 //! never sees raw AST — only the IR produced here.
 
 pub mod ir;
+pub mod javascript;
 pub mod python;
 
 use std::path::Path;
