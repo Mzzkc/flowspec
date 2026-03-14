@@ -9,9 +9,10 @@
 //! cross-module references that form the dependency loop.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::analyzer::diagnostic::*;
+use crate::analyzer::patterns::exclusion::relativize_path;
 use crate::graph::Graph;
 use crate::parser::ir::EdgeKind;
 
@@ -32,8 +33,11 @@ struct CrossModuleRef {
 /// back on module A. This pattern uses custom module-level cycle detection
 /// (NOT `graph.detect_cycles()`, which operates at the symbol level).
 ///
+/// The `project_root` path is used to produce relative file paths in
+/// diagnostic locations and evidence, matching the format of entity `loc` fields.
+///
 /// Severity: Warning. Confidence: High (cycles are structurally verifiable).
-pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
+pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     // Step 1: Build module-level adjacency map with cross-module references
     let (adjacency, cross_refs) = build_module_adjacency(graph);
 
@@ -50,7 +54,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
     // Step 4: Build diagnostics with evidence
     let mut diagnostics = Vec::new();
     for cycle in unique_cycles {
-        if let Some(diag) = build_diagnostic(&cycle, &cross_refs) {
+        if let Some(diag) = build_diagnostic(&cycle, &cross_refs, project_root) {
             diagnostics.push(diag);
         }
     }
@@ -222,12 +226,19 @@ fn canonicalize_cycle(cycle: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// Build a diagnostic from a detected cycle with per-step evidence.
-fn build_diagnostic(cycle: &[PathBuf], cross_refs: &[CrossModuleRef]) -> Option<Diagnostic> {
+fn build_diagnostic(
+    cycle: &[PathBuf],
+    cross_refs: &[CrossModuleRef],
+    project_root: &Path,
+) -> Option<Diagnostic> {
     if cycle.is_empty() {
         return None;
     }
 
-    let module_names: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
+    let module_names: Vec<String> = cycle
+        .iter()
+        .map(|p| relativize_path(p, project_root))
+        .collect();
 
     let entity = module_names.join(", ");
 
@@ -235,6 +246,9 @@ fn build_diagnostic(cycle: &[PathBuf], cross_refs: &[CrossModuleRef]) -> Option<
     for i in 0..cycle.len() {
         let from = &cycle[i];
         let to = &cycle[(i + 1) % cycle.len()];
+
+        let from_rel = relativize_path(from, project_root);
+        let to_rel = relativize_path(to, project_root);
 
         // Find the specific cross-reference for this step
         let specific_ref = cross_refs
@@ -244,16 +258,19 @@ fn build_diagnostic(cycle: &[PathBuf], cross_refs: &[CrossModuleRef]) -> Option<
         let observation = if let Some(r) = specific_ref {
             format!(
                 "{} references {} ('{}' depends on '{}')",
-                from.display(),
-                to.display(),
-                r.from_symbol,
-                r.to_symbol,
+                from_rel, to_rel, r.from_symbol, r.to_symbol,
             )
         } else {
-            format!("{} depends on {}", from.display(), to.display())
+            format!("{} depends on {}", from_rel, to_rel)
         };
 
-        let location = specific_ref.map(|r| format!("{}:{}", r.from_file.display(), r.from_line));
+        let location = specific_ref.map(|r| {
+            format!(
+                "{}:{}",
+                relativize_path(&r.from_file, project_root),
+                r.from_line
+            )
+        });
 
         evidence.push(Evidence {
             observation,
@@ -262,7 +279,7 @@ fn build_diagnostic(cycle: &[PathBuf], cross_refs: &[CrossModuleRef]) -> Option<
         });
     }
 
-    let location = format!("{}:1", cycle[0].display());
+    let location = format!("{}:1", module_names[0]);
 
     let message = format!(
         "Circular dependency: {} modules form a dependency cycle ({})",

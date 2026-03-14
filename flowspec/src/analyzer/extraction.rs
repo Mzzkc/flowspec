@@ -679,9 +679,10 @@ mod tests {
     #[test]
     fn test_no_duplicate_diagnostics_from_run_all_patterns() {
         use crate::analyzer::patterns::run_all_patterns;
+        use std::path::Path;
 
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         for (i, d1) in diagnostics.iter().enumerate() {
             for (j, d2) in diagnostics.iter().enumerate() {

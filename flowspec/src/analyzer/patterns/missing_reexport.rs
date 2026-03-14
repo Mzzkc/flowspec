@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::analyzer::diagnostic::*;
+use crate::analyzer::patterns::exclusion::relativize_path;
 use crate::graph::Graph;
 use crate::parser::ir::{SymbolKind, Visibility};
 
@@ -20,8 +21,11 @@ use crate::parser::ir::{SymbolKind, Visibility};
 /// files for public symbols not referenced in the parent's import list.
 /// Uses name-based matching as the detection mechanism.
 ///
+/// The `project_root` path is used to produce relative file paths in
+/// diagnostic locations and evidence, matching the format of entity `loc` fields.
+///
 /// Severity: Info. Confidence: Moderate (re-export may be intentionally omitted).
-pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
+pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Step 1: Collect all file paths and identify parent modules
@@ -62,12 +66,15 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
         for sibling_path in siblings {
             let sibling_symbols = collect_public_symbols(graph, sibling_path);
 
+            let sibling_rel = relativize_path(sibling_path, project_root);
+            let parent_rel = relativize_path(parent_path, project_root);
+
             for (name, qualified_name, line) in &sibling_symbols {
                 if reexported_names.contains(name) {
                     continue;
                 }
 
-                let location = format!("{}:{}", sibling_path.display(), line);
+                let location = format!("{}:{}", sibling_rel, line);
 
                 diagnostics.push(Diagnostic {
                     id: String::new(),
@@ -77,28 +84,22 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
                     entity: qualified_name.clone(),
                     message: format!(
                         "Missing re-export: public symbol '{}' in '{}' is not exported through '{}'",
-                        name,
-                        sibling_path.display(),
-                        parent_path.display(),
+                        name, sibling_rel, parent_rel,
                     ),
                     evidence: vec![Evidence {
                         observation: format!(
                             "'{}' is public in '{}' but not found in parent module '{}'",
-                            name,
-                            sibling_path.display(),
-                            parent_path.display(),
+                            name, sibling_rel, parent_rel,
                         ),
                         location: Some(location.clone()),
                         context: Some(format!(
                             "parent module: {}, submodule: {}",
-                            parent_path.display(),
-                            sibling_path.display(),
+                            parent_rel, sibling_rel,
                         )),
                     }],
                     suggestion: format!(
                         "Add '{}' to the exports in '{}', or make it private if it is internal.",
-                        name,
-                        parent_path.display(),
+                        name, parent_rel,
                     ),
                     location,
                 });

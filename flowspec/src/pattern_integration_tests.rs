@@ -18,7 +18,7 @@
 //! - circular_dependency: Blocked by M5 (cross-file resolution).
 //! - missing_reexport: Blocked by fixture gap (no `__init__.py`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::analyzer::patterns;
 use crate::analyzer::patterns::circular_dependency;
@@ -106,7 +106,7 @@ fn fixture_path(fixture_name: &str) -> PathBuf {
 #[test]
 fn test_data_dead_end_real_data_true_positive() {
     let graph = fixture_graph("dead_code.py");
-    let diagnostics = data_dead_end::detect(&graph);
+    let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
     assert!(
         !diagnostics.is_empty(),
@@ -147,7 +147,7 @@ fn test_data_dead_end_real_data_true_positive() {
 #[test]
 fn test_orphaned_implementation_real_data_true_positive() {
     let graph = fixture_graph("classes.py");
-    let diagnostics = orphaned_implementation::detect(&graph);
+    let diagnostics = orphaned_implementation::detect(&graph, Path::new(""));
 
     assert!(
         !diagnostics.is_empty(),
@@ -190,7 +190,7 @@ fn test_orphaned_implementation_real_data_true_positive() {
 #[test]
 fn test_orphaned_implementation_clean_code_true_negative() {
     let graph = fixture_graph("clean_code.py");
-    let diagnostics = orphaned_implementation::detect(&graph);
+    let diagnostics = orphaned_implementation::detect(&graph, Path::new(""));
 
     assert!(
         diagnostics.is_empty(),
@@ -205,7 +205,7 @@ fn test_orphaned_implementation_clean_code_true_negative() {
 #[test]
 fn test_data_dead_end_name_heuristic_exclusions() {
     let graph = fixture_graph("dead_code.py");
-    let diagnostics = data_dead_end::detect(&graph);
+    let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
     let entities: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
 
@@ -229,7 +229,7 @@ fn test_data_dead_end_name_heuristic_exclusions() {
 #[test]
 fn test_data_dead_end_clean_code_true_negative() {
     let graph = fixture_graph("clean_code.py");
-    let diagnostics = data_dead_end::detect(&graph);
+    let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
     // clean_code.py: main (excluded by name) → transform_data → read_file
     // All functions have callers or are excluded. Zero diagnostics expected.
@@ -248,7 +248,7 @@ fn test_data_dead_end_clean_code_true_negative() {
 #[test]
 fn test_isolated_cluster_clean_code_true_negative() {
     let graph = fixture_graph("clean_code.py");
-    let diagnostics = isolated_cluster::detect(&graph);
+    let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
 
     // clean_code.py: main (entry point) → transform_data → read_file
     // The component contains "main" which matches is_entry_point(), so excluded.
@@ -266,7 +266,7 @@ fn test_isolated_cluster_clean_code_true_negative() {
 #[test]
 fn test_clean_code_false_positive_guard() {
     let graph = fixture_graph("clean_code.py");
-    let diagnostics = patterns::run_all_patterns(&graph);
+    let diagnostics = patterns::run_all_patterns(&graph, Path::new(""));
 
     assert!(
         diagnostics.is_empty(),
@@ -373,7 +373,7 @@ fn test_end_to_end_cli_clean_code_false_positive_guard() {
 fn test_run_all_patterns_real_data_multi_pattern() {
     let graph = multi_fixture_graph(&["dead_code.py", "classes.py"]);
 
-    let diagnostics = patterns::run_all_patterns(&graph);
+    let diagnostics = patterns::run_all_patterns(&graph, Path::new(""));
 
     assert!(
         !diagnostics.is_empty(),
@@ -417,8 +417,8 @@ fn test_run_all_patterns_real_data_multi_pattern() {
 fn test_overlap_dead_end_and_orphaned_on_same_method() {
     let graph = fixture_graph("classes.py");
 
-    let dead_end_diags = data_dead_end::detect(&graph);
-    let orphaned_diags = orphaned_implementation::detect(&graph);
+    let dead_end_diags = data_dead_end::detect(&graph, Path::new(""));
+    let orphaned_diags = orphaned_implementation::detect(&graph, Path::new(""));
 
     // Both patterns should fire on uncalled methods in classes.py
     assert!(
@@ -467,7 +467,7 @@ fn test_overlap_dead_end_and_orphaned_on_same_method() {
 #[test]
 fn test_test_file_exclusion_guard() {
     let graph = fixture_graph_with_real_path("test_module.py");
-    let diagnostics = patterns::run_all_patterns(&graph);
+    let diagnostics = patterns::run_all_patterns(&graph, Path::new(""));
 
     // test_module.py: file path contains "test_" → excluded from all patterns
     assert!(
@@ -488,8 +488,8 @@ fn test_test_file_exclusion_guard() {
 fn test_dunder_exclusion_on_real_data() {
     let graph = fixture_graph("classes.py");
 
-    let dead_end_diags = data_dead_end::detect(&graph);
-    let orphaned_diags = orphaned_implementation::detect(&graph);
+    let dead_end_diags = data_dead_end::detect(&graph, Path::new(""));
+    let orphaned_diags = orphaned_implementation::detect(&graph, Path::new(""));
 
     let all_entities: Vec<&str> = dead_end_diags
         .iter()
@@ -515,7 +515,7 @@ fn test_dunder_exclusion_on_real_data() {
 #[test]
 fn test_circular_dependency_blocked_single_file() {
     let graph = fixture_graph("dead_code.py");
-    let diagnostics = circular_dependency::detect(&graph);
+    let diagnostics = circular_dependency::detect(&graph, Path::new(""));
 
     assert!(
         diagnostics.is_empty(),
@@ -529,7 +529,7 @@ fn test_circular_dependency_blocked_single_file() {
 #[test]
 fn test_missing_reexport_blocked_no_init() {
     let graph = fixture_graph("dead_code.py");
-    let diagnostics = missing_reexport::detect(&graph);
+    let diagnostics = missing_reexport::detect(&graph, Path::new(""));
 
     assert!(
         diagnostics.is_empty(),
@@ -543,7 +543,7 @@ fn test_missing_reexport_blocked_no_init() {
 #[test]
 fn test_phantom_dependency_no_imports_silent() {
     let graph = fixture_graph("dead_code.py");
-    let diagnostics = phantom_dependency::detect(&graph);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
     assert!(
         diagnostics.is_empty(),
@@ -560,7 +560,7 @@ fn test_phantom_dependency_no_imports_silent() {
 #[test]
 fn test_isolated_cluster_fires_with_call_edges() {
     let graph = fixture_graph("isolated_module.py");
-    let diagnostics = isolated_cluster::detect(&graph);
+    let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
 
     // With Call edges from call-site detection, connected_components() finds
     // real clusters. isolated_cluster should fire on groups with internal edges
@@ -582,7 +582,7 @@ fn test_isolated_cluster_fires_with_call_edges() {
 #[test]
 fn test_data_dead_end_confidence_calibration() {
     let graph = fixture_graph("public_api.py");
-    let diagnostics = data_dead_end::detect(&graph);
+    let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
     assert!(
         diagnostics.len() >= 2,
@@ -614,7 +614,7 @@ fn test_data_dead_end_confidence_calibration() {
 #[test]
 fn test_confidence_split_private_vs_public_real_data() {
     let graph = fixture_graph("public_api.py");
-    let diagnostics = data_dead_end::detect(&graph);
+    let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
     let high_confidence: Vec<_> = diagnostics
         .iter()
@@ -668,4 +668,460 @@ fn test_multi_fixture_graph_combines_files() {
         "Combined graph should have >= 9 symbols, got {}",
         graph.symbol_count()
     );
+}
+
+// =========================================================================
+// Category 9: Diagnostic Loc Relative Paths (P0 — D1 fix validation)
+// =========================================================================
+
+/// All patterns must produce relative diagnostic loc on directory analysis.
+/// This is the exact bug 5/5 reviewers flagged in cycle 2.
+#[test]
+fn test_diagnostic_loc_relative_directory_analysis() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for diag in &result.manifest.diagnostics {
+        assert!(
+            !diag.loc.starts_with('/'),
+            "Diagnostic loc must be relative, not absolute. Got: '{}'",
+            diag.loc
+        );
+        // Must match pattern: filename.py:N
+        assert!(
+            diag.loc.contains(':'),
+            "Diagnostic loc must contain ':' separator. Got: '{}'",
+            diag.loc
+        );
+    }
+}
+
+/// Single-file analysis must produce relative loc with just filename.
+#[test]
+fn test_diagnostic_loc_relative_single_file_analysis() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file_path = tmp.path().join("dead_code.py");
+    std::fs::write(
+        &file_path,
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(&file_path, None).unwrap();
+    let result = analyze(&file_path, &config, &["python".to_string()]).unwrap();
+
+    for diag in &result.manifest.diagnostics {
+        assert!(
+            !diag.loc.is_empty(),
+            "Diagnostic loc must not be empty on single-file analysis"
+        );
+        assert!(
+            !diag.loc.starts_with(':'),
+            "Diagnostic loc must not start with ':'. Got: '{}'",
+            diag.loc
+        );
+        assert!(
+            diag.loc.contains("dead_code.py"),
+            "Single-file loc must contain filename. Got: '{}'",
+            diag.loc
+        );
+    }
+}
+
+/// Diagnostic loc format must match entity loc format for the same file.
+#[test]
+fn test_diagnostic_loc_matches_entity_loc_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // Extract file prefixes from entity locs and diagnostic locs
+    let entity_prefixes: std::collections::HashSet<String> = result
+        .manifest
+        .entities
+        .iter()
+        .filter_map(|e| e.loc.split(':').next().map(|s| s.to_string()))
+        .collect();
+
+    for diag in &result.manifest.diagnostics {
+        let diag_prefix = diag.loc.split(':').next().unwrap_or("");
+        if !diag_prefix.is_empty() {
+            assert!(
+                entity_prefixes.contains(diag_prefix),
+                "Diagnostic loc file prefix '{}' not found in entity locs {:?}",
+                diag_prefix,
+                entity_prefixes
+            );
+        }
+    }
+}
+
+/// Evidence location fields must also use relative paths.
+#[test]
+fn test_evidence_location_fields_relative() {
+    let graph = fixture_graph("dead_code.py");
+    let project_root = Path::new("");
+
+    let dead_end = data_dead_end::detect(&graph, project_root);
+    let orphaned = orphaned_implementation::detect(&graph, project_root);
+    let isolated = isolated_cluster::detect(&graph, project_root);
+
+    for diag in dead_end
+        .iter()
+        .chain(orphaned.iter())
+        .chain(isolated.iter())
+    {
+        for ev in &diag.evidence {
+            if let Some(ref loc) = ev.location {
+                assert!(
+                    !loc.starts_with('/'),
+                    "Evidence location must be relative, got: '{}'",
+                    loc
+                );
+            }
+        }
+    }
+}
+
+/// Diagnostic loc line numbers must be preserved correctly.
+#[test]
+fn test_diagnostic_loc_preserves_line_numbers() {
+    let graph = fixture_graph("dead_code.py");
+    let results = data_dead_end::detect(&graph, Path::new(""));
+
+    for d in &results {
+        let parts: Vec<&str> = d.location.rsplitn(2, ':').collect();
+        assert!(
+            parts.len() == 2,
+            "Loc must be file:line format. Got: '{}'",
+            d.location
+        );
+        let line_num: u32 = parts[0]
+            .parse()
+            .unwrap_or_else(|_| panic!("Line number must be numeric. Got: '{}'", parts[0]));
+        assert!(line_num > 0, "Line number must be > 0");
+    }
+}
+
+// =========================================================================
+// Category 10: Exclusion Consolidation — Uniform Behavior (P0 — D2 validation)
+// =========================================================================
+
+/// Entry point names must be excluded uniformly across all patterns.
+#[test]
+fn test_entry_point_names_excluded_uniformly() {
+    use crate::graph::Graph;
+    use crate::parser::ir::*;
+    use crate::test_utils::make_symbol;
+
+    let mut graph = Graph::new();
+    let project_root = Path::new("");
+
+    // Add symbols with entry point names — all Function, zero callers
+    for name in &[
+        "main",
+        "__main__",
+        "if_name_main",
+        "main_handler",
+        "setup_main",
+    ] {
+        graph.add_symbol(make_symbol(
+            name,
+            SymbolKind::Function,
+            Visibility::Public,
+            "module.py",
+            1,
+        ));
+    }
+
+    let dead_end = data_dead_end::detect(&graph, project_root);
+    let orphaned = orphaned_implementation::detect(&graph, project_root);
+
+    let all_entities: Vec<&str> = dead_end
+        .iter()
+        .chain(orphaned.iter())
+        .map(|d| d.entity.as_str())
+        .collect();
+
+    for name in &[
+        "main",
+        "__main__",
+        "if_name_main",
+        "main_handler",
+        "setup_main",
+    ] {
+        assert!(
+            !all_entities.iter().any(|e| e.contains(name)),
+            "Entry point '{}' should be excluded from all patterns",
+            name
+        );
+    }
+}
+
+/// Test file suffix detection (_test.py, _test.rs) works for all patterns.
+#[test]
+fn test_file_suffix_exclusion() {
+    use crate::graph::Graph;
+    use crate::parser::ir::*;
+    use crate::test_utils::make_symbol;
+
+    let mut graph = Graph::new();
+    let project_root = Path::new("");
+
+    // Symbols in _test.py and _test.rs files
+    graph.add_symbol(make_symbol(
+        "helper",
+        SymbolKind::Function,
+        Visibility::Public,
+        "utils_test.py",
+        1,
+    ));
+    graph.add_symbol(make_symbol(
+        "handler",
+        SymbolKind::Function,
+        Visibility::Public,
+        "handler_test.rs",
+        1,
+    ));
+
+    let dead_end = data_dead_end::detect(&graph, project_root);
+    let orphaned = orphaned_implementation::detect(&graph, project_root);
+
+    assert_eq!(
+        dead_end.len(),
+        0,
+        "data_dead_end must exclude _test.py suffix files"
+    );
+    assert_eq!(
+        orphaned.len(),
+        0,
+        "orphaned_implementation must exclude _test.py suffix files"
+    );
+}
+
+/// Windows path normalization must work in exclusion checks.
+#[test]
+fn test_windows_path_normalization_in_exclusion() {
+    use crate::graph::Graph;
+    use crate::parser::ir::*;
+    use crate::test_utils::make_symbol;
+
+    let mut graph = Graph::new();
+    let project_root = Path::new("");
+
+    graph.add_symbol(make_symbol(
+        "my_func",
+        SymbolKind::Function,
+        Visibility::Public,
+        "src\\tests\\my_module.py",
+        5,
+    ));
+
+    let dead_end = data_dead_end::detect(&graph, project_root);
+    assert_eq!(
+        dead_end.len(),
+        0,
+        "Backslash paths containing /tests/ must be excluded after normalization"
+    );
+}
+
+/// Dunder methods must be excluded uniformly.
+#[test]
+fn test_dunder_methods_excluded_uniformly() {
+    use crate::graph::Graph;
+    use crate::parser::ir::*;
+    use crate::test_utils::make_symbol;
+
+    let mut graph = Graph::new();
+    let project_root = Path::new("");
+
+    for name in &["__init__", "__str__", "__repr__", "__enter__", "__exit__"] {
+        graph.add_symbol(make_symbol(
+            name,
+            SymbolKind::Method,
+            Visibility::Public,
+            "classes.py",
+            1,
+        ));
+    }
+
+    let dead_end = data_dead_end::detect(&graph, project_root);
+    let orphaned = orphaned_implementation::detect(&graph, project_root);
+
+    for diag in dead_end.iter().chain(orphaned.iter()) {
+        assert!(
+            !(diag.entity.starts_with("__") && diag.entity.ends_with("__")),
+            "Dunder method '{}' must be excluded",
+            diag.entity
+        );
+    }
+}
+
+// =========================================================================
+// Category 11: Regression Guards (P1)
+// =========================================================================
+
+/// Regression: data_dead_end true positive unchanged.
+#[test]
+fn test_regression_data_dead_end_true_positive() {
+    let graph = fixture_graph("dead_code.py");
+    let project_root = Path::new("");
+    let results = data_dead_end::detect(&graph, project_root);
+
+    assert!(
+        !results.is_empty(),
+        "data_dead_end must still fire on dead_code.py"
+    );
+    let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
+    assert!(
+        entities.iter().any(|e| e.contains("unused_helper")),
+        "Must flag unused_helper"
+    );
+    assert!(
+        entities.iter().any(|e| e.contains("_private_util")),
+        "Must flag _private_util"
+    );
+    assert!(
+        !entities.iter().any(|e| e.contains("main_handler")),
+        "main_handler must NOT be detected (entry point exclusion)"
+    );
+}
+
+/// Regression: clean_code.py zero false positives.
+#[test]
+fn test_regression_clean_code_zero_false_positives() {
+    let graph = fixture_graph("clean_code.py");
+    let project_root = Path::new("");
+
+    let all = patterns::run_all_patterns(&graph, project_root);
+    assert_eq!(
+        all.len(),
+        0,
+        "clean_code.py must produce ZERO diagnostics after exclusion consolidation. Got: {:?}",
+        all.iter().map(|d| &d.entity).collect::<Vec<_>>()
+    );
+}
+
+/// Regression: confidence calibration unchanged.
+#[test]
+fn test_regression_confidence_calibration() {
+    let graph = fixture_graph("public_api.py");
+    let project_root = Path::new("");
+    let results = data_dead_end::detect(&graph, project_root);
+
+    for diag in &results {
+        if diag.entity.contains("_internal") {
+            assert_eq!(diag.confidence, Confidence::High);
+        }
+        if diag.entity.contains("format_timestamp") || diag.entity.contains("parse_duration") {
+            assert_eq!(diag.confidence, Confidence::Low);
+        }
+    }
+}
+
+// =========================================================================
+// Category 12: API Contract Tests (P1)
+// =========================================================================
+
+/// run_all_patterns accepts and works with project_root parameter.
+#[test]
+fn test_run_all_patterns_new_signature() {
+    let graph = fixture_graph("dead_code.py");
+    let project_root = Path::new("");
+    let results = patterns::run_all_patterns(&graph, project_root);
+    assert!(
+        !results.is_empty(),
+        "run_all_patterns with project_root must work"
+    );
+}
+
+/// All 6 individual detect functions accept project_root parameter.
+#[test]
+fn test_individual_detect_signatures() {
+    let graph = fixture_graph("dead_code.py");
+    let project_root = Path::new("");
+
+    let _ = data_dead_end::detect(&graph, project_root);
+    let _ = orphaned_implementation::detect(&graph, project_root);
+    let _ = isolated_cluster::detect(&graph, project_root);
+    let _ = phantom_dependency::detect(&graph, project_root);
+    let _ = circular_dependency::detect(&graph, project_root);
+    let _ = missing_reexport::detect(&graph, project_root);
+}
+
+// =========================================================================
+// Category 13: Adversarial Tests (P1)
+// =========================================================================
+
+/// Empty graph produces zero diagnostics from all patterns.
+#[test]
+fn test_adversarial_empty_graph() {
+    use crate::graph::Graph;
+
+    let graph = Graph::new();
+    let project_root = Path::new("/some/project");
+
+    let all = patterns::run_all_patterns(&graph, project_root);
+    assert_eq!(all.len(), 0, "Empty graph must produce zero diagnostics");
+}
+
+/// Path with spaces in directory name handled correctly.
+#[test]
+fn test_adversarial_path_with_spaces() {
+    use crate::analyzer::patterns::exclusion::relativize_path;
+
+    let project_root = Path::new("/home/user/my project/src");
+    let file = Path::new("/home/user/my project/src/module.py");
+    let rel = relativize_path(file, project_root);
+    assert_eq!(rel, "module.py");
+    assert!(!rel.starts_with('/'));
+}
+
+/// Single-file analysis where project_root equals the file path.
+#[test]
+fn test_adversarial_single_file_project_root() {
+    use crate::analyzer::patterns::exclusion::relativize_path;
+
+    let project_root = Path::new("/home/user/dead_code.py");
+    let file = Path::new("/home/user/dead_code.py");
+    let rel = relativize_path(file, project_root);
+    assert!(!rel.is_empty(), "Loc must not be empty");
+    assert!(!rel.starts_with(':'), "Loc must not start with ':'");
+    assert!(rel.contains("dead_code.py"), "Must fall back to filename");
+}
+
+/// Deeply nested path preserves full relative structure.
+#[test]
+fn test_adversarial_deeply_nested_path() {
+    use crate::analyzer::patterns::exclusion::relativize_path;
+
+    let project_root = Path::new("/repo");
+    let file = Path::new("/repo/src/packages/core/internal/utils/helpers/deep.py");
+    let rel = relativize_path(file, project_root);
+    assert_eq!(rel, "src/packages/core/internal/utils/helpers/deep.py");
+}
+
+/// Mismatched project_root must not panic.
+#[test]
+fn test_adversarial_mismatched_project_root() {
+    use crate::analyzer::patterns::exclusion::relativize_path;
+
+    let project_root = Path::new("/home/alice/project");
+    let file = Path::new("/home/bob/other/file.py");
+    let rel = relativize_path(file, project_root);
+    assert!(!rel.is_empty(), "Must not be empty");
+    // Fallback returns the original path — acceptable behavior
 }

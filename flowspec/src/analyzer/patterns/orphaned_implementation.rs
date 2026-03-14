@@ -9,8 +9,10 @@
 //! same method — the messages and suggestions differ.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::analyzer::diagnostic::*;
+use crate::analyzer::patterns::exclusion::{is_excluded_symbol, relativize_path};
 use crate::graph::Graph;
 use crate::parser::ir::{EdgeKind, SymbolKind, Visibility};
 
@@ -22,8 +24,11 @@ use crate::parser::ir::{EdgeKind, SymbolKind, Visibility};
 /// private methods with zero callers are high confidence; public methods
 /// might be dispatched dynamically (moderate confidence).
 ///
+/// The `project_root` path is used to produce relative file paths in
+/// diagnostic locations, matching the format of entity `loc` fields.
+///
 /// Severity: Warning. Confidence: High (private) or Moderate (public).
-pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
+pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     let file_count = graph
@@ -38,8 +43,8 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
             continue;
         }
 
-        // Skip excluded symbols
-        if is_excluded(symbol) {
+        // Skip excluded symbols (shared exclusion logic)
+        if is_excluded_symbol(symbol) {
             continue;
         }
 
@@ -70,7 +75,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
 
         let location = format!(
             "{}:{}",
-            symbol.location.file.display(),
+            relativize_path(&symbol.location.file, project_root),
             symbol.location.line
         );
 
@@ -85,10 +90,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
                 symbol.name
             ),
             evidence: vec![Evidence {
-                observation: format!(
-                    "0 callers in {} analyzed files",
-                    file_count
-                ),
+                observation: format!("0 callers in {} analyzed files", file_count),
                 location: Some(location.clone()),
                 context: Some(format!(
                     "visibility: {:?}, kind: Method",
@@ -104,35 +106,4 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
     }
 
     diagnostics
-}
-
-/// Check if a method symbol should be excluded from orphaned implementation detection.
-fn is_excluded(symbol: &crate::parser::ir::Symbol) -> bool {
-    // Skip dunder methods (Python special methods — runtime-dispatched)
-    if symbol.name.starts_with("__") && symbol.name.ends_with("__") {
-        return true;
-    }
-
-    // Skip entry points
-    if symbol.annotations.contains(&"entry_point".to_string()) {
-        return true;
-    }
-
-    // Skip import symbols
-    if symbol.annotations.contains(&"import".to_string()) {
-        return true;
-    }
-
-    // Skip test file methods
-    let path = symbol.location.file.to_string_lossy();
-    if path.contains("test_") || path.contains("/tests/") || path.contains("/test/") {
-        return true;
-    }
-
-    // Skip test methods (name starts with test_)
-    if symbol.name.starts_with("test_") {
-        return true;
-    }
-
-    false
 }

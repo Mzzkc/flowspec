@@ -8,8 +8,10 @@
 //! count as usage.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::analyzer::diagnostic::*;
+use crate::analyzer::patterns::exclusion::relativize_path;
 use crate::graph::Graph;
 use crate::parser::ir::EdgeKind;
 
@@ -18,7 +20,10 @@ use crate::parser::ir::EdgeKind;
 /// Import symbols are identified by the "import" annotation. A phantom
 /// import has zero incoming edges (Calls or References) from other
 /// symbols in the same file.
-pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
+///
+/// The `project_root` path is used to produce relative file paths in
+/// diagnostic locations, matching the format of entity `loc` fields.
+pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     let file_count = graph
@@ -55,7 +60,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
 
         let location = format!(
             "{}:{}",
-            symbol.location.file.display(),
+            relativize_path(&symbol.location.file, project_root),
             symbol.location.line
         );
 

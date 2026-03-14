@@ -8,8 +8,10 @@
 //! consumed by external code we can't see (low confidence).
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::analyzer::diagnostic::*;
+use crate::analyzer::patterns::exclusion::{is_excluded_symbol, relativize_path};
 use crate::graph::Graph;
 use crate::parser::ir::{EdgeKind, SymbolKind, Visibility};
 
@@ -17,8 +19,12 @@ use crate::parser::ir::{EdgeKind, SymbolKind, Visibility};
 ///
 /// A dead end is a symbol with zero inbound consumption edges (calls,
 /// references). Exclusions: entry points, test functions, test modules,
-/// import symbols (handled by phantom_dependency), module symbols.
-pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
+/// import symbols (handled by phantom_dependency), module symbols,
+/// class/struct symbols (structural containers).
+///
+/// The `project_root` path is used to produce relative file paths in
+/// diagnostic locations, matching the format of entity `loc` fields.
+pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     let file_count = graph
@@ -28,8 +34,16 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
         .len();
 
     for (id, symbol) in graph.all_symbols() {
-        // Skip excluded symbols
-        if is_excluded(symbol) {
+        // Skip excluded symbols (shared exclusion logic)
+        if is_excluded_symbol(symbol) {
+            continue;
+        }
+
+        // Pattern-specific: skip structural container kinds
+        if symbol.kind == SymbolKind::Module
+            || symbol.kind == SymbolKind::Class
+            || symbol.kind == SymbolKind::Struct
+        {
             continue;
         }
 
@@ -60,7 +74,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
 
         let location = format!(
             "{}:{}",
-            symbol.location.file.display(),
+            relativize_path(&symbol.location.file, project_root),
             symbol.location.line
         );
 
@@ -93,57 +107,6 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
     }
 
     diagnostics
-}
-
-/// Check if a symbol should be excluded from dead-end detection.
-fn is_excluded(symbol: &crate::parser::ir::Symbol) -> bool {
-    // Skip entry points (explicitly marked as called from outside analysis scope)
-    if symbol.annotations.contains(&"entry_point".to_string()) {
-        return true;
-    }
-
-    // Skip import symbols (handled by phantom_dependency)
-    if symbol.annotations.contains(&"import".to_string()) {
-        return true;
-    }
-
-    // Skip module symbols (structural, not dead code)
-    if symbol.kind == SymbolKind::Module {
-        return true;
-    }
-
-    // Skip class symbols (classes are structural containers)
-    if symbol.kind == SymbolKind::Class || symbol.kind == SymbolKind::Struct {
-        return true;
-    }
-
-    // Skip entry points (main, main_handler, __main__, etc.)
-    if symbol.name == "main"
-        || symbol.name == "__main__"
-        || symbol.name == "if_name_main"
-        || symbol.name.starts_with("main_")
-        || symbol.name.ends_with("_main")
-    {
-        return true;
-    }
-
-    // Skip test functions
-    if symbol.name.starts_with("test_") {
-        return true;
-    }
-
-    // Skip test modules (file path contains test indicators)
-    let path = symbol.location.file.to_string_lossy();
-    if path.contains("test_") || path.contains("/tests/") || path.contains("/test/") {
-        return true;
-    }
-
-    // Skip dunder methods (Python special methods)
-    if symbol.name.starts_with("__") && symbol.name.ends_with("__") {
-        return true;
-    }
-
-    false
 }
 
 /// Human-readable label for a symbol kind.
