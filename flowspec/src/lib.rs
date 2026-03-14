@@ -38,9 +38,9 @@ pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
 pub use graph::Graph;
 pub use manifest::types::*;
-pub use manifest::{JsonFormatter, OutputFormatter, YamlFormatter};
+pub use manifest::{JsonFormatter, OutputFormatter, SarifFormatter, YamlFormatter};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use analyzer::conversion::to_manifest_entries;
@@ -48,6 +48,7 @@ use analyzer::extraction::{
     extract_called_by, extract_calls, extract_visibility, infer_module_role,
 };
 use graph::populate_graph;
+use graph::resolve_cross_file_imports;
 use parser::ir::SymbolKind;
 use parser::javascript::JsAdapter;
 use parser::python::PythonAdapter;
@@ -182,6 +183,15 @@ pub fn analyze(
                 }
             }
         }
+    }
+
+    // Stage 1b: Cross-file import resolution
+    // After all files are parsed, resolve import symbols that reference definitions
+    // in other files. This creates real edges with actual SymbolIds instead of
+    // SymbolId::default() placeholders.
+    let module_map = build_module_map(&files);
+    if !module_map.is_empty() {
+        resolve_cross_file_imports(&mut graph, &module_map);
     }
 
     // Warn when explicitly requested languages produce no analysis results
@@ -425,7 +435,7 @@ fn discover_source_files(project_path: &Path) -> (Vec<std::path::PathBuf>, Vec<S
                         files.push(entry);
                         languages.insert("python".to_string());
                     }
-                    Some("js" | "jsx") => {
+                    Some("js" | "jsx" | "mjs") => {
                         files.push(entry);
                         languages.insert("javascript".to_string());
                     }
@@ -495,4 +505,137 @@ fn format_symbol_kind(kind: SymbolKind) -> String {
         SymbolKind::Enum => "enum",
     }
     .to_string()
+}
+
+/// Builds a mapping from Python module names to file paths.
+///
+/// Maps file paths to their Python module names using standard Python conventions:
+/// - `utils.py` → `"utils"`
+/// - `my_package/__init__.py` → `"my_package"`
+/// - `my_package/core.py` → `"my_package.core"`
+///
+/// Only Python files (`.py` extension) are included. The mapping uses paths
+/// relative to the discovered project structure, with path separators converted
+/// to dots.
+pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+
+    let py_files: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| f.extension().map(|e| e == "py").unwrap_or(false))
+        .collect();
+
+    if py_files.is_empty() {
+        return map;
+    }
+
+    // Find the common prefix (project root) for all Python files
+    let common_prefix = find_common_prefix(&py_files);
+
+    for file in &py_files {
+        let rel = file.strip_prefix(&common_prefix).unwrap_or(file);
+        let module_name = path_to_module_name(rel);
+        if !module_name.is_empty() {
+            map.insert(module_name, (*file).clone());
+        }
+    }
+
+    map
+}
+
+/// Finds the project root directory for module name computation.
+///
+/// For `__init__.py` files, uses the grandparent directory (since the parent
+/// directory IS part of the package path). For regular `.py` files, uses the
+/// parent directory. The result is the common prefix of all these "effective
+/// roots", ensuring package structure is preserved in module names.
+fn find_common_prefix(files: &[&PathBuf]) -> PathBuf {
+    if files.is_empty() {
+        return PathBuf::new();
+    }
+
+    // For each file, compute its "effective root" — the directory that should
+    // NOT be part of the module name.
+    let effective_roots: Vec<PathBuf> = files
+        .iter()
+        .map(|f| {
+            let is_init = f
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "__init__.py")
+                .unwrap_or(false);
+
+            if is_init {
+                // __init__.py: grandparent is the project root
+                f.parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| f.parent().map(|p| p.to_path_buf()).unwrap_or_default())
+            } else {
+                f.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+            }
+        })
+        .collect();
+
+    if effective_roots.is_empty() {
+        return PathBuf::new();
+    }
+
+    let mut prefix = effective_roots[0].clone();
+    for root in &effective_roots[1..] {
+        while !root.starts_with(&prefix) {
+            if !prefix.pop() {
+                return PathBuf::new();
+            }
+        }
+    }
+
+    prefix
+}
+
+/// Converts a relative Python file path to a module name.
+///
+/// - `utils.py` → `"utils"`
+/// - `__init__.py` → `""` (maps to parent package, handled by caller)
+/// - `pkg/__init__.py` → `"pkg"`
+/// - `pkg/core.py` → `"pkg.core"`
+fn path_to_module_name(rel_path: &Path) -> String {
+    let file_name = rel_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    if file_name == "__init__.py" {
+        if let Some(parent) = rel_path.parent() {
+            return components_to_module(parent);
+        }
+        return String::new();
+    }
+
+    let stem = rel_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return String::new();
+    }
+
+    if let Some(parent) = rel_path.parent() {
+        let parent_module = components_to_module(parent);
+        if parent_module.is_empty() {
+            stem.to_string()
+        } else {
+            format!("{}.{}", parent_module, stem)
+        }
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Converts path components to a dot-separated module name.
+fn components_to_module(path: &Path) -> String {
+    path.components()
+        .filter_map(|c| {
+            if let std::path::Component::Normal(s) = c {
+                s.to_str()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }

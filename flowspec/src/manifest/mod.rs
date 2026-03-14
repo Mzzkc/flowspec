@@ -6,10 +6,12 @@
 //! output format (YAML, JSON, SARIF, summary).
 
 pub mod json;
+pub mod sarif;
 pub mod types;
 pub mod yaml;
 
 pub use json::JsonFormatter;
+pub use sarif::SarifFormatter;
 pub use types::*;
 pub use yaml::YamlFormatter;
 

@@ -13,6 +13,7 @@
 mod populate;
 
 pub use populate::populate_graph;
+pub use populate::resolve_cross_file_imports;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};

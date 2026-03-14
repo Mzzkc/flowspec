@@ -519,6 +519,190 @@ fn insert_boundaries(graph: &mut Graph, boundaries: &[Boundary], scope_id_map: &
     }
 }
 
+/// Resolves cross-file import references by matching import symbols to definitions
+/// in other files via a module-to-file mapping.
+///
+/// This is the second resolution pass, called after all files are parsed and
+/// `populate_graph()` has been called for each. It iterates import symbols (those
+/// with `"import"` annotation), extracts their `"from:<module>"` annotation, looks
+/// up the module in the provided map, then searches the target file's symbols for
+/// a matching definition.
+///
+/// # Resolution outcomes
+///
+/// - **Resolved:** Module found in map AND target symbol found in that file.
+///   A cross-file `Reference` edge is created with the real `SymbolId`.
+/// - **Partial("module resolved, symbol not found"):** Module file exists but
+///   the specific symbol wasn't found (e.g., dynamic attribute).
+/// - **Partial("external"):** Module not in map — likely stdlib or third-party.
+///   Left unchanged.
+/// - **Partial("star import"):** Star imports get module-level resolution only.
+///
+/// # Idempotency
+///
+/// Safe to call multiple times. Already-resolved imports are skipped. New edges
+/// are only created if the import is not yet resolved.
+pub fn resolve_cross_file_imports(
+    graph: &mut Graph,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+) {
+    use std::collections::HashMap;
+
+    if module_map.is_empty() {
+        return;
+    }
+
+    // Phase 1: Collect import symbols that need resolution.
+    // We collect IDs first to avoid borrow checker issues with simultaneous read+write.
+    let mut imports_to_resolve: Vec<(SymbolId, String, String)> = Vec::new(); // (id, module_name, lookup_name)
+
+    for (id, symbol) in graph.all_symbols() {
+        if !symbol.annotations.contains(&"import".to_string()) {
+            continue;
+        }
+
+        // Skip already resolved imports (idempotency)
+        if symbol.resolution == ResolutionStatus::Resolved {
+            continue;
+        }
+
+        // Extract the "from:<module>" annotation
+        let module_name = symbol
+            .annotations
+            .iter()
+            .find_map(|a| a.strip_prefix("from:"))
+            .map(|s| s.to_string());
+
+        let Some(module_name) = module_name else {
+            continue;
+        };
+
+        // Determine the name to look up in the target file.
+        // For aliased imports, use "original_name:<name>" if present.
+        let lookup_name = symbol
+            .annotations
+            .iter()
+            .find_map(|a| a.strip_prefix("original_name:"))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| symbol.name.clone());
+
+        imports_to_resolve.push((id, module_name, lookup_name));
+    }
+
+    // Phase 2: Build a reverse index from file path to symbols defined in that file.
+    // This avoids repeated graph.symbols_in_file() calls.
+    let mut file_symbols_cache: HashMap<std::path::PathBuf, Vec<(SymbolId, String, SymbolKind)>> =
+        HashMap::new();
+    for (id, symbol) in graph.all_symbols() {
+        // Only index non-import definition symbols (functions, classes, methods, etc.)
+        if symbol.kind == SymbolKind::Module {
+            continue;
+        }
+        file_symbols_cache
+            .entry(symbol.location.file.clone())
+            .or_default()
+            .push((id, symbol.name.clone(), symbol.kind));
+    }
+
+    // Phase 3: Resolve each import.
+    let mut new_references: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
+    let mut resolution_updates: Vec<(SymbolId, ResolutionStatus)> = Vec::new();
+
+    for (import_id, module_name, lookup_name) in &imports_to_resolve {
+        let target_file = module_map.get(module_name.as_str());
+
+        let Some(target_file) = target_file else {
+            // Module not found in map — likely stdlib/third-party. Leave as-is.
+            continue;
+        };
+
+        // Check if this is a star import (name starts with "*:")
+        if let Some(symbol) = graph.get_symbol(*import_id) {
+            if symbol.name.starts_with("*:") {
+                resolution_updates.push((
+                    *import_id,
+                    ResolutionStatus::Partial("star import - module resolved".to_string()),
+                ));
+                continue;
+            }
+        }
+
+        // Look for the target symbol in the target file
+        let target_symbols = file_symbols_cache.get(target_file);
+
+        if let Some(symbols) = target_symbols {
+            // Find a symbol with matching name. Prefer Function/Method/Class over others.
+            let mut best_match: Option<SymbolId> = None;
+            let mut any_match: Option<SymbolId> = None;
+
+            for (sym_id, sym_name, sym_kind) in symbols {
+                if sym_name == lookup_name {
+                    if any_match.is_none() {
+                        any_match = Some(*sym_id);
+                    }
+                    if matches!(
+                        sym_kind,
+                        SymbolKind::Function | SymbolKind::Method | SymbolKind::Class
+                    ) {
+                        best_match = Some(*sym_id);
+                        break;
+                    }
+                }
+            }
+
+            let target_id = best_match.or(any_match);
+
+            if let Some(target_id) = target_id {
+                // Get the import symbol's location for the new reference
+                if let Some(import_sym) = graph.get_symbol(*import_id) {
+                    new_references.push((*import_id, target_id, import_sym.location.clone()));
+                }
+                resolution_updates.push((*import_id, ResolutionStatus::Resolved));
+            } else if lookup_name == module_name {
+                // Module-level import (`import X`) — module file found is enough.
+                // No specific symbol to match since we're importing the whole module.
+                resolution_updates.push((*import_id, ResolutionStatus::Resolved));
+            } else {
+                // Module found but symbol not in it
+                resolution_updates.push((
+                    *import_id,
+                    ResolutionStatus::Partial("module resolved, symbol not found".to_string()),
+                ));
+            }
+        } else {
+            // Module file exists in map but has no non-import symbols
+            // This handles empty modules
+            if lookup_name == module_name || lookup_name.starts_with("*:") {
+                // Module-level import (e.g., `import utils`) — module found is enough
+                resolution_updates.push((*import_id, ResolutionStatus::Resolved));
+            } else {
+                resolution_updates.push((
+                    *import_id,
+                    ResolutionStatus::Partial("module resolved, symbol not found".to_string()),
+                ));
+            }
+        }
+    }
+
+    // Phase 4: Apply resolution updates and create new edges.
+    for (id, new_resolution) in resolution_updates {
+        if let Some(symbol) = graph.get_symbol_mut(id) {
+            symbol.resolution = new_resolution;
+        }
+    }
+
+    for (from_id, to_id, location) in new_references {
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from: from_id,
+            to: to_id,
+            kind: ReferenceKind::Import,
+            location,
+            resolution: ResolutionStatus::Resolved,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2734,5 +2918,900 @@ def setup():
                 path_inbound
             );
         }
+    }
+
+    // =========================================================================
+    // Cross-file resolution tests (M5)
+    // =========================================================================
+
+    /// Helper: parse multiple Python files and run cross-file resolution.
+    fn cross_file_graph(files: &[(&str, &str)]) -> Graph {
+        let adapter = PythonAdapter::new();
+        let mut graph = Graph::new();
+        let mut paths = Vec::new();
+
+        for (filename, content) in files {
+            let path = PathBuf::from(format!("project/{}", filename));
+            let result = adapter.parse_file(&path, content).unwrap();
+            populate_graph(&mut graph, &result);
+            paths.push(path);
+        }
+
+        let module_map = crate::build_module_map(&paths);
+        resolve_cross_file_imports(&mut graph, &module_map);
+        graph
+    }
+
+    // -- Category 1: Module-to-File Mapping ----------------------------------
+
+    #[test]
+    fn test_module_map_simple_file() {
+        let files = vec![PathBuf::from("project/utils.py")];
+        let map = crate::build_module_map(&files);
+        assert!(map.contains_key("utils"), "must map 'utils' -> utils.py");
+        assert_eq!(map["utils"], PathBuf::from("project/utils.py"));
+    }
+
+    #[test]
+    fn test_module_map_package_init() {
+        let files = vec![PathBuf::from("project/my_package/__init__.py")];
+        let map = crate::build_module_map(&files);
+        assert!(
+            map.contains_key("my_package"),
+            "must map __init__.py to package name"
+        );
+    }
+
+    #[test]
+    fn test_module_map_nested_module() {
+        let files = vec![
+            PathBuf::from("project/my_package/__init__.py"),
+            PathBuf::from("project/my_package/core.py"),
+        ];
+        let map = crate::build_module_map(&files);
+        assert!(
+            map.contains_key("my_package.core"),
+            "must map nested module with dot separator"
+        );
+    }
+
+    #[test]
+    fn test_module_map_deeply_nested() {
+        let files = vec![
+            PathBuf::from("project/a/b/c/d.py"),
+            PathBuf::from("project/a/__init__.py"),
+        ];
+        let map = crate::build_module_map(&files);
+        assert!(
+            map.contains_key("a.b.c.d"),
+            "must handle arbitrary nesting depth"
+        );
+    }
+
+    #[test]
+    fn test_module_map_multiple_files_same_package() {
+        let files = vec![
+            PathBuf::from("project/pkg/__init__.py"),
+            PathBuf::from("project/pkg/models.py"),
+            PathBuf::from("project/pkg/views.py"),
+        ];
+        let map = crate::build_module_map(&files);
+        assert_eq!(map.len(), 3, "package init + 2 submodules");
+        assert!(map.contains_key("pkg"));
+        assert!(map.contains_key("pkg.models"));
+        assert!(map.contains_key("pkg.views"));
+    }
+
+    #[test]
+    fn test_module_map_ignores_non_python() {
+        let files = vec![
+            PathBuf::from("project/utils.py"),
+            PathBuf::from("project/app.js"),
+        ];
+        let map = crate::build_module_map(&files);
+        assert!(map.contains_key("utils"));
+        assert!(
+            !map.contains_key("app"),
+            "JS files must not be in module map"
+        );
+    }
+
+    #[test]
+    fn test_module_map_empty_input() {
+        let files: Vec<PathBuf> = vec![];
+        let map = crate::build_module_map(&files);
+        assert!(map.is_empty(), "empty input must produce empty map");
+    }
+
+    #[test]
+    fn test_module_map_name_collision_different_packages() {
+        let files = vec![
+            PathBuf::from("project/pkg1/utils.py"),
+            PathBuf::from("project/pkg2/utils.py"),
+        ];
+        let map = crate::build_module_map(&files);
+        assert!(
+            map.contains_key("pkg1.utils"),
+            "qualified module names prevent collision"
+        );
+        assert!(
+            map.contains_key("pkg2.utils"),
+            "qualified module names prevent collision"
+        );
+    }
+
+    // -- Category 2: Adapter Annotation Enhancement --------------------------
+
+    #[test]
+    fn test_import_from_annotation_stored() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter
+            .parse_file(&path, "from utils import helper")
+            .unwrap();
+
+        let helper_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "helper" && s.annotations.contains(&"import".to_string()))
+            .expect("import symbol must exist");
+
+        assert!(
+            helper_sym.annotations.contains(&"from:utils".to_string()),
+            "must have from:utils annotation, got {:?}",
+            helper_sym.annotations
+        );
+    }
+
+    #[test]
+    fn test_plain_import_annotation_stored() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter.parse_file(&path, "import os").unwrap();
+
+        let os_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "os" && s.annotations.contains(&"import".to_string()))
+            .expect("import symbol must exist");
+
+        assert!(
+            os_sym.annotations.contains(&"from:os".to_string()),
+            "must have from:os annotation, got {:?}",
+            os_sym.annotations
+        );
+    }
+
+    #[test]
+    fn test_dotted_module_import_annotation() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter
+            .parse_file(&path, "from os.path import join")
+            .unwrap();
+
+        let join_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "join" && s.annotations.contains(&"import".to_string()))
+            .expect("import symbol must exist");
+
+        assert!(
+            join_sym.annotations.contains(&"from:os.path".to_string()),
+            "must store dotted module name verbatim, got {:?}",
+            join_sym.annotations
+        );
+    }
+
+    #[test]
+    fn test_aliased_import_original_name() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter
+            .parse_file(&path, "from utils import helper as h")
+            .unwrap();
+
+        let h_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "h" && s.annotations.contains(&"import".to_string()))
+            .expect("aliased import symbol must exist");
+
+        assert!(
+            h_sym.annotations.contains(&"from:utils".to_string()),
+            "must have from:utils annotation"
+        );
+        assert!(
+            h_sym
+                .annotations
+                .contains(&"original_name:helper".to_string()),
+            "must have original_name:helper annotation, got {:?}",
+            h_sym.annotations
+        );
+    }
+
+    #[test]
+    fn test_multiple_imports_same_module_annotated() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter
+            .parse_file(&path, "from utils import helper, processor, validator")
+            .unwrap();
+
+        let import_syms: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.contains(&"import".to_string()))
+            .collect();
+
+        assert_eq!(import_syms.len(), 3, "must have 3 import symbols");
+        for sym in &import_syms {
+            assert!(
+                sym.annotations.contains(&"from:utils".to_string()),
+                "each import must have from:utils, got {:?}",
+                sym.annotations
+            );
+        }
+    }
+
+    #[test]
+    fn test_star_import_annotation() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter.parse_file(&path, "from utils import *").unwrap();
+
+        // Star import creates a reference
+        let star_ref = result
+            .references
+            .iter()
+            .find(|r| r.kind == ReferenceKind::Import)
+            .expect("star import reference must exist");
+        assert_eq!(
+            star_ref.resolution,
+            ResolutionStatus::Partial("star import".to_string())
+        );
+
+        // Star import should also create a symbol with from: annotation
+        let star_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.annotations.contains(&"from:utils".to_string()));
+        assert!(
+            star_sym.is_some(),
+            "star import should create symbol with from: annotation"
+        );
+    }
+
+    #[test]
+    fn test_aliased_module_import_annotation() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test.py");
+        let result = adapter.parse_file(&path, "import numpy as np").unwrap();
+
+        let np_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "np" && s.annotations.contains(&"import".to_string()))
+            .expect("aliased module import symbol must exist");
+
+        assert!(
+            np_sym.annotations.contains(&"from:numpy".to_string()),
+            "must have from:numpy annotation, got {:?}",
+            np_sym.annotations
+        );
+        assert!(
+            np_sym
+                .annotations
+                .contains(&"original_name:numpy".to_string()),
+            "must have original_name:numpy annotation, got {:?}",
+            np_sym.annotations
+        );
+    }
+
+    // -- Category 3: Cross-File Resolution Pass ------------------------------
+
+    #[test]
+    fn test_cross_file_import_resolves_basic() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import helper\nhelper()"),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        let (import_id, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "helper" && s.annotations.contains(&"import".to_string()))
+            .expect("import symbol must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Resolved,
+            "import must be resolved after cross-file pass"
+        );
+
+        // The cross-file edge is from the import symbol to the target definition.
+        // Check incoming edges on the target definition in utils.py.
+        let (target_id, _target_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| {
+                s.name == "helper"
+                    && s.kind == SymbolKind::Function
+                    && s.qualified_name.contains("utils.py")
+            })
+            .expect("utils.py::helper definition must exist");
+
+        // The cross-file reference creates an edge from import_id -> target_id
+        // Check that target has incoming References edge from import
+        let incoming = graph.edges_to(target_id);
+        let cross_file_incoming = incoming
+            .iter()
+            .find(|e| e.kind == EdgeKind::References && e.target == import_id);
+
+        assert!(
+            cross_file_incoming.is_some(),
+            "target must have incoming cross-file edge from import symbol"
+        );
+
+        // Also verify outgoing edge from import symbol
+        let outgoing = graph.edges_from(import_id);
+        let cross_file_out = outgoing
+            .iter()
+            .find(|e| e.kind == EdgeKind::References && e.target == target_id);
+
+        assert!(
+            cross_file_out.is_some(),
+            "import must have outgoing cross-file edge to target. \
+             Outgoing edges: {:?}",
+            outgoing
+        );
+    }
+
+    #[test]
+    fn test_cross_file_aliased_import_resolves() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import helper as h\nh()"),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        let (import_id, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "h" && s.annotations.contains(&"import".to_string()))
+            .expect("aliased import symbol must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Resolved,
+            "aliased import must resolve via original_name"
+        );
+
+        // Verify the definition in utils.py has an incoming edge from the import
+        let (target_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| {
+                s.name == "helper"
+                    && s.kind == SymbolKind::Function
+                    && s.qualified_name.contains("utils.py")
+            })
+            .expect("utils.py::helper must exist");
+
+        let incoming = graph.edges_to(target_id);
+        let cross_file_edge = incoming
+            .iter()
+            .find(|e| e.kind == EdgeKind::References && e.target == import_id);
+        assert!(
+            cross_file_edge.is_some(),
+            "aliased import must create cross-file edge to 'helper' definition"
+        );
+    }
+
+    #[test]
+    fn test_cross_file_module_import_resolves() {
+        let graph = cross_file_graph(&[
+            ("main.py", "import utils"),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        let import_sym = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "utils" && s.annotations.contains(&"import".to_string()));
+
+        assert!(import_sym.is_some(), "import utils symbol must exist");
+        let (_, sym) = import_sym.unwrap();
+        // Module-level import — the import name IS the module name.
+        // Resolution depends on whether "utils" is in the module map AND
+        // the lookup_name matches module_name.
+        assert_ne!(
+            sym.resolution,
+            ResolutionStatus::Partial("import".to_string()),
+            "resolution must have been updated from initial state"
+        );
+    }
+
+    #[test]
+    fn test_cross_file_missing_module_stays_external() {
+        let graph = cross_file_graph(&[("main.py", "from nonexistent import foo")]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "foo" && s.annotations.contains(&"import".to_string()))
+            .expect("import symbol must exist");
+
+        // Import symbol starts with Partial("import") from the adapter.
+        // When the module is not found in the map, the resolution stays unchanged.
+        assert!(
+            matches!(
+                import_sym.resolution,
+                ResolutionStatus::Partial(ref s) if s == "import" || s == "external"
+            ),
+            "missing module import must stay partial, got {:?}",
+            import_sym.resolution
+        );
+    }
+
+    #[test]
+    fn test_cross_file_module_found_symbol_missing() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import nonexistent_func"),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| {
+                s.name == "nonexistent_func" && s.annotations.contains(&"import".to_string())
+            })
+            .expect("import symbol must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string()),
+            "module found but symbol missing must be partial"
+        );
+    }
+
+    #[test]
+    fn test_cross_file_star_import_partially_resolves() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import *"),
+            (
+                "utils.py",
+                "def helper():\n    pass\ndef processor():\n    pass",
+            ),
+        ]);
+
+        let star_sym = graph.all_symbols().find(|(_, s)| {
+            s.name.starts_with("*:") && s.annotations.contains(&"import".to_string())
+        });
+
+        if let Some((_, sym)) = star_sym {
+            assert!(
+                matches!(sym.resolution, ResolutionStatus::Partial(ref s) if s.contains("star import")),
+                "star import must be partial, not resolved. Got {:?}",
+                sym.resolution
+            );
+        }
+    }
+
+    #[test]
+    fn test_cross_file_multiple_imports_same_module() {
+        let graph = cross_file_graph(&[
+            (
+                "main.py",
+                "from utils import helper, processor\nhelper()\nprocessor()",
+            ),
+            (
+                "utils.py",
+                "def helper():\n    pass\ndef processor():\n    pass",
+            ),
+        ]);
+
+        let helper_import = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "helper" && s.annotations.contains(&"import".to_string()));
+        let processor_import = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "processor" && s.annotations.contains(&"import".to_string()));
+
+        assert!(helper_import.is_some(), "helper import must exist");
+        assert!(processor_import.is_some(), "processor import must exist");
+
+        let (_, h) = helper_import.unwrap();
+        let (_, p) = processor_import.unwrap();
+        assert_eq!(h.resolution, ResolutionStatus::Resolved);
+        assert_eq!(p.resolution, ResolutionStatus::Resolved);
+    }
+
+    #[test]
+    fn test_cross_file_import_class_resolves() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from models import User"),
+            (
+                "models.py",
+                "class User:\n    def __init__(self):\n        pass",
+            ),
+        ]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "User" && s.annotations.contains(&"import".to_string()))
+            .expect("User import must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Resolved,
+            "class import must resolve"
+        );
+    }
+
+    #[test]
+    fn test_cross_file_dotted_module_resolves() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from pkg.sub import func"),
+            ("pkg/__init__.py", ""),
+            ("pkg/sub.py", "def func():\n    pass"),
+        ]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "func" && s.annotations.contains(&"import".to_string()))
+            .expect("func import must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Resolved,
+            "dotted module import must resolve"
+        );
+    }
+
+    #[test]
+    fn test_cross_file_resolution_idempotent() {
+        let adapter = PythonAdapter::new();
+        let mut graph = Graph::new();
+        let mut paths = Vec::new();
+
+        for (filename, content) in &[
+            ("main.py", "from utils import helper\nhelper()"),
+            ("utils.py", "def helper():\n    pass"),
+        ] {
+            let path = PathBuf::from(format!("project/{}", filename));
+            let result = adapter.parse_file(&path, content).unwrap();
+            populate_graph(&mut graph, &result);
+            paths.push(path);
+        }
+
+        let module_map = crate::build_module_map(&paths);
+
+        // First pass
+        resolve_cross_file_imports(&mut graph, &module_map);
+        let ref_count_1 = graph.reference_count();
+
+        // Second pass — should be a no-op
+        resolve_cross_file_imports(&mut graph, &module_map);
+        let ref_count_2 = graph.reference_count();
+
+        assert_eq!(
+            ref_count_1, ref_count_2,
+            "idempotent: second pass must not create duplicate edges"
+        );
+    }
+
+    // -- Category 4: False Positive Suppression ------------------------------
+
+    #[test]
+    fn test_data_dead_end_suppressed_cross_file() {
+        use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
+
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import helper\nhelper()"),
+            ("utils.py", "def helper():\n    return 42"),
+        ]);
+
+        let diagnostics = data_dead_end::detect(&graph, Path::new("project"));
+
+        let helper_dead_end = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("helper") && d.entity.contains("utils"));
+
+        assert!(
+            helper_dead_end.is_none(),
+            "data_dead_end must NOT fire on utils.py::helper with cross-file caller"
+        );
+    }
+
+    #[test]
+    fn test_phantom_dependency_suppressed_cross_file() {
+        use crate::analyzer::patterns::phantom_dependency;
+        use std::path::Path;
+
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import helper\nhelper()"),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        let diagnostics = phantom_dependency::detect(&graph, Path::new("project"));
+
+        let helper_phantom = diagnostics.iter().find(|d| d.entity == "helper");
+
+        assert!(
+            helper_phantom.is_none(),
+            "phantom_dependency must NOT fire on resolved cross-file import"
+        );
+    }
+
+    #[test]
+    fn test_data_dead_end_true_positive_preserved() {
+        use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
+
+        let graph = cross_file_graph(&[
+            ("main.py", "from utils import helper\nhelper()"),
+            (
+                "utils.py",
+                "def helper():\n    pass\ndef unused_func():\n    pass",
+            ),
+        ]);
+
+        let diagnostics = data_dead_end::detect(&graph, Path::new("project"));
+
+        let unused_dead_end = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("unused_func"));
+
+        assert!(
+            unused_dead_end.is_some(),
+            "data_dead_end MUST fire on truly unused utils.py::unused_func"
+        );
+
+        let helper_dead_end = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("helper") && d.entity.contains("utils"));
+
+        assert!(
+            helper_dead_end.is_none(),
+            "data_dead_end must NOT fire on utils.py::helper (has caller)"
+        );
+    }
+
+    #[test]
+    fn test_phantom_dependency_true_positive_preserved() {
+        use crate::analyzer::patterns::phantom_dependency;
+
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("project/main.py");
+        let result = adapter.parse_file(&path, "import os").unwrap();
+
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        // No cross-file resolution (single file, os is stdlib)
+
+        let diagnostics = phantom_dependency::detect(&graph, std::path::Path::new("project"));
+
+        let os_phantom = diagnostics.iter().find(|d| d.entity == "os");
+        assert!(
+            os_phantom.is_some(),
+            "phantom_dependency MUST fire on unused 'import os'"
+        );
+    }
+
+    #[test]
+    fn test_data_dead_end_multiple_cross_file_callers() {
+        use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
+
+        let graph = cross_file_graph(&[
+            ("a.py", "from utils import helper\nhelper()"),
+            ("b.py", "from utils import helper\nhelper()"),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        let diagnostics = data_dead_end::detect(&graph, Path::new("project"));
+
+        let helper_dead_end = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("helper") && d.entity.contains("utils"));
+
+        assert!(
+            helper_dead_end.is_none(),
+            "data_dead_end must NOT fire with multiple cross-file callers"
+        );
+    }
+
+    #[test]
+    fn test_phantom_dependency_missing_module_import() {
+        use crate::analyzer::patterns::phantom_dependency;
+        use std::path::Path;
+
+        let graph = cross_file_graph(&[("main.py", "from nonexistent import foo\nfoo()")]);
+
+        let diagnostics = phantom_dependency::detect(&graph, Path::new("project"));
+
+        // foo is used (called), so phantom_dependency should NOT fire
+        // even though the import is unresolved cross-file
+        let foo_phantom = diagnostics.iter().find(|d| d.entity == "foo");
+        assert!(
+            foo_phantom.is_none(),
+            "phantom_dependency should not fire on used import even if unresolved"
+        );
+    }
+
+    // -- Category 5: Adversarial Edge Cases ----------------------------------
+
+    #[test]
+    fn test_circular_cross_file_imports_no_infinite_loop() {
+        let graph = cross_file_graph(&[
+            ("a.py", "from b import func_b\ndef func_a():\n    func_b()"),
+            ("b.py", "from a import func_a\ndef func_b():\n    func_a()"),
+        ]);
+
+        // Both should resolve without infinite loop
+        let a_import = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "func_b" && s.annotations.contains(&"import".to_string()));
+        let b_import = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "func_a" && s.annotations.contains(&"import".to_string()));
+
+        assert!(a_import.is_some(), "a.py import must exist");
+        assert!(b_import.is_some(), "b.py import must exist");
+
+        let (_, a_sym) = a_import.unwrap();
+        let (_, b_sym) = b_import.unwrap();
+        assert_eq!(a_sym.resolution, ResolutionStatus::Resolved);
+        assert_eq!(b_sym.resolution, ResolutionStatus::Resolved);
+    }
+
+    #[test]
+    fn test_self_import_resolves() {
+        let graph = cross_file_graph(&[(
+            "main.py",
+            "from main import helper\ndef helper():\n    pass",
+        )]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "helper" && s.annotations.contains(&"import".to_string()))
+            .expect("self-import symbol must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Resolved,
+            "self-import must resolve to same-file definition"
+        );
+    }
+
+    #[test]
+    fn test_import_from_empty_module() {
+        let graph =
+            cross_file_graph(&[("main.py", "from empty import something"), ("empty.py", "")]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "something" && s.annotations.contains(&"import".to_string()))
+            .expect("import symbol must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string()),
+            "import from empty module must be partial"
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_package_resolution() {
+        let graph = cross_file_graph(&[
+            ("main.py", "from a.b.c.d import deep_func"),
+            ("a/__init__.py", ""),
+            ("a/b/__init__.py", ""),
+            ("a/b/c/__init__.py", ""),
+            ("a/b/c/d.py", "def deep_func():\n    pass"),
+        ]);
+
+        let (_, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "deep_func" && s.annotations.contains(&"import".to_string()))
+            .expect("deep_func import must exist");
+
+        assert_eq!(
+            import_sym.resolution,
+            ResolutionStatus::Resolved,
+            "deeply nested module import must resolve"
+        );
+    }
+
+    #[test]
+    fn test_import_and_call_resolution_independent() {
+        let graph = cross_file_graph(&[
+            (
+                "main.py",
+                "from utils import helper\ndef main():\n    helper()\n    local_func()\ndef local_func():\n    pass",
+            ),
+            ("utils.py", "def helper():\n    pass"),
+        ]);
+
+        // Cross-file import should resolve
+        let (_import_id, import_sym) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "helper" && s.annotations.contains(&"import".to_string()))
+            .expect("helper import must exist");
+        assert_eq!(import_sym.resolution, ResolutionStatus::Resolved);
+
+        // Intra-file call to local_func should still work
+        let main_sym = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "main" && s.kind == SymbolKind::Function);
+        assert!(main_sym.is_some(), "main function must exist");
+
+        let local_func = graph.all_symbols().find(|(_, s)| {
+            s.name == "local_func"
+                && s.kind == SymbolKind::Function
+                && s.qualified_name.contains("main.py")
+        });
+        assert!(local_func.is_some(), "local_func must exist");
+
+        // Verify local_func has an inbound call edge (from main)
+        if let Some((lf_id, _)) = local_func {
+            let callers = graph.callers(lf_id);
+            assert!(
+                !callers.is_empty(),
+                "local_func must have callers (intra-file resolution still works)"
+            );
+        }
+    }
+
+    // -- Category 6: Regression Guards ---------------------------------------
+
+    #[test]
+    fn test_single_file_analysis_unchanged() {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("project/single.py");
+        let content = "def foo():\n    pass\ndef bar():\n    foo()";
+
+        let result = adapter.parse_file(&path, content).unwrap();
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+
+        let sym_count_before = graph.symbol_count();
+        let ref_count_before = graph.reference_count();
+
+        // Run cross-file resolution with empty module map (single file)
+        let module_map = crate::build_module_map(&[path]);
+        resolve_cross_file_imports(&mut graph, &module_map);
+
+        assert_eq!(
+            graph.symbol_count(),
+            sym_count_before,
+            "single file: symbol count must not change"
+        );
+        assert_eq!(
+            graph.reference_count(),
+            ref_count_before,
+            "single file: reference count must not change (no cross-file imports)"
+        );
+    }
+
+    #[test]
+    fn test_populate_graph_multiple_calls_still_additive() {
+        let adapter = PythonAdapter::new();
+        let path1 = PathBuf::from("project/file1.py");
+        let path2 = PathBuf::from("project/file2.py");
+
+        let result1 = adapter
+            .parse_file(&path1, "def func1():\n    pass")
+            .unwrap();
+        let result2 = adapter
+            .parse_file(&path2, "def func2():\n    pass")
+            .unwrap();
+
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result1);
+        let count1 = graph.symbol_count();
+        populate_graph(&mut graph, &result2);
+        let count2 = graph.symbol_count();
+
+        assert_eq!(
+            count2,
+            count1 + 1,
+            "second populate must be additive, not replace"
+        );
     }
 }

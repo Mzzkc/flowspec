@@ -372,7 +372,10 @@ fn extract_class(
 /// annotation so that `phantom_dependency` can find and check import symbols.
 ///
 /// For aliased imports (`import os as o`), the symbol name is the alias (what code
-/// references), not the original module name.
+/// references), not the original module name. The original module name is stored
+/// as a `"from:<module>"` annotation for cross-file resolution. Aliased imports
+/// additionally store `"original_name:<name>"` so the resolution pass can look up
+/// the original name in the target module.
 fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
         .file_name()
@@ -382,7 +385,7 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
-            let (import_name, symbol_name) = if child.kind() == "aliased_import" {
+            let (import_name, symbol_name, is_aliased) = if child.kind() == "aliased_import" {
                 let original = child
                     .child_by_field_name("name")
                     .map(|n| node_text(content, n).to_string())
@@ -390,12 +393,13 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
                 let alias = child
                     .child_by_field_name("alias")
                     .map(|n| node_text(content, n).to_string());
+                let has_alias = alias.is_some();
                 // Symbol name is the alias (what code uses), falling back to original
                 let sym_name = alias.unwrap_or_else(|| original.clone());
-                (original, sym_name)
+                (original, sym_name, has_alias)
             } else {
                 let name = node_text(content, child).to_string();
-                (name.clone(), name)
+                (name.clone(), name, false)
             };
 
             if !import_name.is_empty() {
@@ -408,6 +412,12 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
                     resolution: ResolutionStatus::Partial("external".to_string()),
                 });
 
+                // Build annotations: "import" + "from:<module>" + optional "original_name:<name>"
+                let mut annotations = vec!["import".to_string(), format!("from:{}", import_name)];
+                if is_aliased {
+                    annotations.push(format!("original_name:{}", import_name));
+                }
+
                 // Create import symbol for phantom_dependency detection
                 result.symbols.push(Symbol {
                     id: SymbolId::default(),
@@ -419,7 +429,7 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
                     location: node_location(path, node),
                     resolution: ResolutionStatus::Partial("import".to_string()),
                     scope: ScopeId::default(),
-                    annotations: vec!["import".to_string()],
+                    annotations,
                 });
             }
         }
@@ -432,6 +442,11 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
 /// imports (`from pathlib import Path as P`), the symbol name is the alias.
 /// Star imports (`from os import *`) produce only a Reference, no Symbol (no
 /// specific name to track).
+///
+/// Each import symbol carries a `"from:<module>"` annotation recording the source
+/// module name for cross-file resolution. Aliased imports additionally store
+/// `"original_name:<name>"` so the resolution pass can look up the original
+/// name in the target module.
 fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
         .file_name()
@@ -442,7 +457,17 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
     let is_relative = full_text.contains("from .") || full_text.starts_with("from .");
     let is_star = full_text.contains("import *");
 
+    // Extract the source module name (e.g., "utils" from "from utils import helper")
+    let module_name = node
+        .child_by_field_name("module_name")
+        .map(|m| node_text(content, m).to_string())
+        .unwrap_or_default();
+
     if is_star {
+        let mut annotations = vec!["import".to_string()];
+        if !module_name.is_empty() {
+            annotations.push(format!("from:{}", module_name));
+        }
         result.references.push(Reference {
             id: ReferenceId::default(),
             from: SymbolId::default(),
@@ -451,6 +476,21 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
             location: node_location(path, node),
             resolution: ResolutionStatus::Partial("star import".to_string()),
         });
+        // Create a symbol for star imports so cross-file resolution can find the module
+        if !module_name.is_empty() {
+            result.symbols.push(Symbol {
+                id: SymbolId::default(),
+                kind: SymbolKind::Module,
+                name: format!("*:{}", module_name),
+                qualified_name: format!("{}::import::*:{}", file_stem, module_name),
+                visibility: Visibility::Private,
+                signature: None,
+                location: node_location(path, node),
+                resolution: ResolutionStatus::Partial("star import".to_string()),
+                scope: ScopeId::default(),
+                annotations,
+            });
+        }
         return;
     }
 
@@ -486,6 +526,12 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
                         resolution,
                     });
 
+                    // Build annotations with from:<module>
+                    let mut annotations = vec!["import".to_string()];
+                    if !module_name.is_empty() {
+                        annotations.push(format!("from:{}", module_name));
+                    }
+
                     // Create import symbol for phantom_dependency detection
                     result.symbols.push(Symbol {
                         id: SymbolId::default(),
@@ -497,7 +543,7 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
                         location: node_location(path, node),
                         resolution: ResolutionStatus::Partial("import".to_string()),
                         scope: ScopeId::default(),
-                        annotations: vec!["import".to_string()],
+                        annotations,
                     });
 
                     found_names = true;
@@ -505,8 +551,8 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
             }
             "aliased_import" => {
                 if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = node_text(content, name_node).to_string();
-                    if !name.is_empty() {
+                    let original_name = node_text(content, name_node).to_string();
+                    if !original_name.is_empty() {
                         let resolution = if is_relative {
                             ResolutionStatus::Partial("relative import".to_string())
                         } else {
@@ -522,10 +568,20 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
                         });
 
                         // Use alias as symbol name if available
-                        let symbol_name = child
+                        let alias = child
                             .child_by_field_name("alias")
-                            .map(|n| node_text(content, n).to_string())
-                            .unwrap_or_else(|| name.clone());
+                            .map(|n| node_text(content, n).to_string());
+                        let has_alias = alias.is_some();
+                        let symbol_name = alias.unwrap_or_else(|| original_name.clone());
+
+                        // Build annotations with from:<module> and optional original_name:<name>
+                        let mut annotations = vec!["import".to_string()];
+                        if !module_name.is_empty() {
+                            annotations.push(format!("from:{}", module_name));
+                        }
+                        if has_alias {
+                            annotations.push(format!("original_name:{}", original_name));
+                        }
 
                         result.symbols.push(Symbol {
                             id: SymbolId::default(),
@@ -537,7 +593,7 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
                             location: node_location(path, node),
                             resolution: ResolutionStatus::Partial("import".to_string()),
                             scope: ScopeId::default(),
-                            annotations: vec!["import".to_string()],
+                            annotations,
                         });
 
                         found_names = true;
