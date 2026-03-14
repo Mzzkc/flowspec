@@ -379,7 +379,11 @@ impl Graph {
     }
 }
 
-/// Maps ReferenceKind to EdgeKind.
+/// Maps a [`ReferenceKind`] to the corresponding [`EdgeKind`] for the graph's
+/// adjacency lists. Only `Call` produces `EdgeKind::Calls`; all other reference
+/// kinds produce `EdgeKind::References`. This distinction is critical because
+/// diagnostic patterns like `data_dead_end` and `isolated_cluster` filter on
+/// `EdgeKind::Calls` to detect uncalled functions and disconnected clusters.
 fn ref_kind_to_edge_kind(kind: ReferenceKind) -> EdgeKind {
     match kind {
         ReferenceKind::Call => EdgeKind::Calls,

@@ -2,10 +2,15 @@
 
 //! Python language adapter using tree-sitter-python.
 //!
-//! Extracts functions, classes, methods, imports, variables, and constants
-//! from Python source files. Builds scope hierarchy. Detects decorators.
-//! Uses Python naming conventions for visibility (leading underscore = private)
-//! and constant detection (UPPER_CASE = constant).
+//! Extracts functions, classes, methods, imports, variables, constants, and
+//! **function/method calls** from Python source files. Builds scope hierarchy.
+//! Detects decorators. Uses Python naming conventions for visibility (leading
+//! underscore = private) and constant detection (UPPER_CASE = constant).
+//!
+//! Call-site detection walks the full AST for `call` expression nodes and
+//! emits `ReferenceKind::Call` references with callee names stored as
+//! `ResolutionStatus::Partial("call:<name>")`. Intra-file resolution of
+//! these references happens downstream in `populate_graph`.
 
 use std::path::Path;
 
@@ -358,17 +363,36 @@ fn extract_class(
 }
 
 /// Extract `import module` statements.
+///
+/// Creates both a `Reference` (for graph edges) and a `Symbol` (for pattern detection)
+/// for each imported name. The symbol uses `SymbolKind::Module` with an `"import"`
+/// annotation so that `phantom_dependency` can find and check import symbols.
+///
+/// For aliased imports (`import os as o`), the symbol name is the alias (what code
+/// references), not the original module name.
 fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    let file_stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
-            let import_name = if child.kind() == "aliased_import" {
-                child
+            let (import_name, symbol_name) = if child.kind() == "aliased_import" {
+                let original = child
                     .child_by_field_name("name")
                     .map(|n| node_text(content, n).to_string())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let alias = child
+                    .child_by_field_name("alias")
+                    .map(|n| node_text(content, n).to_string());
+                // Symbol name is the alias (what code uses), falling back to original
+                let sym_name = alias.unwrap_or_else(|| original.clone());
+                (original, sym_name)
             } else {
-                node_text(content, child).to_string()
+                let name = node_text(content, child).to_string();
+                (name.clone(), name)
             };
 
             if !import_name.is_empty() {
@@ -380,13 +404,37 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
                     location: node_location(path, node),
                     resolution: ResolutionStatus::Partial("external".to_string()),
                 });
+
+                // Create import symbol for phantom_dependency detection
+                result.symbols.push(Symbol {
+                    id: SymbolId::default(),
+                    kind: SymbolKind::Module,
+                    name: symbol_name.clone(),
+                    qualified_name: format!("{}::import::{}", file_stem, symbol_name),
+                    visibility: Visibility::Private,
+                    signature: None,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial("import".to_string()),
+                    scope: ScopeId::default(),
+                    annotations: vec!["import".to_string()],
+                });
             }
         }
     }
 }
 
 /// Extract `from module import name` statements.
+///
+/// Creates both a `Reference` and a `Symbol` for each imported name. For aliased
+/// imports (`from pathlib import Path as P`), the symbol name is the alias.
+/// Star imports (`from os import *`) produce only a Reference, no Symbol (no
+/// specific name to track).
 fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    let file_stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let full_text = node_text(content, node);
     let is_relative = full_text.contains("from .") || full_text.starts_with("from .");
     let is_star = full_text.contains("import *");
@@ -434,6 +482,21 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
                         location: node_location(path, node),
                         resolution,
                     });
+
+                    // Create import symbol for phantom_dependency detection
+                    result.symbols.push(Symbol {
+                        id: SymbolId::default(),
+                        kind: SymbolKind::Module,
+                        name: name.clone(),
+                        qualified_name: format!("{}::import::{}", file_stem, name),
+                        visibility: Visibility::Private,
+                        signature: None,
+                        location: node_location(path, node),
+                        resolution: ResolutionStatus::Partial("import".to_string()),
+                        scope: ScopeId::default(),
+                        annotations: vec!["import".to_string()],
+                    });
+
                     found_names = true;
                 }
             }
@@ -454,6 +517,26 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
                             location: node_location(path, node),
                             resolution,
                         });
+
+                        // Use alias as symbol name if available
+                        let symbol_name = child
+                            .child_by_field_name("alias")
+                            .map(|n| node_text(content, n).to_string())
+                            .unwrap_or_else(|| name.clone());
+
+                        result.symbols.push(Symbol {
+                            id: SymbolId::default(),
+                            kind: SymbolKind::Module,
+                            name: symbol_name.clone(),
+                            qualified_name: format!("{}::import::{}", file_stem, symbol_name),
+                            visibility: Visibility::Private,
+                            signature: None,
+                            location: node_location(path, node),
+                            resolution: ResolutionStatus::Partial("import".to_string()),
+                            scope: ScopeId::default(),
+                            annotations: vec!["import".to_string()],
+                        });
+
                         found_names = true;
                     }
                 }

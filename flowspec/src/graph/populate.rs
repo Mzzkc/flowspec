@@ -8,8 +8,21 @@
 //!
 //! - **Scope insertion** with parent reconstruction via location containment
 //! - **Symbol insertion** with scope ID remapping
-//! - **Reference insertion** with from/to ID remapping (skips unresolvable refs)
+//! - **Reference insertion** with from/to ID remapping and **intra-file resolution**
 //! - **Boundary insertion**
+//!
+//! ## Intra-File Reference Resolution
+//!
+//! For `ReferenceKind::Call` references (produced by `PythonAdapter::extract_all_calls`):
+//! - **`from`** is resolved via location containment — `find_containing_symbol()` finds
+//!   the innermost Function/Method whose source range contains the call site
+//! - **`to`** is resolved via name matching — `resolve_callee()` matches the callee name
+//!   against symbols defined in the same file
+//!
+//! What stays **unresolved** (`SymbolId::default()`):
+//! - Cross-file calls (e.g., `module.func()`) — requires M5 cross-file resolution
+//! - Built-in calls (`print`, `len`) — no symbol definition in user code
+//! - Dynamic dispatch (`getattr()`) — not statically resolvable
 //!
 //! Calling `populate_graph` multiple times with different files is additive — each
 //! call inserts into the existing graph without corruption.
@@ -262,6 +275,11 @@ fn find_scope_for_symbol(symbol: &Symbol, scopes: &[Scope], scope_id_map: &[Scop
 /// - `from` is resolved via location containment (which function/method contains the call)
 /// - `to` is resolved via name matching against same-file symbols
 ///
+/// Module-level calls (where `find_containing_symbol` returns `None`) are attributed to
+/// a lazily-created synthetic `<module>` symbol with `SymbolKind::Module`. This eliminates
+/// self-referencing edges that occurred when the fallback assigned `from` to the first
+/// symbol in the file (which could also be the callee).
+///
 /// For other references (imports), uses the existing first-symbol fallback for `from`.
 fn insert_references(
     graph: &mut Graph,
@@ -269,6 +287,10 @@ fn insert_references(
     symbol_id_map: &[(usize, SymbolId)],
     symbols: &[Symbol],
 ) {
+    // Lazily-created <module> symbol for module-level calls.
+    // Created on first module-level call, reused for subsequent ones in the same file.
+    let mut module_symbol_id: Option<SymbolId> = None;
+
     for reference in references {
         let mut new_ref = reference.clone();
 
@@ -279,12 +301,9 @@ fn insert_references(
                 // Resolve from: find the symbol whose location contains this call
                 new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
                     .unwrap_or_else(|| {
-                        // Fallback: first symbol (module-level call)
-                        if !symbol_id_map.is_empty() {
-                            symbol_id_map[0].1
-                        } else {
-                            SymbolId::default()
-                        }
+                        // Module-level call: create or reuse the <module> symbol
+                        *module_symbol_id
+                            .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
                     });
 
                 // Resolve to: match callee name against same-file symbols
@@ -301,6 +320,39 @@ fn insert_references(
 
         graph.add_reference(new_ref);
     }
+}
+
+/// Creates a synthetic `<module>` symbol representing module-level code.
+///
+/// Module-level calls (e.g., `result = setup()` at top level) need a real symbol
+/// to serve as the caller. The `<module>` symbol uses `SymbolKind::Module`, which
+/// is already filtered from pattern entity lists, so it won't appear in diagnostics
+/// like `data_dead_end`.
+fn create_module_symbol(graph: &mut Graph, ref_location: &Location) -> SymbolId {
+    let file_stem = ref_location
+        .file
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    graph.add_symbol(Symbol {
+        id: SymbolId::default(),
+        kind: SymbolKind::Module,
+        name: "<module>".to_string(),
+        qualified_name: format!("{}::<module>", file_stem),
+        visibility: Visibility::Public,
+        signature: None,
+        location: Location {
+            file: ref_location.file.clone(),
+            line: 1,
+            column: 1,
+            end_line: u32::MAX,
+            end_column: 1,
+        },
+        resolution: ResolutionStatus::Resolved,
+        scope: ScopeId::default(),
+        annotations: vec![],
+    })
 }
 
 /// Finds the innermost function/method symbol whose location contains the reference.
@@ -1728,10 +1780,11 @@ result = setup()
     #[test]
     fn test_dead_code_fixture_correct_with_call_detection() {
         use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
 
         let graph = parse_fixture_for_pattern("dead_code.py");
 
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
         let flagged_names: Vec<String> = diagnostics.iter().map(|d| d.entity.clone()).collect();
 
         // True positives: unused_helper, _private_util
@@ -1764,10 +1817,11 @@ result = setup()
     #[test]
     fn test_clean_code_fixture_zero_dead_ends() {
         use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
 
         let graph = parse_fixture_for_pattern("clean_code.py");
 
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
         let flagged: Vec<String> = diagnostics.iter().map(|d| d.entity.clone()).collect();
 
         assert!(
@@ -1810,5 +1864,844 @@ result = setup()
             total_refs,
             import_refs
         );
+    }
+
+    // =========================================================================
+    // QA-Foundation Cycle 3: Module-level call attribution + import symbols
+    // =========================================================================
+
+    /// Find all symbols matching a predicate.
+    fn find_symbols<'a>(
+        graph: &'a Graph,
+        pred: impl Fn(&Symbol) -> bool,
+    ) -> Vec<(SymbolId, &'a Symbol)> {
+        graph.all_symbols().filter(|(_, s)| pred(s)).collect()
+    }
+
+    /// Find the <module> symbol if it exists.
+    fn find_module_symbol(graph: &Graph) -> Option<(SymbolId, &Symbol)> {
+        graph
+            .all_symbols()
+            .find(|(_, s)| s.kind == SymbolKind::Module && s.name == "<module>")
+    }
+
+    /// Assert no Module symbol has self-referencing Calls edges.
+    fn assert_no_spurious_self_edges(graph: &Graph) {
+        for (id, symbol) in graph.all_symbols() {
+            let self_edges: Vec<_> = graph
+                .edges_from(id)
+                .iter()
+                .filter(|e| e.target == id && e.kind == EdgeKind::Calls)
+                .collect();
+            if !self_edges.is_empty() && symbol.kind == SymbolKind::Module {
+                panic!(
+                    "Module symbol '{}' has self-referencing Calls edge — this is the bug",
+                    symbol.name
+                );
+            }
+        }
+    }
+
+    // -- Category 1: Module-Level Call Attribution — No Self-Referencing Edges --
+
+    #[test]
+    fn test_module_level_call_no_self_reference() {
+        let source = r#"
+result = setup()
+
+def setup():
+    return 42
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (setup_id, _) = find_symbol(&graph, "setup");
+        let self_edges: Vec<_> = graph
+            .edges_from(setup_id)
+            .iter()
+            .filter(|e| e.target == setup_id && e.kind == EdgeKind::Calls)
+            .collect();
+
+        assert!(
+            self_edges.is_empty(),
+            "Module-level `result = setup()` must NOT create self-referencing edge on setup. \
+             Found {} self-edges.",
+            self_edges.len()
+        );
+    }
+
+    #[test]
+    fn test_module_level_call_attributed_to_module_symbol() {
+        let source = r#"
+result = setup()
+
+def setup():
+    return 42
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (setup_id, _) = find_symbol(&graph, "setup");
+
+        let callers = graph.callers(setup_id);
+        assert!(
+            !callers.is_empty(),
+            "setup() must have at least one caller from module-level code"
+        );
+
+        for caller_id in &callers {
+            let caller = graph.get_symbol(*caller_id).expect("caller must exist");
+            assert_ne!(
+                *caller_id, setup_id,
+                "Caller of setup() must NOT be setup itself. Caller is '{}' ({:?})",
+                caller.name, caller.kind
+            );
+            assert_eq!(
+                caller.kind,
+                SymbolKind::Module,
+                "Module-level call must be attributed to a Module symbol, not {:?} '{}'",
+                caller.kind,
+                caller.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_module_level_calls_same_module_symbol() {
+        let source = r#"
+a = foo()
+b = bar()
+c = foo()
+
+def foo():
+    return 1
+
+def bar():
+    return 2
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (foo_id, _) = find_symbol(&graph, "foo");
+        let (bar_id, _) = find_symbol(&graph, "bar");
+
+        let foo_callers = graph.callers(foo_id);
+        let bar_callers = graph.callers(bar_id);
+
+        assert!(!foo_callers.is_empty(), "foo must have module-level caller");
+        assert!(!bar_callers.is_empty(), "bar must have module-level caller");
+
+        let module_callers: Vec<_> = foo_callers
+            .iter()
+            .chain(bar_callers.iter())
+            .filter(|id| {
+                graph
+                    .get_symbol(**id)
+                    .map(|s| s.kind == SymbolKind::Module)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !module_callers.is_empty(),
+            "At least one caller must be Module kind"
+        );
+
+        let first = module_callers[0];
+        for caller in &module_callers {
+            assert_eq!(
+                **caller, *first,
+                "All module-level calls must share the same <module> symbol"
+            );
+        }
+    }
+
+    #[test]
+    fn test_only_module_level_calls_no_functions() {
+        let source = r#"
+print("hello")
+len([1, 2, 3])
+"#;
+        let (graph, _) = parse_and_populate(source);
+        assert_no_spurious_self_edges(&graph);
+
+        let module_sym = find_module_symbol(&graph);
+        assert!(
+            module_sym.is_some(),
+            "File with module-level calls must create a <module> symbol"
+        );
+    }
+
+    #[test]
+    fn test_module_level_forward_reference() {
+        let source = r#"
+x = later_func()
+
+def other():
+    pass
+
+def later_func():
+    return 99
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (later_id, _) = find_symbol(&graph, "later_func");
+
+        let inbound = inbound_call_count(&graph, later_id);
+        assert!(
+            inbound >= 1,
+            "Module-level call to forward-declared later_func must resolve. Inbound: {}",
+            inbound
+        );
+        assert_no_spurious_self_edges(&graph);
+    }
+
+    #[test]
+    fn test_no_self_referencing_edges_dead_code_fixture() {
+        let graph = parse_fixture_for_pattern("dead_code.py");
+        assert_no_spurious_self_edges(&graph);
+    }
+
+    #[test]
+    fn test_no_self_referencing_edges_clean_code_fixture() {
+        let graph = parse_fixture_for_pattern("clean_code.py");
+        assert_no_spurious_self_edges(&graph);
+    }
+
+    #[test]
+    fn test_no_self_referencing_edges_isolated_module_fixture() {
+        let graph = parse_fixture_for_pattern("isolated_module.py");
+        assert_no_spurious_self_edges(&graph);
+    }
+
+    // -- Category 2: <module> Symbol Properties --------------------------------
+
+    #[test]
+    fn test_module_symbol_properties() {
+        let source = r#"
+result = setup()
+
+def setup():
+    return 42
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (_, module_sym) = find_module_symbol(&graph)
+            .expect("<module> symbol must exist for file with module-level calls");
+
+        assert_eq!(module_sym.kind, SymbolKind::Module);
+        assert_eq!(module_sym.name, "<module>");
+        assert!(
+            module_sym.qualified_name.contains("<module>"),
+            "Qualified name '{}' must contain '<module>'",
+            module_sym.qualified_name
+        );
+    }
+
+    #[test]
+    fn test_module_symbol_not_flagged_as_dead_end() {
+        use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
+
+        let source = r#"
+result = setup()
+
+def setup():
+    return 42
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("module_call_test.py");
+        std::fs::write(&path, source).expect("write");
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, source).expect("parse");
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        std::mem::forget(dir);
+
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
+        let flagged: Vec<_> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        assert!(
+            !flagged.iter().any(|n| n.contains("<module>")),
+            "<module> symbol must NOT be flagged as dead end. Flagged: {:?}",
+            flagged
+        );
+    }
+
+    #[test]
+    fn test_no_module_symbol_without_module_level_calls() {
+        let source = r#"
+def foo():
+    return 1
+
+def bar():
+    foo()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let module_sym = find_module_symbol(&graph);
+
+        assert!(
+            module_sym.is_none(),
+            "<module> symbol must NOT be created when all calls are inside functions. \
+             Found: {:?}",
+            module_sym.map(|(_, s)| &s.name)
+        );
+    }
+
+    // -- Category 3: Import Symbol Creation ------------------------------------
+
+    #[test]
+    fn test_import_creates_symbol() {
+        let source = r#"
+import os
+
+def main():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms: Vec<_> = graph
+            .all_symbols()
+            .filter(|(_, s)| s.annotations.contains(&"import".to_string()))
+            .collect();
+
+        assert!(
+            !import_syms.is_empty(),
+            "`import os` must create a Symbol with 'import' annotation. Found 0 import symbols."
+        );
+
+        let os_sym = import_syms.iter().find(|(_, s)| s.name == "os");
+        assert!(
+            os_sym.is_some(),
+            "Import symbol must have name 'os'. Found: {:?}",
+            import_syms.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        );
+
+        let (_, os) = os_sym.unwrap();
+        assert_eq!(
+            os.kind,
+            SymbolKind::Module,
+            "Import symbol must have kind Module"
+        );
+    }
+
+    #[test]
+    fn test_from_import_creates_symbol() {
+        let source = r#"
+from collections import OrderedDict
+
+def main():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms = find_symbols(&graph, |s| {
+            s.annotations.contains(&"import".to_string()) && s.name == "OrderedDict"
+        });
+
+        assert_eq!(
+            import_syms.len(),
+            1,
+            "`from collections import OrderedDict` must create exactly 1 import symbol. Found: {:?}",
+            import_syms.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_multi_import_creates_multiple_symbols() {
+        let source = r#"
+import os, sys
+
+def main():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms = find_symbols(&graph, |s| s.annotations.contains(&"import".to_string()));
+
+        assert!(
+            import_syms.len() >= 2,
+            "`import os, sys` must create at least 2 import symbols. Found {}: {:?}",
+            import_syms.len(),
+            import_syms.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        );
+
+        assert!(
+            import_syms.iter().any(|(_, s)| s.name == "os"),
+            "Must have import symbol for 'os'"
+        );
+        assert!(
+            import_syms.iter().any(|(_, s)| s.name == "sys"),
+            "Must have import symbol for 'sys'"
+        );
+    }
+
+    #[test]
+    fn test_import_symbol_location() {
+        let source = "import os\nfrom pathlib import Path\n\ndef main():\n    pass\n";
+        let (graph, _) = parse_and_populate(source);
+
+        let os_sym = graph
+            .all_symbols()
+            .find(|(_, s)| s.annotations.contains(&"import".to_string()) && s.name == "os");
+        assert!(os_sym.is_some(), "os import symbol must exist");
+        let (_, os) = os_sym.unwrap();
+        assert_eq!(os.location.line, 1, "import os is on line 1");
+
+        let path_sym = graph
+            .all_symbols()
+            .find(|(_, s)| s.annotations.contains(&"import".to_string()) && s.name == "Path");
+        assert!(path_sym.is_some(), "Path import symbol must exist");
+        let (_, path) = path_sym.unwrap();
+        assert_eq!(
+            path.location.line, 2,
+            "from pathlib import Path is on line 2"
+        );
+    }
+
+    #[test]
+    fn test_aliased_import_uses_alias_name() {
+        let source = r#"
+import os as operating_system
+from pathlib import Path as P
+
+def main():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms = find_symbols(&graph, |s| s.annotations.contains(&"import".to_string()));
+
+        assert!(
+            import_syms
+                .iter()
+                .any(|(_, s)| s.name == "operating_system"),
+            "Aliased `import os as operating_system` must use alias. Found: {:?}",
+            import_syms.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        );
+        assert!(
+            import_syms.iter().any(|(_, s)| s.name == "P"),
+            "Aliased `from pathlib import Path as P` must use alias 'P'. Found: {:?}",
+            import_syms.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    // -- Category 4: phantom_dependency Integration ----------------------------
+
+    #[test]
+    fn test_phantom_dependency_fires_on_unused_imports() {
+        use crate::analyzer::patterns::phantom_dependency;
+        use std::path::Path;
+
+        let source = r#"
+import os
+from collections import OrderedDict
+
+def process():
+    return "done"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("phantom_test.py");
+        std::fs::write(&path, source).expect("write");
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, source).expect("parse");
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        std::mem::forget(dir);
+
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+        let flagged: Vec<_> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        assert!(
+            !diagnostics.is_empty(),
+            "phantom_dependency must fire when import symbols exist but are unused. Got 0 diagnostics."
+        );
+        assert!(
+            flagged.iter().any(|n| n == "os"),
+            "os must be flagged as phantom. Flagged: {:?}",
+            flagged
+        );
+        assert!(
+            flagged.iter().any(|n| n == "OrderedDict"),
+            "OrderedDict must be flagged as phantom. Flagged: {:?}",
+            flagged
+        );
+    }
+
+    #[test]
+    fn test_phantom_dependency_not_flagged_for_called_import() {
+        use crate::analyzer::patterns::phantom_dependency;
+        use std::path::Path;
+
+        let source = r#"
+from pathlib import Path
+
+def resolve(name):
+    p = Path(name)
+    return p
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("used_import.py");
+        std::fs::write(&path, source).expect("write");
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, source).expect("parse");
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        std::mem::forget(dir);
+
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+        let flagged: Vec<_> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        assert!(
+            !flagged.iter().any(|n| n == "Path"),
+            "Path is used via Path(name) constructor call — must NOT be flagged. Flagged: {:?}",
+            flagged
+        );
+    }
+
+    #[test]
+    fn test_phantom_dependency_unused_import_fixture() {
+        use crate::analyzer::patterns::phantom_dependency;
+        use std::path::Path;
+
+        let graph = parse_fixture_for_pattern("unused_import.py");
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+        let flagged: Vec<_> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        // TRUE POSITIVES (must be flagged)
+        assert!(
+            flagged.iter().any(|n| n == "os"),
+            "os is never used — TRUE POSITIVE. Flagged: {:?}",
+            flagged
+        );
+        assert!(
+            flagged.iter().any(|n| n == "OrderedDict"),
+            "OrderedDict is never used — TRUE POSITIVE. Flagged: {:?}",
+            flagged
+        );
+
+        // TRUE NEGATIVE (used via constructor call Path(name))
+        assert!(
+            !flagged.iter().any(|n| n == "Path"),
+            "Path is used via Path(name) — TRUE NEGATIVE. Flagged: {:?}",
+            flagged
+        );
+    }
+
+    // -- Category 5: Regression Guards -----------------------------------------
+
+    #[test]
+    fn test_regression_intra_file_call_still_resolves() {
+        let source = r#"
+def callee():
+    return 1
+
+def caller():
+    callee()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (callee_id, _) = find_symbol(&graph, "callee");
+        let (caller_id, _) = find_symbol(&graph, "caller");
+
+        let callees = graph.callees(caller_id);
+        assert!(
+            callees.contains(&callee_id),
+            "Intra-file call resolution must still work. caller's callees: {:?}",
+            callees
+        );
+    }
+
+    #[test]
+    fn test_regression_self_method_still_resolves() {
+        let source = r#"
+class MyClass:
+    def process(self):
+        self.helper()
+
+    def helper(self):
+        pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (process_id, _) = find_symbol(&graph, "process");
+        let (helper_id, _) = find_symbol(&graph, "helper");
+
+        let callees = graph.callees(process_id);
+        assert!(
+            callees.contains(&helper_id),
+            "self.helper() must still resolve. process callees: {:?}",
+            callees
+        );
+    }
+
+    #[test]
+    fn test_regression_recursive_call_still_works() {
+        let source = r#"
+def factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (fact_id, _) = find_symbol(&graph, "factorial");
+
+        let callees = graph.callees(fact_id);
+        assert!(
+            callees.contains(&fact_id),
+            "Recursive call must still create self-loop. Callees: {:?}",
+            callees
+        );
+    }
+
+    #[test]
+    fn test_regression_dead_code_fixture_unchanged() {
+        use crate::analyzer::patterns::data_dead_end;
+        use std::path::Path;
+
+        let graph = parse_fixture_for_pattern("dead_code.py");
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
+        let flagged: Vec<_> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        assert!(
+            flagged.iter().any(|n| n.contains("unused_helper")),
+            "Regression: unused_helper must still be flagged"
+        );
+        assert!(
+            flagged.iter().any(|n| n.contains("_private_util")),
+            "Regression: _private_util must still be flagged"
+        );
+        assert!(
+            !flagged.iter().any(|n| n.contains("active_function")),
+            "Regression: active_function must NOT be flagged"
+        );
+        assert!(
+            !flagged.iter().any(|n| n.contains("main_handler")),
+            "Regression: main_handler must NOT be flagged"
+        );
+    }
+
+    #[test]
+    fn test_regression_import_references_still_exist() {
+        let path = fixture_dir().join("imports.py");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, &content).unwrap();
+
+        let import_refs = result
+            .references
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Import)
+            .count();
+
+        assert!(
+            import_refs >= 5,
+            "Import References must still be produced alongside new import Symbols. Got {}.",
+            import_refs
+        );
+    }
+
+    #[test]
+    fn test_regression_basic_functions_symbol_count_unchanged() {
+        let path = fixture_dir().join("basic_functions.py");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, &content).unwrap();
+
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+
+        assert_eq!(
+            graph.symbol_count(),
+            3,
+            "basic_functions.py has 3 functions and no imports — symbol count must not change"
+        );
+    }
+
+    // -- Category 6: Adversarial Edge Cases ------------------------------------
+
+    #[test]
+    fn test_module_level_call_in_if_name_main() {
+        let source = r#"
+def main():
+    return 42
+
+if __name__ == "__main__":
+    main()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (main_id, _) = find_symbol(&graph, "main");
+
+        let callers = graph.callers(main_id);
+        for caller_id in &callers {
+            assert_ne!(
+                *caller_id, main_id,
+                "`main()` inside `if __name__` block must NOT self-reference"
+            );
+        }
+        assert_no_spurious_self_edges(&graph);
+    }
+
+    #[test]
+    fn test_import_inside_function_body() {
+        let source = r#"
+def lazy_load():
+    import json
+    return json.loads("{}")
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms = find_symbols(&graph, |s| {
+            s.annotations.contains(&"import".to_string()) && s.name == "json"
+        });
+
+        assert!(
+            !import_syms.is_empty(),
+            "Import inside function body must still create import symbol."
+        );
+    }
+
+    #[test]
+    fn test_star_import_no_crash() {
+        let source = r#"
+from os import *
+
+def main():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let _ = graph.symbol_count();
+    }
+
+    #[test]
+    fn test_conditional_import_both_branches() {
+        let source = r#"
+try:
+    import ujson as json
+except ImportError:
+    import json
+
+def parse(data):
+    return json.loads(data)
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms = find_symbols(&graph, |s| s.annotations.contains(&"import".to_string()));
+
+        assert!(
+            import_syms.len() >= 2,
+            "Both try/except import branches should produce symbols. Found {}: {:?}",
+            import_syms.len(),
+            import_syms.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_empty_file_no_crash_module_level() {
+        let source = "";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty.py");
+        std::fs::write(&path, source).expect("write");
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, source).expect("parse");
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        std::mem::forget(dir);
+
+        assert_eq!(graph.symbol_count(), 0);
+        assert_no_spurious_self_edges(&graph);
+    }
+
+    // -- Category 7: Adversarial Import Edge Cases -----------------------------
+
+    #[test]
+    fn test_dotted_import_creates_symbol() {
+        let source = r#"
+import os.path
+
+def check(f):
+    return os.path.exists(f)
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let import_syms = find_symbols(&graph, |s| s.annotations.contains(&"import".to_string()));
+        assert!(
+            !import_syms.is_empty(),
+            "`import os.path` must create at least one import symbol"
+        );
+    }
+
+    #[test]
+    fn test_reimport_same_module() {
+        let source = r#"
+import os
+import os
+
+def main():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let os_imports = find_symbols(&graph, |s| {
+            s.annotations.contains(&"import".to_string()) && s.name == "os"
+        });
+
+        assert!(
+            os_imports.len() >= 2,
+            "Two `import os` statements should create 2 import symbols. Found: {}",
+            os_imports.len()
+        );
+    }
+
+    #[test]
+    fn test_future_import_no_crash() {
+        // `from __future__ import annotations` is parsed by tree-sitter-python as
+        // `future_import_statement`, not `import_from_statement`. We don't create
+        // import symbols for __future__ imports (they're compiler directives).
+        // The key assertion is no crash.
+        let source = r#"
+from __future__ import annotations
+
+def main() -> int:
+    return 42
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let _ = graph.symbol_count(); // Must not panic
+    }
+
+    #[test]
+    fn test_module_calls_and_imports_coexist() {
+        let source = r#"
+import os
+from pathlib import Path
+
+result = setup()
+
+def setup():
+    p = Path(".")
+    return str(p)
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        // Import symbols exist
+        let import_syms = find_symbols(&graph, |s| s.annotations.contains(&"import".to_string()));
+        assert!(
+            import_syms.len() >= 2,
+            "Must have import symbols for os and Path"
+        );
+
+        // Module-level call works
+        let (setup_id, _) = find_symbol(&graph, "setup");
+        let inbound = inbound_call_count(&graph, setup_id);
+        assert!(inbound >= 1, "Module-level setup() call must be detected");
+
+        // No self-referencing edges
+        assert_no_spurious_self_edges(&graph);
+
+        // Path is used via constructor call — should have incoming edge
+        let path_sym = graph
+            .all_symbols()
+            .find(|(_, s)| s.annotations.contains(&"import".to_string()) && s.name == "Path");
+        if let Some((path_id, _)) = path_sym {
+            let path_inbound = graph
+                .edges_to(path_id)
+                .iter()
+                .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::References))
+                .count();
+            assert!(
+                path_inbound >= 1,
+                "Path used via Path('.') constructor — should have incoming edge. Got {}",
+                path_inbound
+            );
+        }
     }
 }

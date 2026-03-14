@@ -73,12 +73,20 @@ pub enum Visibility {
 /// Maps to `architecture.yaml:162`. Exactly 7 variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
 pub enum ReferenceKind {
+    /// A function or method call (`func()`, `self.method()`, `Class()`).
+    /// Produced by PythonAdapter's call-site detection. Maps to `EdgeKind::Calls`.
     Call,
+    /// A variable read. Maps to `EdgeKind::References`.
     Read,
+    /// A variable write / assignment. Maps to `EdgeKind::References`.
     Write,
+    /// An import statement (`import x`, `from x import y`). Maps to `EdgeKind::References`.
     Import,
+    /// An export / re-export. Maps to `EdgeKind::References`.
     Export,
+    /// A trait/interface implementation. Maps to `EdgeKind::References`.
     Implement,
+    /// A derive macro or attribute. Maps to `EdgeKind::References`.
     Derive,
 }
 
