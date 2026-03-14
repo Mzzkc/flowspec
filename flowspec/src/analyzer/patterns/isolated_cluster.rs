@@ -8,8 +8,10 @@
 //! calls into it.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::analyzer::diagnostic::*;
+use crate::analyzer::patterns::exclusion::{is_excluded_symbol, is_test_path, relativize_path};
 use crate::graph::Graph;
 use crate::parser::ir::{EdgeKind, SymbolKind};
 
@@ -18,7 +20,10 @@ use crate::parser::ir::{EdgeKind, SymbolKind};
 /// A cluster must have 2+ symbols with internal edges and zero external
 /// inbound edges. Single orphaned symbols are `data_dead_end`, not clusters.
 /// Test modules and re-export-only modules are excluded.
-pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
+///
+/// The `project_root` path is used to produce relative file paths in
+/// diagnostic locations, matching the format of entity `loc` fields.
+pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let components = graph.connected_components();
 
@@ -28,7 +33,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
             continue;
         }
 
-        // Filter: skip if all symbols are excluded (test modules, re-export-only)
+        // Filter: skip if all symbols are excluded (test/example, modules)
         let non_excluded: Vec<_> = component
             .iter()
             .filter(|&&id| {
@@ -48,7 +53,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
         let has_entry_point = component.iter().any(|&id| {
             graph
                 .get_symbol(id)
-                .map(|s| is_entry_point(&s.name))
+                .map(is_excluded_symbol)
                 .unwrap_or(false)
         });
         if has_entry_point {
@@ -59,7 +64,7 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
         let all_test_file = component.iter().all(|&id| {
             graph
                 .get_symbol(id)
-                .map(|s| is_test_file(&s.location.file.to_string_lossy()))
+                .map(|s| is_test_path(&s.location.file.to_string_lossy()))
                 .unwrap_or(false)
         });
         if all_test_file {
@@ -124,7 +129,13 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
         let first_location = component
             .iter()
             .filter_map(|&id| graph.get_symbol(id))
-            .map(|s| format!("{}:{}", s.location.file.display(), s.location.line))
+            .map(|s| {
+                format!(
+                    "{}:{}",
+                    relativize_path(&s.location.file, project_root),
+                    s.location.line
+                )
+            })
             .next()
             .unwrap_or_default();
 
@@ -171,23 +182,8 @@ pub fn detect(graph: &Graph) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check if a symbol name indicates an entry point.
-fn is_entry_point(name: &str) -> bool {
-    name == "main" || name == "__main__" || name == "if_name_main"
-}
-
-/// Check if a symbol is in a test or example file.
+/// Check if a symbol is in a test or example file, or is a test function.
 fn is_test_or_example(sym: &crate::parser::ir::Symbol) -> bool {
     let path = sym.location.file.to_string_lossy();
-    is_test_file(&path) || sym.name.starts_with("test_")
-}
-
-/// Check if a file path indicates a test file.
-fn is_test_file(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    normalized.contains("test_")
-        || normalized.contains("/tests/")
-        || normalized.contains("/test/")
-        || normalized.ends_with("_test.py")
-        || normalized.ends_with("_test.rs")
+    is_test_path(&path) || sym.name.starts_with("test_")
 }

@@ -84,7 +84,7 @@ fn exit_1_on_unimplemented_format() {
         "analyze",
         project.path().to_str().unwrap(),
         "--format",
-        "json",
+        "sarif",
     ])
     .assert()
     .code(1);

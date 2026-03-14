@@ -56,7 +56,7 @@ pub enum FlowspecError {
     },
 
     /// A requested output format is not yet implemented.
-    #[error("{format} format is not yet implemented (fix: use --format yaml)")]
+    #[error("{format} format is not yet implemented (fix: use --format yaml or --format json)")]
     FormatNotImplemented {
         /// The format that was requested.
         format: String,
@@ -101,8 +101,8 @@ pub enum FlowspecError {
 /// Error type specific to manifest formatting operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
-    /// YAML serialization failed.
-    #[error("YAML serialization failed: {reason}")]
+    /// Serialization failed (YAML, JSON, or other format).
+    #[error("serialization failed: {reason}")]
     Serialization {
         /// What went wrong during serialization.
         reason: String,

@@ -190,7 +190,7 @@ fn language_flag_with_unsupported_language() {
 #[test]
 fn unimplemented_format_gives_clear_error() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
-    cmd.args(["analyze", ".", "--format", "json"])
+    cmd.args(["analyze", ".", "--format", "sarif"])
         .assert()
         .code(1)
         .stderr(

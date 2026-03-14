@@ -5,9 +5,11 @@
 //! two sanctioned traits (per conventions.yaml) — one implementation per
 //! output format (YAML, JSON, SARIF, summary).
 
+pub mod json;
 pub mod types;
 pub mod yaml;
 
+pub use json::JsonFormatter;
 pub use types::*;
 pub use yaml::YamlFormatter;
 

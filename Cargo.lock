@@ -291,6 +291,7 @@ dependencies = [
  "clap",
  "flowspec",
  "predicates",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "tracing",

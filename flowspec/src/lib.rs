@@ -38,7 +38,7 @@ pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
 pub use graph::Graph;
 pub use manifest::types::*;
-pub use manifest::{OutputFormatter, YamlFormatter};
+pub use manifest::{JsonFormatter, OutputFormatter, YamlFormatter};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -163,7 +163,7 @@ pub fn analyze(
     }
 
     // Stage 2: Run diagnostic patterns on the populated graph
-    let raw_diagnostics = run_all_patterns(&graph);
+    let raw_diagnostics = run_all_patterns(&graph, project_path);
     let diagnostics = to_manifest_entries(&raw_diagnostics);
 
     // Stage 3: Build entity list from graph symbols

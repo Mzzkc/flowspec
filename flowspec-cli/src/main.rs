@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use flowspec::{Config, FlowspecError, OutputFormatter, YamlFormatter};
+use flowspec::{Config, FlowspecError, JsonFormatter, OutputFormatter, YamlFormatter};
 
 /// Static code analyzer that traces the flow of all data in a codebase.
 #[derive(Parser)]
@@ -249,8 +249,7 @@ fn run_analyze(
     output_path: Option<&std::path::Path>,
     config_path: Option<&std::path::Path>,
 ) -> Result<ExitCode, FlowspecError> {
-    // Only YAML is implemented this cycle
-    if !matches!(format, Format::Yaml) {
+    if !matches!(format, Format::Yaml | Format::Json) {
         return Err(FlowspecError::FormatNotImplemented {
             format: format_name(format).to_string(),
         });
@@ -273,8 +272,7 @@ fn run_analyze(
 
     let result = flowspec::analyze(&canonical, &config, languages)?;
 
-    let formatter = YamlFormatter::new();
-    let output = formatter.format_manifest(&result.manifest)?;
+    let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
 
     write_output(&output, output_path)?;
 
@@ -295,7 +293,7 @@ fn run_diagnose(
     output_path: Option<&std::path::Path>,
     config_path: Option<&std::path::Path>,
 ) -> Result<ExitCode, FlowspecError> {
-    if !matches!(format, Format::Yaml) {
+    if !matches!(format, Format::Yaml | Format::Json) {
         return Err(FlowspecError::FormatNotImplemented {
             format: format_name(format).to_string(),
         });
@@ -327,8 +325,7 @@ fn run_diagnose(
         checks_filter,
     )?;
 
-    let formatter = YamlFormatter::new();
-    let output = formatter.format_diagnostics(&diagnostics)?;
+    let output = format_with(format, |f| f.format_diagnostics(&diagnostics))?;
 
     write_output(&output, output_path)?;
 
@@ -381,6 +378,19 @@ fn write_output(content: &str, output_path: Option<&std::path::Path>) -> Result<
             })?;
     }
     Ok(())
+}
+
+/// Dispatch formatting to the correct formatter based on the selected format.
+fn format_with<F>(format: &Format, f: F) -> Result<String, FlowspecError>
+where
+    F: FnOnce(&dyn OutputFormatter) -> Result<String, flowspec::ManifestError>,
+{
+    let result = match format {
+        Format::Yaml => f(&YamlFormatter::new()),
+        Format::Json => f(&JsonFormatter::new()),
+        _ => unreachable!("format guard should reject unsupported formats"),
+    };
+    result.map_err(FlowspecError::from)
 }
 
 /// Get the display name for a format.

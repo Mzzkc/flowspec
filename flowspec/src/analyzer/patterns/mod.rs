@@ -2,17 +2,20 @@
 
 //! Pattern registry — collects and filters diagnostic results from all detectors.
 //!
-//! Each pattern module exports `pub fn detect(graph: &Graph) -> Vec<Diagnostic>`.
+//! Each pattern module exports `pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic>`.
 //! The registry calls each detector, assigns sequential IDs, and applies
 //! severity/confidence/pattern-name filters for the `--checks`, `--severity`,
 //! and `--confidence` CLI flags.
 
 pub mod circular_dependency;
 pub mod data_dead_end;
+pub mod exclusion;
 pub mod isolated_cluster;
 pub mod missing_reexport;
 pub mod orphaned_implementation;
 pub mod phantom_dependency;
+
+use std::path::Path;
 
 use crate::analyzer::diagnostic::*;
 use crate::graph::Graph;
@@ -32,39 +35,46 @@ pub struct PatternFilter {
 }
 
 /// Run all implemented pattern detectors and return diagnostics with sequential IDs.
-pub fn run_all_patterns(graph: &Graph) -> Vec<Diagnostic> {
-    run_patterns(graph, &PatternFilter::default())
+///
+/// The `project_root` path is used to relativize diagnostic location fields
+/// so they match the format of entity `loc` fields.
+pub fn run_all_patterns(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
+    run_patterns(graph, &PatternFilter::default(), project_root)
 }
 
 /// Run pattern detectors with filtering, returning diagnostics with sequential IDs.
 ///
+/// The `project_root` path is used to relativize diagnostic location fields.
 /// Filters are applied AFTER detection but BEFORE ID assignment, so IDs
 /// are sequential in the returned list (no gaps from filtering).
-pub fn run_patterns(graph: &Graph, filter: &PatternFilter) -> Vec<Diagnostic> {
+pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) -> Vec<Diagnostic> {
     let mut all_diagnostics = Vec::new();
 
-    // Collect from all implemented patterns
+    // Collect from all implemented patterns.
     let pattern_results: Vec<(DiagnosticPattern, Vec<Diagnostic>)> = vec![
         (
             DiagnosticPattern::IsolatedCluster,
-            isolated_cluster::detect(graph),
+            isolated_cluster::detect(graph, project_root),
         ),
-        (DiagnosticPattern::DataDeadEnd, data_dead_end::detect(graph)),
+        (
+            DiagnosticPattern::DataDeadEnd,
+            data_dead_end::detect(graph, project_root),
+        ),
         (
             DiagnosticPattern::PhantomDependency,
-            phantom_dependency::detect(graph),
+            phantom_dependency::detect(graph, project_root),
         ),
         (
             DiagnosticPattern::CircularDependency,
-            circular_dependency::detect(graph),
+            circular_dependency::detect(graph, project_root),
         ),
         (
             DiagnosticPattern::OrphanedImplementation,
-            orphaned_implementation::detect(graph),
+            orphaned_implementation::detect(graph, project_root),
         ),
         (
             DiagnosticPattern::MissingReexport,
-            missing_reexport::detect(graph),
+            missing_reexport::detect(graph, project_root),
         ),
         // Unimplemented patterns return empty Vec (registered but inactive)
     ];
@@ -104,7 +114,7 @@ mod tests {
     #[test]
     fn test_run_all_patterns_returns_results_from_all_implemented_patterns() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         let patterns: Vec<DiagnosticPattern> = diagnostics.iter().map(|d| d.pattern).collect();
         assert!(
@@ -124,7 +134,7 @@ mod tests {
     #[test]
     fn test_run_all_patterns_assigns_sequential_ids() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
         assert!(!diagnostics.is_empty());
 
         for (i, d) in diagnostics.iter().enumerate() {
@@ -135,7 +145,7 @@ mod tests {
     #[test]
     fn test_unimplemented_patterns_return_empty() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
         // partial_wiring is not implemented — should never appear
         assert!(
             !diagnostics
@@ -154,7 +164,7 @@ mod tests {
             min_severity: Some(Severity::Warning),
             ..Default::default()
         };
-        let diagnostics = run_patterns(&graph, &filter);
+        let diagnostics = run_patterns(&graph, &filter, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -180,7 +190,7 @@ mod tests {
             min_confidence: Some(Confidence::High),
             ..Default::default()
         };
-        let diagnostics = run_patterns(&graph, &filter);
+        let diagnostics = run_patterns(&graph, &filter, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(
@@ -200,7 +210,7 @@ mod tests {
             patterns: Some(vec![DiagnosticPattern::DataDeadEnd]),
             ..Default::default()
         };
-        let diagnostics = run_patterns(&graph, &filter);
+        let diagnostics = run_patterns(&graph, &filter, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(
@@ -219,7 +229,7 @@ mod tests {
             min_severity: Some(Severity::Warning),
             min_confidence: Some(Confidence::High),
         };
-        let diagnostics = run_patterns(&graph, &filter);
+        let diagnostics = run_patterns(&graph, &filter, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(d.pattern, DiagnosticPattern::DataDeadEnd);
@@ -231,8 +241,8 @@ mod tests {
     #[test]
     fn test_empty_filter_returns_all() {
         let graph = build_all_fixtures_graph();
-        let all = run_all_patterns(&graph);
-        let filtered = run_patterns(&graph, &PatternFilter::default());
+        let all = run_all_patterns(&graph, Path::new(""));
+        let filtered = run_patterns(&graph, &PatternFilter::default(), Path::new(""));
         assert_eq!(all.len(), filtered.len());
     }
 
@@ -243,7 +253,7 @@ mod tests {
     #[test]
     fn test_isolated_cluster_detects_unwired_module() {
         let graph = build_isolated_module_graph();
-        let diagnostics = isolated_cluster::detect(&graph);
+        let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
 
         assert_eq!(
             diagnostics.len(),
@@ -286,7 +296,7 @@ mod tests {
     #[test]
     fn test_isolated_cluster_clean_code_no_findings() {
         let graph = build_clean_code_graph();
-        let diagnostics = isolated_cluster::detect(&graph);
+        let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
         assert!(
             diagnostics.is_empty(),
             "Clean code should produce zero isolated_cluster findings"
@@ -296,7 +306,7 @@ mod tests {
     #[test]
     fn test_isolated_cluster_excludes_test_module() {
         let graph = build_test_module_graph();
-        let diagnostics = isolated_cluster::detect(&graph);
+        let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -314,7 +324,7 @@ mod tests {
     #[test]
     fn test_isolated_cluster_requires_two_plus_symbols() {
         let graph = build_single_orphan_graph();
-        let diagnostics = isolated_cluster::detect(&graph);
+        let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
         assert!(
             diagnostics.is_empty(),
             "Single orphan function should NOT trigger isolated_cluster"
@@ -324,7 +334,7 @@ mod tests {
     #[test]
     fn test_isolated_cluster_init_reexport_module_not_flagged() {
         let graph = build_reexport_only_module_graph();
-        let diagnostics = isolated_cluster::detect(&graph);
+        let diagnostics = isolated_cluster::detect(&graph, Path::new(""));
         assert!(
             diagnostics.is_empty(),
             "Re-export-only modules should not be flagged as isolated clusters"
@@ -338,7 +348,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_detects_unused_private_function() {
         let graph = build_dead_code_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         let dead_entities: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
         assert!(
@@ -369,7 +379,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_evidence_includes_caller_count() {
         let graph = build_dead_code_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -387,7 +397,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_clean_code_no_findings() {
         let graph = build_clean_code_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
         assert!(
             diagnostics.is_empty(),
             "Clean code should produce zero data_dead_end findings"
@@ -397,7 +407,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_public_api_low_confidence() {
         let graph = build_public_api_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             if d.entity.contains("format_timestamp") || d.entity.contains("parse_duration") {
@@ -414,7 +424,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_private_vs_public_confidence_differs() {
         let graph = build_public_api_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         let internal = diagnostics
             .iter()
@@ -441,7 +451,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_excludes_test_functions() {
         let graph = build_test_module_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -456,7 +466,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_excludes_main_entry_point() {
         let graph = build_clean_code_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         assert!(
             !diagnostics.iter().any(|d| d.entity.contains("main")),
@@ -467,7 +477,7 @@ mod tests {
     #[test]
     fn test_data_dead_end_severity_is_warning() {
         let graph = build_dead_code_graph();
-        let diagnostics = data_dead_end::detect(&graph);
+        let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(
@@ -485,7 +495,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_detects_unused_imports() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         let phantom_entities: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
 
@@ -502,7 +512,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_severity_is_info() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(
@@ -516,7 +526,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_confidence_is_high() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(
@@ -530,7 +540,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_evidence_names_specific_symbol() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -548,7 +558,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_clean_code_no_findings() {
         let graph = build_clean_code_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
         assert!(
             diagnostics.is_empty(),
             "Clean code should produce zero phantom_dependency findings"
@@ -558,7 +568,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_prefix_usage_not_flagged() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         assert!(
             !diagnostics.iter().any(|d| d.entity == "sys"),
@@ -569,7 +579,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_type_annotation_usage_not_flagged() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         assert!(
             !diagnostics.iter().any(|d| d.entity.contains("Optional")),
@@ -580,7 +590,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_called_import_not_flagged() {
         let graph = build_unused_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         assert!(
             !diagnostics.iter().any(|d| d.entity == "Path"),
@@ -591,7 +601,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_reexport_not_flagged() {
         let graph = build_reexport_init_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         // helper is re-exported — NOT phantom
         assert!(
@@ -613,7 +623,7 @@ mod tests {
     #[test]
     fn test_phantom_dependency_side_effect_logging_not_phantom() {
         let graph = build_side_effect_import_graph();
-        let diagnostics = phantom_dependency::detect(&graph);
+        let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
 
         assert!(
             !diagnostics.iter().any(|d| d.entity.contains("logging")),
@@ -634,8 +644,8 @@ mod tests {
     fn test_no_diagnostic_overlap_between_single_orphan_and_cluster() {
         let graph = build_dead_code_graph();
 
-        let cluster_diags = isolated_cluster::detect(&graph);
-        let dead_diags = data_dead_end::detect(&graph);
+        let cluster_diags = isolated_cluster::detect(&graph, Path::new(""));
+        let dead_diags = data_dead_end::detect(&graph, Path::new(""));
 
         // unused_helper should be in dead_diags
         assert!(dead_diags
@@ -655,8 +665,8 @@ mod tests {
     fn test_dead_code_in_isolated_cluster_gets_both_diagnostics() {
         let graph = build_isolated_cluster_with_dead_end_graph();
 
-        let cluster_diags = isolated_cluster::detect(&graph);
-        let dead_diags = data_dead_end::detect(&graph);
+        let cluster_diags = isolated_cluster::detect(&graph, Path::new(""));
+        let dead_diags = data_dead_end::detect(&graph, Path::new(""));
 
         assert!(
             !cluster_diags.is_empty(),
@@ -674,7 +684,7 @@ mod tests {
     #[test]
     fn test_high_confidence_requires_structural_proof() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         for d in diagnostics
             .iter()
@@ -708,7 +718,7 @@ mod tests {
     #[test]
     fn test_no_high_confidence_false_positives_on_clean_code() {
         let graph = build_clean_code_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         let high_confidence: Vec<_> = diagnostics
             .iter()
@@ -732,7 +742,7 @@ mod tests {
     #[test]
     fn test_all_diagnostics_have_nonempty_evidence() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -752,7 +762,7 @@ mod tests {
     #[test]
     fn test_all_diagnostics_have_actionable_suggestions() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -776,7 +786,7 @@ mod tests {
     #[test]
     fn test_all_diagnostics_have_valid_location() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         for d in &diagnostics {
             assert!(
@@ -795,7 +805,7 @@ mod tests {
     #[test]
     fn test_diagnostic_messages_use_failure_language_not_graph_theory() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         let graph_theory_terms = [
             "in-degree",
@@ -857,7 +867,7 @@ mod tests {
             "mod_b.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert_eq!(results.len(), 1, "Should detect exactly 1 cycle");
 
         let d = &results[0];
@@ -881,7 +891,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_detects_transitive_three_module_cycle() {
         let graph = build_circular_dep_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
 
         assert_eq!(results.len(), 1, "Should detect exactly 1 cycle");
 
@@ -970,7 +980,7 @@ mod tests {
             "mod_y.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert_eq!(results.len(), 2, "Should detect 2 independent cycles");
 
         // Each diagnostic mentions different modules
@@ -1020,7 +1030,7 @@ mod tests {
             "mod_b.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             !results.is_empty(),
             "Should detect cycle via References edges, not just Calls"
@@ -1034,7 +1044,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_clean_code_no_findings() {
         let graph = build_clean_code_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Clean code should produce zero circular_dependency findings"
@@ -1044,7 +1054,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_linear_chain_no_false_positive() {
         let graph = build_linear_dep_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Linear chain (A->B->C, no back-edge) must NOT produce circular_dependency"
@@ -1100,7 +1110,7 @@ mod tests {
             "mod_a.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Intra-module cycles are NOT circular dependencies"
@@ -1110,7 +1120,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_empty_graph_no_panic() {
         let graph = Graph::new();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Empty graph must produce zero diagnostics"
@@ -1152,7 +1162,7 @@ mod tests {
             );
         }
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Star topology has no cycles — should produce zero diagnostics"
@@ -1192,7 +1202,7 @@ mod tests {
         });
 
         // Should not panic, should return empty or valid results
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         // No cycle possible with unresolved targets
         let _ = results; // Main assertion: no panic
     }
@@ -1200,7 +1210,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_deduplicates_cycles() {
         let graph = build_circular_dep_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
 
         // A 3-module cycle (A->B->C->A) can be discovered starting from any node
         // but should only be reported once
@@ -1275,7 +1285,7 @@ mod tests {
             "right.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Diamond dependency is NOT a cycle — should produce zero diagnostics"
@@ -1319,7 +1329,7 @@ mod tests {
 
         // Even with an import-based References edge (which IS checked),
         // there's no back-edge so no cycle
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Single directional edge doesn't form a cycle"
@@ -1333,7 +1343,7 @@ mod tests {
     #[test]
     fn test_orphaned_implementation_detects_uncalled_public_method() {
         let graph = build_orphaned_method_graph();
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
 
         let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
         assert!(
@@ -1377,7 +1387,7 @@ mod tests {
             1,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].confidence,
@@ -1435,7 +1445,7 @@ mod tests {
             "api.py",
         );
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
 
         // handle_get, handle_post, handle_delete all have zero callers
@@ -1477,7 +1487,7 @@ mod tests {
             "app.py",
         );
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(
             !results.iter().any(|d| d.entity.contains("process")),
             "Method with a caller should NOT be flagged"
@@ -1487,7 +1497,7 @@ mod tests {
     #[test]
     fn test_orphaned_implementation_clean_code_no_findings() {
         let graph = build_clean_code_graph();
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Clean code should produce zero OrphanedImplementation (no Method symbols)"
@@ -1514,7 +1524,7 @@ mod tests {
             5,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Functions (not Methods) must not trigger orphaned_implementation"
@@ -1551,7 +1561,7 @@ mod tests {
             9,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         let dunders: Vec<_> = results
             .iter()
             .filter(|d| d.entity.contains("__") && d.entity.ends_with("__"))
@@ -1575,7 +1585,7 @@ mod tests {
             1,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Entry point methods must not be flagged as orphaned"
@@ -1594,7 +1604,7 @@ mod tests {
             1,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(results.is_empty(), "Methods in test files must be excluded");
     }
 
@@ -1633,7 +1643,7 @@ mod tests {
             "service.py",
         );
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
 
         // public_api IS flagged (zero callers from outside)
@@ -1651,7 +1661,7 @@ mod tests {
     #[test]
     fn test_orphaned_implementation_empty_graph() {
         let graph = Graph::new();
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(results.is_empty());
     }
 
@@ -1667,8 +1677,8 @@ mod tests {
             1,
         ));
 
-        let orphan_results = orphaned_implementation::detect(&graph);
-        let dead_end_results = data_dead_end::detect(&graph);
+        let orphan_results = orphaned_implementation::detect(&graph, Path::new(""));
+        let dead_end_results = data_dead_end::detect(&graph, Path::new(""));
 
         assert!(
             orphan_results
@@ -1697,7 +1707,7 @@ mod tests {
         // Import symbol with SymbolKind::Variable and "import" annotation
         let _imp = graph.add_symbol(make_import("os", "utils.py", 1));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Import symbols should not trigger orphaned_implementation"
@@ -1711,7 +1721,7 @@ mod tests {
     #[test]
     fn test_missing_reexport_detects_public_symbol_not_in_init() {
         let graph = build_missing_reexport_graph();
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
 
         let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
         assert!(
@@ -1788,7 +1798,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         assert!(
             results.len() >= 3,
             "Should detect at least 3 missing re-exports (User, Order, format_date), got {}",
@@ -1822,7 +1832,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         assert!(
             results.iter().any(|d| d.entity.contains("handle_request")),
             "Should detect missing re-export from mod.rs for handle_request"
@@ -1836,7 +1846,7 @@ mod tests {
     #[test]
     fn test_missing_reexport_proper_reexport_no_findings() {
         let graph = build_proper_reexport_graph();
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "All public symbols are re-exported — should produce zero findings"
@@ -1846,7 +1856,7 @@ mod tests {
     #[test]
     fn test_missing_reexport_no_package_structure_no_findings() {
         let graph = build_clean_code_graph();
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Without __init__.py or mod.rs, no missing re-export findings"
@@ -1856,7 +1866,7 @@ mod tests {
     #[test]
     fn test_missing_reexport_empty_graph() {
         let graph = Graph::new();
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         assert!(results.is_empty());
     }
 
@@ -1897,7 +1907,7 @@ mod tests {
             7,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         assert!(
             results.is_empty(),
             "Private symbols should NOT trigger missing re-export"
@@ -1937,7 +1947,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         // package_init is IN the parent module — should NOT be flagged
         assert!(
             !results.iter().any(|d| d.entity.contains("package_init")),
@@ -1981,7 +1991,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         // deep_fn's parent is a/b/__init__.py, NOT a/__init__.py
         for d in &results {
             if d.entity.contains("deep_fn") {
@@ -2037,7 +2047,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         // Name "parse" in init matches both — no crash, no panic
         // At most 0 diagnostics for "parse" (name-match satisfies both)
         let parse_diags: Vec<_> = results
@@ -2077,7 +2087,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
         // Module symbol "sub" should NOT be flagged
         assert!(
             !results
@@ -2094,7 +2104,7 @@ mod tests {
     #[test]
     fn test_new_patterns_dont_change_existing_pattern_results() {
         let graph = build_all_fixtures_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         let patterns: Vec<DiagnosticPattern> = diagnostics.iter().map(|d| d.pattern).collect();
         assert!(
@@ -2125,7 +2135,7 @@ mod tests {
     #[test]
     fn test_no_high_confidence_false_positives_from_new_patterns_on_clean_code() {
         let graph = build_clean_code_graph();
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
 
         // Zero diagnostics from any pattern on clean code
         assert!(
@@ -2256,7 +2266,7 @@ mod tests {
             3,
         ));
 
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
         let patterns: std::collections::HashSet<DiagnosticPattern> =
             diagnostics.iter().map(|d| d.pattern).collect();
 
@@ -2337,7 +2347,7 @@ mod tests {
             "mod_b.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert!(!results.is_empty());
 
         let d = &results[0];
@@ -2373,7 +2383,7 @@ mod tests {
     #[test]
     fn test_orphaned_implementation_evidence_has_caller_count() {
         let graph = build_orphaned_method_graph();
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
 
         let d = results
             .iter()
@@ -2400,7 +2410,7 @@ mod tests {
     #[test]
     fn test_missing_reexport_evidence_references_parent_module() {
         let graph = build_missing_reexport_graph();
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
 
         let d = results
             .iter()
@@ -2426,7 +2436,7 @@ mod tests {
     #[test]
     fn test_new_patterns_set_empty_id() {
         let graph = build_circular_dep_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         for d in &results {
             assert!(
                 d.id.is_empty(),
@@ -2435,13 +2445,13 @@ mod tests {
         }
 
         let graph2 = build_orphaned_method_graph();
-        let results2 = orphaned_implementation::detect(&graph2);
+        let results2 = orphaned_implementation::detect(&graph2, Path::new(""));
         for d in &results2 {
             assert!(d.id.is_empty());
         }
 
         let graph3 = build_missing_reexport_graph();
-        let results3 = missing_reexport::detect(&graph3);
+        let results3 = missing_reexport::detect(&graph3, Path::new(""));
         for d in &results3 {
             assert!(d.id.is_empty());
         }
@@ -2469,9 +2479,9 @@ mod tests {
             1,
         ));
 
-        let r1 = circular_dependency::detect(&graph);
-        let r2 = orphaned_implementation::detect(&graph);
-        let r3 = missing_reexport::detect(&graph);
+        let r1 = circular_dependency::detect(&graph, Path::new(""));
+        let r2 = orphaned_implementation::detect(&graph, Path::new(""));
+        let r3 = missing_reexport::detect(&graph, Path::new(""));
         assert!(r1.is_empty());
         assert!(r2.is_empty());
         assert!(r3.is_empty());
@@ -2488,9 +2498,9 @@ mod tests {
             1,
         ));
 
-        let r1 = circular_dependency::detect(&graph);
-        let r2 = orphaned_implementation::detect(&graph);
-        let r3 = missing_reexport::detect(&graph);
+        let r1 = circular_dependency::detect(&graph, Path::new(""));
+        let r2 = orphaned_implementation::detect(&graph, Path::new(""));
+        let r3 = missing_reexport::detect(&graph, Path::new(""));
         assert!(r1.is_empty());
         assert!(r2.is_empty());
         assert!(r3.is_empty());
@@ -2508,9 +2518,9 @@ mod tests {
         ));
 
         // Should not panic
-        let r1 = circular_dependency::detect(&graph);
-        let r2 = orphaned_implementation::detect(&graph);
-        let r3 = missing_reexport::detect(&graph);
+        let r1 = circular_dependency::detect(&graph, Path::new(""));
+        let r2 = orphaned_implementation::detect(&graph, Path::new(""));
+        let r3 = missing_reexport::detect(&graph, Path::new(""));
         let _ = (r1, r2, r3);
     }
 
@@ -2544,7 +2554,7 @@ mod tests {
             10,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
 
         let pub_d = results
             .iter()
@@ -2570,7 +2580,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_confidence_always_high() {
         let graph = build_circular_dep_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
 
         for d in &results {
             assert_eq!(
@@ -2584,7 +2594,7 @@ mod tests {
     #[test]
     fn test_missing_reexport_confidence_always_moderate() {
         let graph = build_missing_reexport_graph();
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
 
         for d in &results {
             assert_eq!(
@@ -2616,9 +2626,9 @@ mod tests {
         let reexport_graph = build_missing_reexport_graph();
 
         let all_diags: Vec<_> = vec![
-            circular_dependency::detect(&circular_graph),
-            orphaned_implementation::detect(&orphan_graph),
-            missing_reexport::detect(&reexport_graph),
+            circular_dependency::detect(&circular_graph, Path::new("")),
+            orphaned_implementation::detect(&orphan_graph, Path::new("")),
+            missing_reexport::detect(&reexport_graph, Path::new("")),
         ]
         .into_iter()
         .flatten()
@@ -2713,7 +2723,7 @@ mod tests {
             3,
         ));
 
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
         let patterns: std::collections::HashSet<DiagnosticPattern> =
             diagnostics.iter().map(|d| d.pattern).collect();
 
@@ -2782,7 +2792,7 @@ mod tests {
             min_severity: None,
             min_confidence: None,
         };
-        let diagnostics = run_patterns(&graph, &filter);
+        let diagnostics = run_patterns(&graph, &filter, Path::new(""));
 
         for d in &diagnostics {
             assert_eq!(
@@ -2801,7 +2811,7 @@ mod tests {
     #[test]
     fn test_circular_dependency_evidence_traces_full_cycle_path() {
         let graph = build_circular_dep_graph();
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
 
         assert_eq!(results.len(), 1);
         let d = &results[0];
@@ -2866,7 +2876,7 @@ mod tests {
             1,
         ));
 
-        let results = orphaned_implementation::detect(&graph);
+        let results = orphaned_implementation::detect(&graph, Path::new(""));
         let d = results
             .iter()
             .find(|d| d.entity.contains("orphan_method"))
@@ -2942,7 +2952,7 @@ mod tests {
             "boundary_a.py",
         );
 
-        let results = circular_dependency::detect(&graph);
+        let results = circular_dependency::detect(&graph, Path::new(""));
         assert_eq!(
             results.len(),
             1,
@@ -2998,7 +3008,7 @@ mod tests {
             3,
         ));
 
-        let results = missing_reexport::detect(&graph);
+        let results = missing_reexport::detect(&graph, Path::new(""));
 
         // Only pkg/sub.py symbols should be checked against pkg/__init__.py
         assert!(
@@ -3018,7 +3028,7 @@ mod tests {
     #[test]
     fn test_existing_patterns_still_pass_after_registration() {
         let graph = build_dead_code_graph();
-        let results = run_all_patterns(&graph);
+        let results = run_all_patterns(&graph, Path::new(""));
 
         let dead_end_results: Vec<_> = results
             .iter()
@@ -3121,7 +3131,7 @@ mod tests {
             3,
         ));
 
-        let diagnostics = run_all_patterns(&graph);
+        let diagnostics = run_all_patterns(&graph, Path::new(""));
         // IDs must be sequential with no gaps
         for (i, d) in diagnostics.iter().enumerate() {
             assert_eq!(
