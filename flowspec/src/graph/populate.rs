@@ -52,8 +52,8 @@ pub fn populate_graph(graph: &mut Graph, result: &ParseResult) {
     // Phase 2: Insert symbols with scope remapping
     let symbol_id_map = insert_symbols(graph, &result.symbols, &result.scopes, &scope_id_map);
 
-    // Phase 3: Insert references with from/to remapping
-    insert_references(graph, &result.references, &symbol_id_map);
+    // Phase 3: Insert references with from/to remapping (including call resolution)
+    insert_references(graph, &result.references, &symbol_id_map, &result.symbols);
 
     // Phase 4: Insert boundaries with scope remapping
     insert_boundaries(graph, &result.boundaries, &scope_id_map);
@@ -257,28 +257,161 @@ fn find_scope_for_symbol(symbol: &Symbol, scopes: &[Scope], scope_id_map: &[Scop
 
 /// Inserts references with from/to symbol ID remapping.
 ///
-/// References from the adapter have `from: SymbolId::default()` and `to: SymbolId::default()`.
-/// We attempt to resolve them:
-/// - If `from` and `to` are both default, insert the reference as-is (edges will point to
-///   nonexistent symbols, but the reference is preserved for future resolution passes).
-/// - If either can be mapped to a real symbol, use the mapped ID.
+/// For `ReferenceKind::Call` references with `ResolutionStatus::Partial("call:<name>")`,
+/// performs intra-file resolution:
+/// - `from` is resolved via location containment (which function/method contains the call)
+/// - `to` is resolved via name matching against same-file symbols
+///
+/// For other references (imports), uses the existing first-symbol fallback for `from`.
 fn insert_references(
     graph: &mut Graph,
     references: &[Reference],
     symbol_id_map: &[(usize, SymbolId)],
+    symbols: &[Symbol],
 ) {
     for reference in references {
         let mut new_ref = reference.clone();
 
-        // Try to resolve from/to by index if they match any symbol
-        // Since adapters use SymbolId::default() for all, we keep as-is for now
-        // The references are still valuable for tracking import counts and patterns
-        if new_ref.from == SymbolId::default() && !symbol_id_map.is_empty() {
-            // Use the first symbol as a file-level context for "from"
-            new_ref.from = symbol_id_map[0].1;
+        match &reference.resolution {
+            ResolutionStatus::Partial(info) if info.starts_with("call:") => {
+                let callee_name = &info[5..]; // after "call:"
+
+                // Resolve from: find the symbol whose location contains this call
+                new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                    .unwrap_or_else(|| {
+                        // Fallback: first symbol (module-level call)
+                        if !symbol_id_map.is_empty() {
+                            symbol_id_map[0].1
+                        } else {
+                            SymbolId::default()
+                        }
+                    });
+
+                // Resolve to: match callee name against same-file symbols
+                new_ref.to =
+                    resolve_callee(callee_name, &new_ref.from, graph, symbol_id_map, symbols);
+            }
+            _ => {
+                // Non-call references: keep existing behavior
+                if new_ref.from == SymbolId::default() && !symbol_id_map.is_empty() {
+                    new_ref.from = symbol_id_map[0].1;
+                }
+            }
         }
 
         graph.add_reference(new_ref);
+    }
+}
+
+/// Finds the innermost function/method symbol whose location contains the reference.
+///
+/// Used to determine which symbol a call expression belongs to. Returns `None` for
+/// module-level calls that are not inside any function or method body.
+fn find_containing_symbol(
+    ref_location: &Location,
+    symbols: &[Symbol],
+    symbol_id_map: &[(usize, SymbolId)],
+) -> Option<SymbolId> {
+    let mut best: Option<(usize, SymbolId)> = None;
+
+    for &(idx, real_id) in symbol_id_map {
+        let sym = &symbols[idx];
+
+        if sym.location.file != ref_location.file {
+            continue;
+        }
+
+        // Only functions and methods can "contain" calls
+        if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
+            continue;
+        }
+
+        let sym_start = (sym.location.line, sym.location.column);
+        let sym_end = (sym.location.end_line, sym.location.end_column);
+        let ref_start = (ref_location.line, ref_location.column);
+        let ref_end = (ref_location.end_line, ref_location.end_column);
+
+        if sym_start <= ref_start && sym_end >= ref_end {
+            match best {
+                None => best = Some((idx, real_id)),
+                Some((best_idx, _)) => {
+                    // Prefer more specific (innermost) containing symbol
+                    let best_sym = &symbols[best_idx];
+                    let best_start = (best_sym.location.line, best_sym.location.column);
+                    let best_end = (best_sym.location.end_line, best_sym.location.end_column);
+
+                    if sym_start >= best_start && sym_end <= best_end {
+                        best = Some((idx, real_id));
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(_, id)| id)
+}
+
+/// Resolves a callee name to a `SymbolId` by matching against same-file symbols.
+///
+/// Handles three patterns:
+/// - `self.method` — matches `Method` symbols in the same class scope as `from`
+/// - `simple_name` — matches any symbol with the same name
+/// - `obj.attr` — stays unresolved (cross-file or requires type inference)
+fn resolve_callee(
+    callee_name: &str,
+    from_id: &SymbolId,
+    graph: &Graph,
+    symbol_id_map: &[(usize, SymbolId)],
+    symbols: &[Symbol],
+) -> SymbolId {
+    // Handle self.method pattern
+    if let Some(method_name) = callee_name.strip_prefix("self.") {
+        if let Some(from_sym) = graph.get_symbol(*from_id) {
+            let from_scope = from_sym.scope;
+            for &(idx, real_id) in symbol_id_map {
+                let sym = &symbols[idx];
+                if sym.name == method_name && sym.kind == SymbolKind::Method {
+                    if let Some(graph_sym) = graph.get_symbol(real_id) {
+                        if graph_sym.scope == from_scope {
+                            return real_id;
+                        }
+                    }
+                }
+            }
+        }
+        return SymbolId::default();
+    }
+
+    // Dotted names (module.func) — cross-file, cannot resolve intra-file
+    if callee_name.contains('.') {
+        return SymbolId::default();
+    }
+
+    // Simple name: match against all symbols in the same file
+    let mut candidates: Vec<(usize, SymbolId)> = Vec::new();
+    for &(idx, real_id) in symbol_id_map {
+        let sym = &symbols[idx];
+        if sym.name == callee_name {
+            candidates.push((idx, real_id));
+        }
+    }
+
+    match candidates.len() {
+        0 => SymbolId::default(),
+        1 => candidates[0].1,
+        _ => {
+            // Multiple matches: prefer Function/Method/Class over Variable/Constant
+            for &(idx, real_id) in &candidates {
+                let sym = &symbols[idx];
+                if matches!(
+                    sym.kind,
+                    SymbolKind::Function | SymbolKind::Method | SymbolKind::Class
+                ) {
+                    return real_id;
+                }
+            }
+            candidates[0].1
+        }
     }
 }
 
@@ -908,6 +1041,774 @@ mod tests {
             graph.symbol_count(),
             6,
             "Double population should double symbols"
+        );
+    }
+
+    // =========================================================================
+    // QA-Foundation: Call-site detection + intra-file resolution tests
+    // =========================================================================
+
+    /// Parse inline Python source into a temp file, populate a graph, return (graph, path).
+    fn parse_and_populate(source: &str) -> (Graph, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test_module.py");
+        std::fs::write(&path, source).expect("write fixture");
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, source).expect("parse");
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        std::mem::forget(dir);
+        (graph, path)
+    }
+
+    /// Find a symbol by name in the graph. Panics if not found.
+    fn find_symbol<'a>(graph: &'a Graph, name: &str) -> (SymbolId, &'a Symbol) {
+        graph
+            .all_symbols()
+            .find(|(_, s)| s.name == name)
+            .unwrap_or_else(|| panic!("Symbol '{}' not found in graph", name))
+    }
+
+    /// Count Call edges outgoing from a symbol.
+    fn call_edge_count(graph: &Graph, from_id: SymbolId) -> usize {
+        graph
+            .edges_from(from_id)
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .count()
+    }
+
+    /// Count Call edges incoming to a symbol.
+    fn inbound_call_count(graph: &Graph, to_id: SymbolId) -> usize {
+        graph
+            .edges_to(to_id)
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .count()
+    }
+
+    // -- P0: Call-Site Extraction — Basic Detection ----------------------------
+
+    #[test]
+    fn test_simple_function_call_produces_call_reference() {
+        let source = r#"
+def callee():
+    pass
+
+def caller():
+    callee()
+"#;
+        let (graph, _path) = parse_and_populate(source);
+
+        let has_call_edge = graph.all_symbols().any(|(id, _)| {
+            graph
+                .edges_from(id)
+                .iter()
+                .any(|e| e.kind == EdgeKind::Calls)
+        });
+
+        assert!(
+            has_call_edge,
+            "PythonAdapter must produce at least one Call edge for `callee()`."
+        );
+    }
+
+    #[test]
+    fn test_multiple_calls_in_single_function() {
+        let source = r#"
+def a():
+    pass
+
+def b():
+    pass
+
+def c():
+    pass
+
+def main():
+    a()
+    b()
+    c()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (main_id, _) = find_symbol(&graph, "main");
+
+        let count = call_edge_count(&graph, main_id);
+        assert_eq!(
+            count, 3,
+            "main() calls a(), b(), c() — must have exactly 3 outgoing Calls edges, got {}.",
+            count
+        );
+    }
+
+    #[test]
+    fn test_nested_calls_both_detected() {
+        let source = r#"
+def f(x):
+    return x
+
+def g():
+    return 42
+
+def outer():
+    f(g())
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (outer_id, _) = find_symbol(&graph, "outer");
+
+        let count = call_edge_count(&graph, outer_id);
+        assert_eq!(
+            count, 2,
+            "outer() calls f(g()) — must detect BOTH f and g. Got {} call edges.",
+            count
+        );
+    }
+
+    #[test]
+    fn test_call_in_list_comprehension_detected() {
+        let source = r#"
+def transform(x):
+    return x * 2
+
+def process(items):
+    return [transform(x) for x in items]
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (process_id, _) = find_symbol(&graph, "process");
+
+        let callees = graph.callees(process_id);
+        let callee_names: Vec<String> = callees
+            .iter()
+            .filter_map(|id| graph.get_symbol(*id))
+            .map(|s| s.name.clone())
+            .collect();
+
+        assert!(
+            callee_names.contains(&"transform".to_string()),
+            "process() must detect transform() inside list comprehension. Callees: {:?}.",
+            callee_names
+        );
+    }
+
+    #[test]
+    fn test_call_in_decorator_argument_detected() {
+        let source = r#"
+def config():
+    return {}
+
+def decorator(cfg):
+    def wrapper(fn):
+        return fn
+    return wrapper
+
+@decorator(config())
+def my_func():
+    pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let (config_id, _) = find_symbol(&graph, "config");
+        let inbound = inbound_call_count(&graph, config_id);
+
+        assert!(
+            inbound >= 1,
+            "config() used as decorator argument must be detected. Inbound Calls: {}.",
+            inbound
+        );
+    }
+
+    #[test]
+    fn test_chained_calls_detect_inner_callee() {
+        let source = r#"
+def builder():
+    return None
+
+def run():
+    builder().execute()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (builder_id, _) = find_symbol(&graph, "builder");
+
+        let inbound = inbound_call_count(&graph, builder_id);
+        assert!(
+            inbound >= 1,
+            "builder() in chained call must be detected. Inbound Calls: {}.",
+            inbound
+        );
+    }
+
+    #[test]
+    fn test_calls_with_various_argument_forms() {
+        let source = r#"
+def f():
+    pass
+
+def g(a, b):
+    pass
+
+def h(x=0):
+    pass
+
+def run():
+    f()
+    g(1, 2)
+    h(x=3)
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = find_symbol(&graph, "run");
+
+        let count = call_edge_count(&graph, run_id);
+        assert_eq!(
+            count, 3,
+            "run() makes 3 calls with different argument forms. Got {} Calls edges.",
+            count
+        );
+    }
+
+    // -- P0: Intra-File Resolution — Basic Name Matching ----------------------
+
+    #[test]
+    fn test_intrafile_call_resolves_to_defined_function() {
+        let source = r#"
+def helper():
+    return 42
+
+def caller():
+    helper()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (caller_id, _) = find_symbol(&graph, "caller");
+        let (helper_id, _) = find_symbol(&graph, "helper");
+
+        let callees = graph.callees(caller_id);
+        assert!(
+            callees.contains(&helper_id),
+            "caller()'s callees must include helper's real SymbolId."
+        );
+
+        let callers = graph.callers(helper_id);
+        assert!(
+            callers.contains(&caller_id),
+            "helper's callers must include caller. Bidirectional edge insertion broken."
+        );
+    }
+
+    #[test]
+    fn test_call_to_external_name_stays_unresolved() {
+        let source = r#"
+import json
+
+def run():
+    json.dumps({"key": "value"})
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = find_symbol(&graph, "run");
+
+        let callees = graph.callees(run_id);
+        let callee_names: Vec<String> = callees
+            .iter()
+            .filter_map(|id| graph.get_symbol(*id))
+            .map(|s| s.name.clone())
+            .collect();
+
+        assert!(
+            !callee_names.contains(&"dumps".to_string()),
+            "json.dumps() is cross-file — must NOT resolve to a local symbol. Resolved: {:?}.",
+            callee_names
+        );
+    }
+
+    #[test]
+    fn test_calls_to_builtins_stay_unresolved() {
+        let source = r#"
+def run():
+    print("hello")
+    x = len([1, 2, 3])
+    isinstance(x, int)
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = find_symbol(&graph, "run");
+
+        let resolved_callees = graph.callees(run_id);
+        let resolved_names: Vec<String> = resolved_callees
+            .iter()
+            .filter_map(|id| graph.get_symbol(*id))
+            .map(|s| s.name.clone())
+            .collect();
+
+        assert!(
+            resolved_names.is_empty(),
+            "Built-in calls must NOT resolve to any graph symbol. Resolved: {:?}.",
+            resolved_names
+        );
+    }
+
+    #[test]
+    fn test_call_to_undefined_name_stays_unresolved() {
+        let source = r#"
+def run():
+    nonexistent_function()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = find_symbol(&graph, "run");
+
+        let resolved_callees = graph.callees(run_id);
+        assert!(
+            resolved_callees.is_empty()
+                || resolved_callees
+                    .iter()
+                    .all(|id| graph.get_symbol(*id).is_none()),
+            "Call to undefined name must not resolve to any real symbol. Callees: {:?}.",
+            resolved_callees
+        );
+    }
+
+    #[test]
+    fn test_class_instantiation_resolves_to_class() {
+        let source = r#"
+class Foo:
+    def __init__(self):
+        pass
+
+def create():
+    return Foo()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (create_id, _) = find_symbol(&graph, "create");
+        let (foo_id, _) = find_symbol(&graph, "Foo");
+
+        let callees = graph.callees(create_id);
+        assert!(
+            callees.contains(&foo_id),
+            "Foo() instantiation must resolve to the Foo class symbol. Callees: {:?}.",
+            callees
+        );
+    }
+
+    // -- P1: Method Calls and self Resolution ---------------------------------
+
+    #[test]
+    fn test_self_method_call_resolves_to_class_method() {
+        let source = r#"
+class Service:
+    def validate(self, data):
+        return data is not None
+
+    def run(self, data):
+        if self.validate(data):
+            return data
+"#;
+        let (graph, _) = parse_and_populate(source);
+
+        let (run_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "run" && s.kind == SymbolKind::Method)
+            .expect("Must find run method");
+        let (validate_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "validate" && s.kind == SymbolKind::Method)
+            .expect("Must find validate method");
+
+        let callees = graph.callees(run_id);
+        assert!(
+            callees.contains(&validate_id),
+            "self.validate() in run() must resolve to the validate method. Callees: {:?}.",
+            callees
+        );
+    }
+
+    #[test]
+    fn test_non_self_method_call_stays_unresolved() {
+        let source = r#"
+def run(obj):
+    obj.process()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = find_symbol(&graph, "run");
+
+        let resolved_callees = graph.callees(run_id);
+        let resolved_names: Vec<String> = resolved_callees
+            .iter()
+            .filter_map(|id| graph.get_symbol(*id))
+            .map(|s| s.name.clone())
+            .collect();
+
+        assert!(
+            !resolved_names.contains(&"process".to_string()),
+            "obj.process() must NOT resolve to a local symbol. Resolved: {:?}.",
+            resolved_names
+        );
+    }
+
+    #[test]
+    fn test_self_method_to_undefined_method_stays_unresolved() {
+        let source = r#"
+class Child:
+    def run(self):
+        self.parent_method()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "run")
+            .expect("Must find run");
+
+        let resolved_callees = graph.callees(run_id);
+        assert!(
+            resolved_callees.is_empty()
+                || resolved_callees
+                    .iter()
+                    .all(|id| graph.get_symbol(*id).is_none()),
+            "self.parent_method() with no local definition must stay unresolved. Resolved: {:?}.",
+            resolved_callees
+        );
+    }
+
+    #[test]
+    fn test_multiple_self_calls_resolve_to_correct_methods() {
+        let source = r#"
+class Pipeline:
+    def step_a(self):
+        self.step_b()
+        self.step_c()
+
+    def step_b(self):
+        pass
+
+    def step_c(self):
+        pass
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (a_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "step_a")
+            .expect("step_a");
+        let (b_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "step_b")
+            .expect("step_b");
+        let (c_id, _) = graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "step_c")
+            .expect("step_c");
+
+        let callees = graph.callees(a_id);
+        assert!(callees.contains(&b_id), "step_a must call step_b");
+        assert!(callees.contains(&c_id), "step_a must call step_c");
+        assert_eq!(callees.len(), 2, "step_a calls exactly 2 methods");
+    }
+
+    // -- P1: Edge Type and Graph Invariant Verification -----------------------
+
+    #[test]
+    fn test_call_edges_have_correct_edge_kind() {
+        let source = r#"
+def target():
+    pass
+
+def caller():
+    target()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (caller_id, _) = find_symbol(&graph, "caller");
+        let (target_id, _) = find_symbol(&graph, "target");
+
+        let outgoing = graph.edges_from(caller_id);
+        let call_edges: Vec<_> = outgoing
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .collect();
+
+        assert_eq!(call_edges.len(), 1, "Exactly one Calls edge from caller");
+        assert_eq!(
+            call_edges[0].target, target_id,
+            "Call edge target must be target's real SymbolId, not default"
+        );
+    }
+
+    #[test]
+    fn test_edge_count_matches_source_call_count() {
+        let source = r#"
+def f1(): pass
+def f2(): pass
+def f3(): pass
+def f4(): pass
+def f5(): pass
+
+def orchestrator():
+    f1()
+    f2()
+    f3()
+    f4()
+    f5()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (orch_id, _) = find_symbol(&graph, "orchestrator");
+
+        let count = call_edge_count(&graph, orch_id);
+        assert_eq!(
+            count, 5,
+            "orchestrator() has exactly 5 calls — edge count must match. Got {}.",
+            count
+        );
+    }
+
+    #[test]
+    fn test_from_symbol_is_correct_containing_function() {
+        let source = r#"
+def target_a():
+    pass
+
+def target_b():
+    pass
+
+def caller_one():
+    target_a()
+
+def caller_two():
+    target_b()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (one_id, _) = find_symbol(&graph, "caller_one");
+        let (two_id, _) = find_symbol(&graph, "caller_two");
+        let (a_id, _) = find_symbol(&graph, "target_a");
+        let (b_id, _) = find_symbol(&graph, "target_b");
+
+        // caller_one calls target_a, NOT target_b
+        let one_callees = graph.callees(one_id);
+        assert!(one_callees.contains(&a_id), "caller_one must call target_a");
+        assert!(
+            !one_callees.contains(&b_id),
+            "caller_one must NOT call target_b"
+        );
+
+        // caller_two calls target_b, NOT target_a
+        let two_callees = graph.callees(two_id);
+        assert!(two_callees.contains(&b_id), "caller_two must call target_b");
+        assert!(
+            !two_callees.contains(&a_id),
+            "caller_two must NOT call target_a"
+        );
+
+        // Verify via callers() — bidirectional check
+        let a_callers = graph.callers(a_id);
+        assert!(
+            a_callers.contains(&one_id),
+            "target_a's caller must be caller_one"
+        );
+        assert!(
+            !a_callers.contains(&two_id),
+            "target_a must NOT show caller_two as caller"
+        );
+    }
+
+    // -- P2: Adversarial Edge Cases -------------------------------------------
+
+    #[test]
+    fn test_recursive_call_creates_self_edge() {
+        let source = r#"
+def factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (fact_id, _) = find_symbol(&graph, "factorial");
+
+        let callees = graph.callees(fact_id);
+        assert!(
+            callees.contains(&fact_id),
+            "Recursive call must create a self-loop Calls edge. Callees: {:?}.",
+            callees
+        );
+    }
+
+    #[test]
+    fn test_call_inside_lambda_detected() {
+        let source = r#"
+def process(x):
+    return x * 2
+
+def run():
+    fn = lambda x: process(x)
+    return fn(1)
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (process_id, _) = find_symbol(&graph, "process");
+
+        let inbound = inbound_call_count(&graph, process_id);
+        assert!(
+            inbound >= 1,
+            "process() called inside lambda body must be detected. Inbound Calls: {}.",
+            inbound
+        );
+    }
+
+    #[test]
+    fn test_name_shadowing_does_not_crash() {
+        let source = r#"
+def helper():
+    return 42
+
+def run():
+    helper = 1
+    helper()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        // Main assertion: no panic during parse + populate
+        let (run_id, _) = find_symbol(&graph, "run");
+        let _callees = graph.callees(run_id);
+    }
+
+    #[test]
+    fn test_dynamic_dispatch_stays_unresolved() {
+        let source = r#"
+def run(obj):
+    func = getattr(obj, 'method')
+    func()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (run_id, _) = find_symbol(&graph, "run");
+
+        let resolved = graph.callees(run_id);
+        let resolved_names: Vec<String> = resolved
+            .iter()
+            .filter_map(|id| graph.get_symbol(*id))
+            .map(|s| s.name.clone())
+            .collect();
+
+        assert!(
+            resolved_names.is_empty(),
+            "Dynamic dispatch must not resolve to any local symbol. Resolved: {:?}.",
+            resolved_names
+        );
+    }
+
+    #[test]
+    fn test_module_level_call_detected() {
+        let source = r#"
+def setup():
+    return 42
+
+result = setup()
+"#;
+        let (graph, _) = parse_and_populate(source);
+        let (setup_id, _) = find_symbol(&graph, "setup");
+
+        let inbound = inbound_call_count(&graph, setup_id);
+        assert!(
+            inbound >= 1,
+            "Module-level call setup() must be detected. Inbound Calls: {}.",
+            inbound
+        );
+    }
+
+    // -- P0: Integration with data_dead_end Pattern ---------------------------
+
+    /// Parse fixture content via temp path to avoid /tests/ path exclusion.
+    fn parse_fixture_for_pattern(fixture_name: &str) -> Graph {
+        let fixture_path = fixture_dir().join(fixture_name);
+        let content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", fixture_name, e));
+
+        // Use temp path to avoid is_excluded() /tests/ path check
+        let dir = tempfile::tempdir().expect("tempdir");
+        let temp_path = dir.path().join(fixture_name);
+        std::fs::write(&temp_path, &content).expect("write");
+
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&temp_path, &content).expect("parse");
+
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+        std::mem::forget(dir);
+        graph
+    }
+
+    #[test]
+    fn test_dead_code_fixture_correct_with_call_detection() {
+        use crate::analyzer::patterns::data_dead_end;
+
+        let graph = parse_fixture_for_pattern("dead_code.py");
+
+        let diagnostics = data_dead_end::detect(&graph);
+        let flagged_names: Vec<String> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        // True positives: unused_helper, _private_util
+        assert!(
+            flagged_names.iter().any(|n| n.contains("unused_helper")),
+            "unused_helper must be flagged as dead end. Flagged: {:?}",
+            flagged_names
+        );
+        assert!(
+            flagged_names.iter().any(|n| n.contains("_private_util")),
+            "_private_util must be flagged as dead end. Flagged: {:?}",
+            flagged_names
+        );
+
+        // True negative: active_function is called by main_handler — NOT dead
+        assert!(
+            !flagged_names.iter().any(|n| n.contains("active_function")),
+            "active_function is called by main_handler — must NOT be flagged. Flagged: {:?}",
+            flagged_names
+        );
+
+        // True negative: main_handler is excluded as entry point (main_* pattern)
+        assert!(
+            !flagged_names.iter().any(|n| n.contains("main_handler")),
+            "main_handler is excluded by name pattern — must NOT be flagged. Flagged: {:?}",
+            flagged_names
+        );
+    }
+
+    #[test]
+    fn test_clean_code_fixture_zero_dead_ends() {
+        use crate::analyzer::patterns::data_dead_end;
+
+        let graph = parse_fixture_for_pattern("clean_code.py");
+
+        let diagnostics = data_dead_end::detect(&graph);
+        let flagged: Vec<String> = diagnostics.iter().map(|d| d.entity.clone()).collect();
+
+        assert!(
+            diagnostics.is_empty(),
+            "clean_code.py must produce ZERO dead end diagnostics. Flagged: {:?}.",
+            flagged
+        );
+    }
+
+    // -- P1: Regression Guard — Existing Behavior Preserved -------------------
+
+    #[test]
+    fn test_existing_import_references_unchanged_after_call_detection() {
+        let path = fixture_dir().join("imports.py");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, &content).unwrap();
+
+        // Count import references from adapter output
+        let import_refs = result
+            .references
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Import)
+            .count();
+
+        assert!(
+            import_refs >= 5,
+            "imports.py must still produce >= 5 Import references. Got {}.",
+            import_refs
+        );
+
+        // Populate and verify total refs include both imports and any call refs
+        let mut graph = Graph::new();
+        populate_graph(&mut graph, &result);
+
+        let total_refs = graph.reference_count();
+        assert!(
+            total_refs >= import_refs,
+            "Graph reference count ({}) must be >= adapter import count ({}).",
+            total_refs,
+            import_refs
         );
     }
 }

@@ -15,7 +15,7 @@ use crate::manifest::types::{DiagnosticEntry, EvidenceEntry};
 /// - `pattern` → `DiagnosticPattern.name()` (snake_case)
 /// - `severity` → lowercase Display string
 /// - `confidence` → lowercase Display string
-/// - `evidence` → formatted multi-observation string (structured when Worker 1 delivers `Vec<EvidenceEntry>`)
+/// - `evidence` → `Vec<EvidenceEntry>` with per-observation location and context
 /// - `location` → `loc` (field rename)
 pub fn to_manifest_entry(diagnostic: &Diagnostic) -> DiagnosticEntry {
     DiagnosticEntry {

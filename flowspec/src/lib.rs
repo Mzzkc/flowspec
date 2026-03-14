@@ -28,6 +28,9 @@ pub mod test_utils;
 #[cfg(test)]
 mod pipeline_tests;
 
+#[cfg(test)]
+mod pattern_integration_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::patterns::{run_all_patterns, run_patterns, PatternFilter};

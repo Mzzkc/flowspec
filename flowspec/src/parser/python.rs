@@ -88,6 +88,9 @@ impl LanguageAdapter for PythonAdapter {
             root,
         );
 
+        // Extract all function/method calls from the AST
+        extract_all_calls(&mut result, content_bytes, path, root);
+
         Ok(result)
     }
 }
@@ -574,6 +577,66 @@ fn extract_assignment(
         scope: ScopeId::default(),
         annotations: vec![],
     });
+}
+
+/// Recursively walks the AST to extract all function/method call references.
+///
+/// Creates a `Reference` with `kind: ReferenceKind::Call` for each `call` node found.
+/// The callee name is stored in `resolution: ResolutionStatus::Partial("call:<name>")`
+/// for later resolution by `populate_graph`. Both `from` and `to` are left as
+/// `SymbolId::default()` — `populate_graph` resolves them via location containment
+/// and name matching respectively.
+fn extract_all_calls(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    if node.kind() == "call" {
+        if let Some(func_node) = node.child_by_field_name("function") {
+            if let Some(name) = extract_callee_name(content, func_node) {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Call,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("call:{}", name)),
+                });
+            }
+        }
+    }
+
+    // Recurse into all children to find nested calls
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        extract_all_calls(result, content, path, child);
+    }
+}
+
+/// Extracts the callee name from a call expression's `function` field.
+///
+/// Returns `Some(name)` for identifiers (`func`) and attribute accesses (`obj.method`).
+/// Returns `None` for complex expressions that cannot be statically resolved
+/// (subscript, lambda, conditional, etc.).
+fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
+    match func_node.kind() {
+        "identifier" => {
+            let name = node_text(content, func_node);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        "attribute" => {
+            let object = func_node.child_by_field_name("object")?;
+            let attr = func_node.child_by_field_name("attribute")?;
+            let obj_name = node_text(content, object);
+            let attr_name = node_text(content, attr);
+            if attr_name.is_empty() {
+                None
+            } else {
+                Some(format!("{}.{}", obj_name, attr_name))
+            }
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
