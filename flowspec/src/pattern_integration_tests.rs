@@ -7,15 +7,16 @@
 //! by Doc-2: mock tests pass (98/98) while real data must also produce correct
 //! diagnostics.
 //!
-//! **Current state (Concert 3, Cycle 2):**
-//! - PythonAdapter only emits `ReferenceKind::Import` edges (no Call/Read/Write)
-//! - All reference `to` targets are `SymbolId::default()` (unresolved)
-//! - Patterns that need Call edges (call resolution) are documented as blocked
-//! - Tests reflect ACTUAL current behavior, not desired post-fix behavior
+//! With Worker 1's call-site detection and intra-file resolution (Concert 3,
+//! Cycle 2), `ReferenceKind::Call` edges are now produced and resolved within
+//! files. Patterns fire correctly: true positives on dead code, true negatives
+//! on clean code, isolated clusters on self-referencing modules.
 //!
-//! When Worker 1 delivers call-site detection + intra-file resolution,
-//! these tests should be updated to assert true-negative correctness
-//! (e.g., active_function NOT flagged on dead_code.py).
+//! **Remaining limitations:**
+//! - phantom_dependency: PythonAdapter does not create import Symbols (only
+//!   References), so no symbols have the "import" annotation → zero results.
+//! - circular_dependency: Blocked by M5 (cross-file resolution).
+//! - missing_reexport: Blocked by fixture gap (no `__init__.py`).
 
 use std::path::PathBuf;
 
@@ -199,7 +200,8 @@ fn test_orphaned_implementation_clean_code_true_negative() {
 }
 
 /// data_dead_end must exclude main_handler by name heuristic on dead_code.py.
-/// Also verifies test_ prefix functions would be excluded.
+/// active_function must NOT be flagged — it's called by main_handler (resolved
+/// via intra-file call resolution).
 #[test]
 fn test_data_dead_end_name_heuristic_exclusions() {
     let graph = fixture_graph("dead_code.py");
@@ -211,6 +213,71 @@ fn test_data_dead_end_name_heuristic_exclusions() {
     assert!(
         !entities.iter().any(|e| e.contains("main_handler")),
         "main_handler should be excluded by starts_with('main_') heuristic"
+    );
+
+    // active_function is called by main_handler — must NOT be flagged
+    assert!(
+        !entities.iter().any(|e| e.contains("active_function")),
+        "active_function is called by main_handler — must NOT be flagged as dead end. \
+        If flagged, intra-file call resolution failed. Entities: {:?}",
+        entities
+    );
+}
+
+/// data_dead_end true negative: clean_code.py should produce ZERO data_dead_end
+/// diagnostics because all functions are connected via call chain.
+#[test]
+fn test_data_dead_end_clean_code_true_negative() {
+    let graph = fixture_graph("clean_code.py");
+    let diagnostics = data_dead_end::detect(&graph);
+
+    // clean_code.py: main (excluded by name) → transform_data → read_file
+    // All functions have callers or are excluded. Zero diagnostics expected.
+    assert!(
+        diagnostics.is_empty(),
+        "data_dead_end must NOT fire on clean_code.py — all functions are connected. \
+        Got {} diagnostics: {:?}. If transform_data or read_file are flagged, \
+        intra-file call resolution is broken.",
+        diagnostics.len(),
+        diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+    );
+}
+
+/// isolated_cluster true negative: clean_code.py should produce zero results.
+/// The connected component contains main (entry point) → excluded.
+#[test]
+fn test_isolated_cluster_clean_code_true_negative() {
+    let graph = fixture_graph("clean_code.py");
+    let diagnostics = isolated_cluster::detect(&graph);
+
+    // clean_code.py: main (entry point) → transform_data → read_file
+    // The component contains "main" which matches is_entry_point(), so excluded.
+    assert!(
+        diagnostics.is_empty(),
+        "isolated_cluster must not fire on clean_code.py — contains entry point 'main'. \
+        Got {} diagnostics: {:?}",
+        diagnostics.len(),
+        diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+    );
+}
+
+/// run_all_patterns on clean_code.py should produce ZERO diagnostics.
+/// Global false-positive guard — any diagnostic on clean code is a bug.
+#[test]
+fn test_clean_code_false_positive_guard() {
+    let graph = fixture_graph("clean_code.py");
+    let diagnostics = patterns::run_all_patterns(&graph);
+
+    assert!(
+        diagnostics.is_empty(),
+        "run_all_patterns MUST produce ZERO diagnostics on clean_code.py. \
+        Every function is called, every import is used, main is an entry point. \
+        Got {} diagnostics: {:?}",
+        diagnostics.len(),
+        diagnostics
+            .iter()
+            .map(|d| format!("{:?}: {}", d.pattern, d.entity))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -262,13 +329,13 @@ fn test_end_to_end_cli_diagnostics_non_empty() {
     );
 }
 
-/// analyze() on clean_code.py produces diagnostics in current state.
-/// NOTE: Without call-site detection, functions like read_file and
-/// transform_data have zero inbound Call edges and are flagged as dead ends.
-/// When Worker 1 delivers call resolution, this test should be updated
-/// to assert zero diagnostics (the clean_code false-positive guard).
+/// clean_code.py FALSE-POSITIVE GUARD — THE most important regression test.
+///
+/// clean_code.py has: main → transform_data → read_file → Path import.
+/// All functions are called. All imports are used. ZERO diagnostics expected.
+/// If ANY diagnostic fires on clean_code.py, we have a false positive bug.
 #[test]
-fn test_end_to_end_cli_clean_code_documents_current_state() {
+fn test_end_to_end_cli_clean_code_false_positive_guard() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
         tmp.path().join("clean_code.py"),
@@ -279,23 +346,19 @@ fn test_end_to_end_cli_clean_code_documents_current_state() {
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    // Currently, without call-site detection, data_dead_end flags functions
-    // that have zero inbound edges. read_file and transform_data are flagged
-    // as false positives. This is expected and documented.
-    //
-    // TODO(worker-1): After call-site detection, update this test to assert
-    // result.manifest.diagnostics.is_empty() — the clean_code false-positive guard.
-
-    // For now, verify the pipeline runs without error
-    // and main() is correctly excluded by name heuristic
-    let main_flagged = result
-        .manifest
-        .diagnostics
-        .iter()
-        .any(|d| d.entity.contains("main") && !d.entity.contains("main_"));
+    // With call-site detection: main (excluded by name) calls transform_data,
+    // transform_data calls read_file. Both have inbound Call edges → NOT dead ends.
     assert!(
-        !main_flagged,
-        "main() should never be flagged — excluded by name heuristic"
+        result.manifest.diagnostics.is_empty(),
+        "clean_code.py MUST produce ZERO diagnostics — all functions are called, \
+        main is an entry point. Got {} diagnostics: {:?}",
+        result.manifest.diagnostics.len(),
+        result
+            .manifest
+            .diagnostics
+            .iter()
+            .map(|d| format!("{}: {}", d.pattern, d.entity))
+            .collect::<Vec<_>>()
     );
 }
 
