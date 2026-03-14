@@ -342,7 +342,7 @@ fn insert_references(
 /// is already filtered from pattern entity lists, so it won't appear in diagnostics
 /// like `data_dead_end`.
 fn create_module_symbol(graph: &mut Graph, ref_location: &Location) -> SymbolId {
-    let file_stem = ref_location
+    let file_name = ref_location
         .file
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -352,7 +352,7 @@ fn create_module_symbol(graph: &mut Graph, ref_location: &Location) -> SymbolId 
         id: SymbolId::default(),
         kind: SymbolKind::Module,
         name: "<module>".to_string(),
-        qualified_name: format!("{}::<module>", file_stem),
+        qualified_name: format!("{}::<module>", file_name),
         visibility: Visibility::Public,
         signature: None,
         location: Location {

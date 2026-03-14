@@ -10,4 +10,5 @@
 pub mod conversion;
 pub mod diagnostic;
 pub mod extraction;
+pub mod flow;
 pub mod patterns;

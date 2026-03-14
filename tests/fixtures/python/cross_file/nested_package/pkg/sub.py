@@ -1,0 +1,2 @@
+def tool():
+    return "result"

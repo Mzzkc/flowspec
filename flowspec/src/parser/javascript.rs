@@ -97,10 +97,11 @@ impl LanguageAdapter for JsAdapter {
             &file_stem,
             root,
             false, // not inside export
+            0,
         );
 
         // Extract all function/method calls from the AST
-        extract_all_calls(&mut result, content_bytes, path, root);
+        extract_all_calls(&mut result, content_bytes, path, root, 0);
 
         Ok(result)
     }
@@ -144,6 +145,7 @@ fn build_qualified_name(
 }
 
 /// Visit all children of a node and extract IR.
+#[allow(clippy::too_many_arguments)]
 fn visit_children(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -152,7 +154,16 @@ fn visit_children(
     file_stem: &str,
     node: Node,
     exported: bool,
+    depth: usize,
 ) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit reached at {}:{}",
+            path.display(),
+            node.start_position().row + 1
+        );
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         visit_node(
@@ -163,11 +174,13 @@ fn visit_children(
             file_stem,
             child,
             exported,
+            depth + 1,
         );
     }
 }
 
 /// Visit a single AST node and extract IR.
+#[allow(clippy::too_many_arguments)]
 fn visit_node(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -176,6 +189,7 @@ fn visit_node(
     file_stem: &str,
     node: Node,
     exported: bool,
+    depth: usize,
 ) {
     match node.kind() {
         "function_declaration" | "generator_function_declaration" => {
@@ -187,6 +201,7 @@ fn visit_node(
                 file_stem,
                 node,
                 exported,
+                depth,
             );
         }
         "class_declaration" => {
@@ -198,10 +213,11 @@ fn visit_node(
                 file_stem,
                 node,
                 exported,
+                depth,
             );
         }
         "export_statement" => {
-            visit_export_statement(result, scope_stack, content, path, file_stem, node);
+            visit_export_statement(result, scope_stack, content, path, file_stem, node, depth);
         }
         "lexical_declaration" | "variable_declaration" => {
             extract_arrow_functions_from_declaration(
@@ -212,6 +228,7 @@ fn visit_node(
                 file_stem,
                 node,
                 exported,
+                depth,
             );
         }
         "import_statement" => {
@@ -219,7 +236,16 @@ fn visit_node(
         }
         _ => {
             // Recurse into other nodes
-            visit_children(result, scope_stack, content, path, file_stem, node, false);
+            visit_children(
+                result,
+                scope_stack,
+                content,
+                path,
+                file_stem,
+                node,
+                false,
+                depth,
+            );
         }
     }
 }
@@ -232,6 +258,7 @@ fn visit_export_statement(
     path: &Path,
     file_stem: &str,
     node: Node,
+    depth: usize,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -245,6 +272,7 @@ fn visit_export_statement(
                     file_stem,
                     child,
                     true,
+                    depth,
                 );
             }
             "class_declaration" => {
@@ -256,6 +284,7 @@ fn visit_export_statement(
                     file_stem,
                     child,
                     true,
+                    depth,
                 );
             }
             "lexical_declaration" | "variable_declaration" => {
@@ -267,6 +296,7 @@ fn visit_export_statement(
                     file_stem,
                     child,
                     true,
+                    depth,
                 );
             }
             "export_clause" => {
@@ -317,6 +347,7 @@ fn apply_export_clause_visibility(result: &mut ParseResult, content: &[u8], clau
 }
 
 /// Extract a function declaration (named, async, generator).
+#[allow(clippy::too_many_arguments)]
 fn extract_function_declaration(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -325,6 +356,7 @@ fn extract_function_declaration(
     file_stem: &str,
     node: Node,
     exported: bool,
+    depth: usize,
 ) {
     let name = node
         .child_by_field_name("name")
@@ -386,7 +418,16 @@ fn extract_function_declaration(
 
     // Visit body
     if let Some(body) = node.child_by_field_name("body") {
-        visit_children(result, scope_stack, content, path, file_stem, body, false);
+        visit_children(
+            result,
+            scope_stack,
+            content,
+            path,
+            file_stem,
+            body,
+            false,
+            depth + 1,
+        );
     }
 
     scope_stack.pop();
@@ -396,6 +437,7 @@ fn extract_function_declaration(
 ///
 /// Walks `variable_declarator` children. If the value field is an `arrow_function`,
 /// extracts it as a `SymbolKind::Function` with the variable name.
+#[allow(clippy::too_many_arguments)]
 fn extract_arrow_functions_from_declaration(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -404,6 +446,7 @@ fn extract_arrow_functions_from_declaration(
     file_stem: &str,
     node: Node,
     exported: bool,
+    depth: usize,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -468,7 +511,16 @@ fn extract_arrow_functions_from_declaration(
                     scope_stack.push(func_scope_idx);
 
                     if let Some(body) = value_node.child_by_field_name("body") {
-                        visit_children(result, scope_stack, content, path, file_stem, body, false);
+                        visit_children(
+                            result,
+                            scope_stack,
+                            content,
+                            path,
+                            file_stem,
+                            body,
+                            false,
+                            depth + 1,
+                        );
                     }
 
                     scope_stack.pop();
@@ -518,7 +570,16 @@ fn extract_arrow_functions_from_declaration(
                     scope_stack.push(func_scope_idx);
 
                     if let Some(body) = value_node.child_by_field_name("body") {
-                        visit_children(result, scope_stack, content, path, file_stem, body, false);
+                        visit_children(
+                            result,
+                            scope_stack,
+                            content,
+                            path,
+                            file_stem,
+                            body,
+                            false,
+                            depth + 1,
+                        );
                     }
 
                     scope_stack.pop();
@@ -529,6 +590,7 @@ fn extract_arrow_functions_from_declaration(
 }
 
 /// Extract a class declaration.
+#[allow(clippy::too_many_arguments)]
 fn extract_class_declaration(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -537,6 +599,7 @@ fn extract_class_declaration(
     file_stem: &str,
     node: Node,
     exported: bool,
+    depth: usize,
 ) {
     let name = node
         .child_by_field_name("name")
@@ -584,9 +647,26 @@ fn extract_class_declaration(
         let mut cursor = body.walk();
         for child in body.children(&mut cursor) {
             if child.kind() == "method_definition" {
-                extract_method_definition(result, scope_stack, content, path, file_stem, child);
+                extract_method_definition(
+                    result,
+                    scope_stack,
+                    content,
+                    path,
+                    file_stem,
+                    child,
+                    depth + 1,
+                );
             } else {
-                visit_node(result, scope_stack, content, path, file_stem, child, false);
+                visit_node(
+                    result,
+                    scope_stack,
+                    content,
+                    path,
+                    file_stem,
+                    child,
+                    false,
+                    depth + 1,
+                );
             }
         }
     }
@@ -595,6 +675,11 @@ fn extract_class_declaration(
 }
 
 /// Extract a method definition inside a class body.
+///
+/// Detects getter/setter keywords (`get value()`, `set value(v)`) and prefixes
+/// the name with `get_`/`set_` to produce distinct entity IDs. Regular methods
+/// named `getUser` or `setValue` are NOT affected — only the `get`/`set`
+/// keyword syntax produces prefixed names.
 fn extract_method_definition(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -602,14 +687,50 @@ fn extract_method_definition(
     path: &Path,
     file_stem: &str,
     node: Node,
+    depth: usize,
 ) {
-    let name = node
+    let raw_name = node
         .child_by_field_name("name")
         .map(|n| node_text(content, n).to_string())
         .unwrap_or_default();
 
-    if name.is_empty() {
+    if raw_name.is_empty() {
         return;
+    }
+
+    // Detect getter/setter keyword children before the name field.
+    // For `get value()`, tree-sitter produces: "get" keyword, then property_identifier "value".
+    // For regular `getUser()`, there is no separate keyword — just property_identifier "getUser".
+    let mut is_getter = false;
+    let mut is_setter = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Stop once we hit the name field — keyword comes before name
+        if child.kind() == "property_identifier" || child.kind() == "computed_property_name" {
+            break;
+        }
+        let text = node_text(content, child);
+        if text == "get" {
+            is_getter = true;
+        } else if text == "set" {
+            is_setter = true;
+        }
+    }
+
+    let name = if is_getter {
+        format!("get_{}", raw_name)
+    } else if is_setter {
+        format!("set_{}", raw_name)
+    } else {
+        raw_name
+    };
+
+    let mut annotations = vec![];
+    if is_getter {
+        annotations.push("getter".to_string());
+    }
+    if is_setter {
+        annotations.push("setter".to_string());
     }
 
     let params = node
@@ -628,7 +749,7 @@ fn extract_method_definition(
         location: node_location(path, node),
         resolution: ResolutionStatus::Resolved,
         scope: ScopeId::default(),
-        annotations: vec![],
+        annotations,
     });
 
     // Create function scope for nested definitions
@@ -644,7 +765,16 @@ fn extract_method_definition(
     scope_stack.push(func_scope_idx);
 
     if let Some(body) = node.child_by_field_name("body") {
-        visit_children(result, scope_stack, content, path, file_stem, body, false);
+        visit_children(
+            result,
+            scope_stack,
+            content,
+            path,
+            file_stem,
+            body,
+            false,
+            depth + 1,
+        );
     }
 
     scope_stack.pop();
@@ -783,7 +913,22 @@ fn add_import_symbol(
 /// node found. The callee name is stored in
 /// `resolution: ResolutionStatus::Partial("call:<name>")` for later resolution
 /// by `populate_graph`.
-fn extract_all_calls(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_all_calls(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit reached in call extraction at {}:{}",
+            path.display(),
+            node.start_position().row + 1
+        );
+        return;
+    }
+
     if node.kind() == "call_expression" {
         if let Some(func_node) = node.child_by_field_name("function") {
             if let Some(name) = extract_callee_name(content, func_node) {
@@ -802,7 +947,7 @@ fn extract_all_calls(result: &mut ParseResult, content: &[u8], path: &Path, node
     // Recurse into all children to find nested calls
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        extract_all_calls(result, content, path, child);
+        extract_all_calls(result, content, path, child, depth + 1);
     }
 }
 
@@ -1571,6 +1716,317 @@ function c() {}
             hello.qualified_name.starts_with("app.js::"),
             "JS qualified name must start with 'app.js::' (includes extension), got: {}",
             hello.qualified_name
+        );
+    }
+
+    // =========================================================================
+    // QA-2: Recursion Depth Protection — JavaScript Adapter (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_js_deeply_nested_callbacks_no_crash() {
+        let adapter = JsAdapter::new();
+        let mut code = String::new();
+        for i in 0..500 {
+            code.push_str(&format!("function f{i}() {{ "));
+        }
+        code.push_str("console.log('deep');");
+        for _ in 0..500 {
+            code.push_str(" }");
+        }
+        let path = Path::new("deep_callback.js");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Must not crash on 500-deep nested functions"
+        );
+        let parsed = result.unwrap();
+        assert!(!parsed.symbols.is_empty(), "Must extract shallow functions");
+    }
+
+    #[test]
+    fn test_js_nested_arrow_functions_no_crash() {
+        let adapter = JsAdapter::new();
+        let mut code = String::new();
+        for i in 0..300 {
+            code.push_str(&format!("const a{i} = () => {{ "));
+        }
+        code.push_str("return 1;");
+        for _ in 0..300 {
+            code.push_str(" };");
+        }
+        let path = Path::new("deep_arrow.js");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Must not crash on 300-deep nested arrow functions"
+        );
+    }
+
+    #[test]
+    fn test_js_nested_class_expressions_no_crash() {
+        let adapter = JsAdapter::new();
+        let mut code = String::new();
+        for i in 0..300 {
+            code.push_str(&format!("class C{i} {{ m{i}() {{ "));
+        }
+        code.push_str("return null;");
+        for _ in 0..300 {
+            code.push_str(" } }");
+        }
+        let path = Path::new("deep_class.js");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Must not crash on 300-deep nested class declarations"
+        );
+    }
+
+    #[test]
+    fn test_js_10k_expression_nesting_no_crash() {
+        let adapter = JsAdapter::new();
+        let inner = "1 + ".repeat(10_000);
+        let code = format!("function f() {{ let x = {}1; }}", inner);
+        let path = Path::new("deep_js_expr.js");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Must not crash on 10K-deep JS expression tree"
+        );
+        let parsed = result.unwrap();
+        let has_fn = parsed.symbols.iter().any(|s| s.name == "f");
+        assert!(has_fn, "Top-level function must be extracted");
+    }
+
+    #[test]
+    fn test_js_partial_results_before_depth_limit() {
+        let adapter = JsAdapter::new();
+        let mut code = String::from("export function topLevel() {}\n");
+        for i in 0..400 {
+            code.push_str(&format!("function nested{i}() {{ "));
+        }
+        code.push_str("return 1;");
+        for _ in 0..400 {
+            code.push_str(" }");
+        }
+        let path = Path::new("js_partial.js");
+        let result = adapter.parse_file(path, &code).unwrap();
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"topLevel"),
+            "Exported top-level function must survive depth limiting"
+        );
+    }
+
+    #[test]
+    fn test_js_mixed_nesting_no_crash() {
+        let adapter = JsAdapter::new();
+        let mut code = String::new();
+        for i in 0..150 {
+            code.push_str(&format!("function f{i}() {{ class C{i} {{ m{i}() {{ "));
+        }
+        code.push_str("return 42;");
+        for _ in 0..150 {
+            code.push_str(" } } }");
+        }
+        let path = Path::new("js_mixed.js");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Must not crash on mixed function/class nesting"
+        );
+        let parsed = result.unwrap();
+        let fn_count = parsed
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        let class_count = parsed
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .count();
+        assert!(fn_count > 0, "Must extract some functions");
+        assert!(class_count > 0, "Must extract some classes");
+    }
+
+    // =========================================================================
+    // QA-2: Duplicate Entity IDs — Getter/Setter Fix (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_js_getter_only_distinct_name() {
+        let adapter = JsAdapter::new();
+        let code = r#"
+class Config {
+    get value() {
+        return this._value;
+    }
+}
+"#;
+        let result = adapter.parse_file(Path::new("config.js"), code).unwrap();
+        let method_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"get_value"),
+            "Getter must have 'get_' prefix, got: {:?}",
+            method_names
+        );
+    }
+
+    #[test]
+    fn test_js_setter_only_distinct_name() {
+        let adapter = JsAdapter::new();
+        let code = r#"
+class Config {
+    set value(v) {
+        this._value = v;
+    }
+}
+"#;
+        let result = adapter.parse_file(Path::new("config.js"), code).unwrap();
+        let method_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"set_value"),
+            "Setter must have 'set_' prefix, got: {:?}",
+            method_names
+        );
+    }
+
+    #[test]
+    fn test_js_getter_and_setter_distinct_ids() {
+        let adapter = JsAdapter::new();
+        let code = r#"
+class Config {
+    get value() { return this._value; }
+    set value(v) { this._value = v; }
+}
+"#;
+        let result = adapter.parse_file(Path::new("config.js"), code).unwrap();
+        let method_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"get_value"),
+            "Getter must be present"
+        );
+        assert!(
+            method_names.contains(&"set_value"),
+            "Setter must be present"
+        );
+        assert_eq!(
+            method_names.iter().filter(|n| n.contains("value")).count(),
+            2,
+            "Must have exactly 2 distinct entities for getter+setter"
+        );
+        let qualified: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.qualified_name.as_str())
+            .collect();
+        let unique: std::collections::HashSet<&&str> = qualified.iter().collect();
+        assert_eq!(
+            unique.len(),
+            qualified.len(),
+            "All qualified names must be unique"
+        );
+    }
+
+    #[test]
+    fn test_js_getter_setter_regular_method_same_name() {
+        let adapter = JsAdapter::new();
+        let code = r#"
+class Weird {
+    get x() { return 1; }
+    set x(v) { this._x = v; }
+    x() { return "method"; }
+}
+"#;
+        let result = adapter.parse_file(Path::new("weird.js"), code).unwrap();
+        let method_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(method_names.contains(&"get_x"), "Getter must be 'get_x'");
+        assert!(method_names.contains(&"set_x"), "Setter must be 'set_x'");
+        assert!(method_names.contains(&"x"), "Regular method must be 'x'");
+    }
+
+    #[test]
+    fn test_js_regular_method_starting_with_get_not_prefixed() {
+        let adapter = JsAdapter::new();
+        let code = r#"
+class UserService {
+    getUser(id) {
+        return this.db.find(id);
+    }
+    setDefaults() {
+        this.defaults = {};
+    }
+}
+"#;
+        let result = adapter.parse_file(Path::new("service.js"), code).unwrap();
+        let method_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"getUser"),
+            "Regular method 'getUser' must NOT become 'get_getUser', got: {:?}",
+            method_names
+        );
+        assert!(
+            method_names.contains(&"setDefaults"),
+            "Regular method 'setDefaults' must NOT become 'set_setDefaults', got: {:?}",
+            method_names
+        );
+    }
+
+    // =========================================================================
+    // QA-2: Regression Guards (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_js_class_methods_still_extracted_after_getter_setter_fix() {
+        let adapter = JsAdapter::new();
+        let code = r#"
+class MyClass {
+    constructor() { this.x = 1; }
+    normalMethod() { return this.x; }
+    async asyncMethod() { return await fetch('/'); }
+}
+"#;
+        let result = adapter.parse_file(Path::new("my_class.js"), code).unwrap();
+        let method_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"constructor"),
+            "constructor must be extracted"
+        );
+        assert!(
+            method_names.contains(&"normalMethod"),
+            "normalMethod must be extracted"
         );
     }
 }

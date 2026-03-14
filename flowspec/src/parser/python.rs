@@ -94,10 +94,10 @@ impl LanguageAdapter for PythonAdapter {
         );
 
         // Extract all function/method calls from the AST
-        extract_all_calls(&mut result, content_bytes, path, root);
+        extract_all_calls(&mut result, content_bytes, path, root, 0);
 
         // Extract attribute accesses to track import usage (e.g., os.path.join, sys.argv)
-        extract_attribute_accesses(&mut result, content_bytes, path, root);
+        extract_attribute_accesses(&mut result, content_bytes, path, root, 0);
 
         Ok(result)
     }
@@ -169,11 +169,16 @@ fn visit_children_top(
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        visit_node(result, scope_stack, content, path, file_stem, child, &[]);
+        visit_node(result, scope_stack, content, path, file_stem, child, &[], 0);
     }
 }
 
 /// Visit a single AST node and extract IR.
+///
+/// The `depth` parameter tracks recursion depth. When it exceeds
+/// [`super::MAX_AST_DEPTH`], emits a warning and returns without
+/// recursing further, preserving partial results for shallower nodes.
+#[allow(clippy::too_many_arguments)]
 fn visit_node(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -182,7 +187,18 @@ fn visit_node(
     file_stem: &str,
     node: Node,
     decorators: &[String],
+    depth: usize,
 ) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit ({}) reached at {}:{}",
+            super::MAX_AST_DEPTH,
+            path.display(),
+            node.start_position().row + 1,
+        );
+        return;
+    }
+
     match node.kind() {
         "function_definition" => {
             extract_function(
@@ -193,6 +209,7 @@ fn visit_node(
                 file_stem,
                 node,
                 decorators,
+                depth,
             );
         }
         "class_definition" => {
@@ -204,6 +221,7 @@ fn visit_node(
                 file_stem,
                 node,
                 decorators,
+                depth,
             );
         }
         "import_statement" => {
@@ -213,7 +231,7 @@ fn visit_node(
             extract_import_from(result, content, path, node);
         }
         "decorated_definition" => {
-            extract_decorated(result, scope_stack, content, path, file_stem, node);
+            extract_decorated(result, scope_stack, content, path, file_stem, node, depth);
         }
         "expression_statement" => {
             // Check for assignment as direct child
@@ -228,13 +246,23 @@ fn visit_node(
             // Recurse into other nodes
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                visit_node(result, scope_stack, content, path, file_stem, child, &[]);
+                visit_node(
+                    result,
+                    scope_stack,
+                    content,
+                    path,
+                    file_stem,
+                    child,
+                    &[],
+                    depth + 1,
+                );
             }
         }
     }
 }
 
 /// Extract a function/method definition.
+#[allow(clippy::too_many_arguments)]
 fn extract_function(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -243,6 +271,7 @@ fn extract_function(
     file_stem: &str,
     node: Node,
     decorators: &[String],
+    depth: usize,
 ) {
     let name = node
         .child_by_field_name("name")
@@ -306,7 +335,16 @@ fn extract_function(
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.children(&mut cursor) {
-            visit_node(result, scope_stack, content, path, file_stem, child, &[]);
+            visit_node(
+                result,
+                scope_stack,
+                content,
+                path,
+                file_stem,
+                child,
+                &[],
+                depth + 1,
+            );
         }
     }
 
@@ -314,6 +352,7 @@ fn extract_function(
 }
 
 /// Extract a class definition.
+#[allow(clippy::too_many_arguments)]
 fn extract_class(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -322,6 +361,7 @@ fn extract_class(
     file_stem: &str,
     node: Node,
     decorators: &[String],
+    depth: usize,
 ) {
     let name = node
         .child_by_field_name("name")
@@ -358,7 +398,16 @@ fn extract_class(
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.children(&mut cursor) {
-            visit_node(result, scope_stack, content, path, file_stem, child, &[]);
+            visit_node(
+                result,
+                scope_stack,
+                content,
+                path,
+                file_stem,
+                child,
+                &[],
+                depth + 1,
+            );
         }
     }
 
@@ -630,6 +679,7 @@ fn extract_decorated(
     path: &Path,
     file_stem: &str,
     node: Node,
+    depth: usize,
 ) {
     let mut decorators = Vec::new();
 
@@ -654,6 +704,7 @@ fn extract_decorated(
                     file_stem,
                     child,
                     &decorators,
+                    depth,
                 );
             }
             "class_definition" => {
@@ -665,6 +716,7 @@ fn extract_decorated(
                     file_stem,
                     child,
                     &decorators,
+                    depth,
                 );
             }
             _ => {}
@@ -728,7 +780,26 @@ fn extract_assignment(
 /// for later resolution by `populate_graph`. Both `from` and `to` are left as
 /// `SymbolId::default()` — `populate_graph` resolves them via location containment
 /// and name matching respectively.
-fn extract_all_calls(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+///
+/// The `depth` parameter prevents stack overflow on deeply nested expressions.
+/// When depth exceeds [`super::MAX_AST_DEPTH`], the subtree is skipped with a warning.
+fn extract_all_calls(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit ({}) reached in call extraction at {}:{}",
+            super::MAX_AST_DEPTH,
+            path.display(),
+            node.start_position().row + 1,
+        );
+        return;
+    }
+
     if node.kind() == "call" {
         if let Some(func_node) = node.child_by_field_name("function") {
             if let Some(name) = extract_callee_name(content, func_node) {
@@ -747,7 +818,7 @@ fn extract_all_calls(result: &mut ParseResult, content: &[u8], path: &Path, node
     // Recurse into all children to find nested calls
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        extract_all_calls(result, content, path, child);
+        extract_all_calls(result, content, path, child, depth + 1);
     }
 }
 
@@ -791,7 +862,25 @@ fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
 ///
 /// Only creates references for root identifiers that match import symbol names,
 /// avoiding false matches on local variables.
-fn extract_attribute_accesses(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+///
+/// The `depth` parameter prevents stack overflow on deeply nested attribute chains.
+fn extract_attribute_accesses(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit ({}) reached in attribute extraction at {}:{}",
+            super::MAX_AST_DEPTH,
+            path.display(),
+            node.start_position().row + 1,
+        );
+        return;
+    }
+
     if node.kind() == "attribute" {
         if let Some(root_name) = extract_attribute_root_identifier(content, node) {
             // Only create a reference if the root matches a known import symbol
@@ -822,7 +911,7 @@ fn extract_attribute_accesses(result: &mut ParseResult, content: &[u8], path: &P
     // Recurse into all children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        extract_attribute_accesses(result, content, path, child);
+        extract_attribute_accesses(result, content, path, child, depth + 1);
     }
 }
 

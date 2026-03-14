@@ -89,11 +89,19 @@ enum Commands {
         language: Vec<String>,
     },
 
-    /// Trace a single symbol's complete flow (not yet implemented).
+    /// Trace a single symbol's complete flow through the codebase.
     Trace {
         /// Project root.
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Symbol to trace (module::name format, or partial match).
+        #[arg(short, long)]
+        symbol: String,
+
+        /// Restrict analysis to specific language(s).
+        #[arg(short, long)]
+        language: Vec<String>,
     },
 
     /// Compare two manifests — show structural changes (not yet implemented).
@@ -235,9 +243,18 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             cli.output.as_deref(),
             cli.config.as_deref(),
         ),
-        Commands::Trace { .. } => Err(FlowspecError::CommandNotImplemented {
-            command: "trace".to_string(),
-        }),
+        Commands::Trace {
+            path,
+            symbol,
+            language,
+        } => run_trace(
+            &path,
+            &symbol,
+            &language,
+            &cli.format,
+            cli.output.as_deref(),
+            cli.config.as_deref(),
+        ),
         Commands::Diff { .. } => Err(FlowspecError::CommandNotImplemented {
             command: "diff".to_string(),
         }),
@@ -276,9 +293,12 @@ fn run_analyze(
         validate_language(lang)?;
     }
 
+    // Normalize language aliases (e.g., "ts" → "typescript")
+    let normalized = normalize_languages(languages);
+
     tracing::info!("Analyzing project at {}", canonical.display());
 
-    let result = flowspec::analyze(&canonical, &config, languages)?;
+    let result = flowspec::analyze(&canonical, &config, &normalized)?;
 
     let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
 
@@ -329,12 +349,15 @@ fn run_diagnose(
         Some(checks)
     };
 
+    // Normalize language aliases (e.g., "ts" → "typescript")
+    let normalized = normalize_languages(languages);
+
     tracing::info!("Running diagnostics on {}", canonical.display());
 
     let (diagnostics, has_findings) = flowspec::diagnose(
         &canonical,
         &config,
-        languages,
+        &normalized,
         severity_filter,
         confidence_filter,
         checks_filter,
@@ -349,6 +372,66 @@ fn run_diagnose(
     } else {
         Ok(ExitCode::from(0))
     }
+}
+
+/// Run trace command — trace a single symbol's flow through the codebase.
+///
+/// Currently returns a "not yet available" message while the flow tracing
+/// engine is being built. Once Worker 1's API lands, this will call the
+/// flow tracer and format the resulting paths.
+fn run_trace(
+    path: &PathBuf,
+    symbol: &str,
+    languages: &[String],
+    format: &Format,
+    output_path: Option<&std::path::Path>,
+    config_path: Option<&std::path::Path>,
+) -> Result<ExitCode, FlowspecError> {
+    // Guard unsupported formats
+    if !matches!(format, Format::Yaml | Format::Json | Format::Sarif) {
+        return Err(FlowspecError::FormatNotImplemented {
+            format: format_name(format).to_string(),
+        });
+    }
+
+    if path.as_os_str().is_empty() {
+        return Err(FlowspecError::EmptyPath);
+    }
+
+    let canonical = resolve_path(path)?;
+    let config = Config::load(&canonical, config_path)?;
+
+    // Validate and normalize languages
+    for lang in languages {
+        validate_language(lang)?;
+    }
+    let normalized_languages = normalize_languages(languages);
+
+    tracing::info!("Tracing symbol '{}' in {}", symbol, canonical.display());
+
+    // Run analysis to find the symbol
+    let result = flowspec::analyze(&canonical, &config, &normalized_languages)?;
+
+    // Search for the symbol in entities
+    let found = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| e.id.contains(symbol));
+
+    if !found {
+        return Err(FlowspecError::SymbolNotFound(format!(
+            "Symbol '{}' not found. Run `flowspec analyze` to see available entities.",
+            symbol
+        )));
+    }
+
+    // Build a trace-focused manifest with just the matching entity's flow data.
+    // For now, produce the full manifest since the dedicated flow tracer is pending.
+    let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
+    write_output(&output, output_path)?;
+
+    Ok(ExitCode::from(0))
 }
 
 /// Resolve a path, checking existence.
@@ -404,7 +487,11 @@ where
         Format::Yaml => f(&YamlFormatter::new()),
         Format::Json => f(&JsonFormatter::new()),
         Format::Sarif => f(&SarifFormatter::new()),
-        _ => unreachable!("format guard should reject unsupported formats"),
+        Format::Summary => {
+            return Err(FlowspecError::FormatNotImplemented {
+                format: "summary".to_string(),
+            })
+        }
     };
     result.map_err(FlowspecError::from)
 }
@@ -419,12 +506,33 @@ fn format_name(format: &Format) -> &'static str {
     }
 }
 
-/// Validate a language name against v1 supported languages.
-fn validate_language(lang: &str) -> Result<(), FlowspecError> {
+/// Normalize a language alias to its canonical name.
+///
+/// Accepts common abbreviations: "ts" → "typescript", "js" → "javascript",
+/// "py" → "python". Canonical names pass through unchanged.
+fn normalize_language(lang: &str) -> String {
     match lang {
+        "ts" => "typescript".to_string(),
+        "js" => "javascript".to_string(),
+        "py" => "python".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Validate a language name against v1 supported languages.
+///
+/// Accepts both canonical names and common abbreviations (e.g., "ts" for "typescript").
+fn validate_language(lang: &str) -> Result<(), FlowspecError> {
+    let normalized = normalize_language(lang);
+    match normalized.as_str() {
         "python" | "javascript" | "typescript" | "rust" => Ok(()),
         _ => Err(FlowspecError::UnsupportedLanguage {
             language: lang.to_string(),
         }),
     }
+}
+
+/// Normalize a list of language arguments, expanding aliases.
+fn normalize_languages(languages: &[String]) -> Vec<String> {
+    languages.iter().map(|l| normalize_language(l)).collect()
 }

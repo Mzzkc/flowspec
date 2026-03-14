@@ -8,12 +8,17 @@
 //! # Architecture
 //!
 //! ```text
-//! Source files → Parser (tree-sitter) → IR → Graph → Analyzers → Manifest
+//! Source files → Parser (tree-sitter) → IR → Graph → Cross-file Resolution → Analyzers → Manifest
 //! ```
 //!
+//! Analysis is two-pass: first, all files are parsed and their IR is inserted
+//! into the graph via `populate_graph`. Then `resolve_cross_file_imports`
+//! links import symbols to definitions in other files using a module-to-file
+//! mapping built by `build_module_map`.
+//!
 //! The graph is the source of truth. Manifests are exports optimized
-//! for different consumers (YAML for agents, JSON for tools, summary
-//! for humans).
+//! for different consumers (YAML for agents, JSON for tools, SARIF for CI,
+//! summary for humans).
 
 pub mod analyzer;
 pub mod config;
@@ -33,6 +38,7 @@ mod pattern_integration_tests;
 
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
+pub use analyzer::flow::{trace_all_flows, trace_flows_from, FlowPath, FlowStep as FlowPathStep};
 pub use analyzer::patterns::{run_all_patterns, run_patterns, PatternFilter};
 pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
@@ -52,6 +58,7 @@ use graph::resolve_cross_file_imports;
 use parser::ir::SymbolKind;
 use parser::javascript::JsAdapter;
 use parser::python::PythonAdapter;
+use parser::rust::RustAdapter;
 use parser::LanguageAdapter;
 
 /// Supported output formats.
@@ -61,7 +68,7 @@ pub enum OutputFormat {
     Yaml,
     /// JSON output.
     Json,
-    /// SARIF output for CI integration (not yet implemented).
+    /// SARIF v2.1.0 output for CI integration (GitHub Code Scanning, Azure DevOps).
     Sarif,
     /// Human-readable summary (not yet implemented).
     Summary,
@@ -142,8 +149,11 @@ pub fn analyze(
         .unwrap_or_else(|| "unknown".to_string());
 
     // Stage 1: Parse source files and populate the analysis graph
-    let all_adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(PythonAdapter::new()), Box::new(JsAdapter::new())];
+    let all_adapters: Vec<Box<dyn LanguageAdapter>> = vec![
+        Box::new(PythonAdapter::new()),
+        Box::new(JsAdapter::new()),
+        Box::new(RustAdapter::new()),
+    ];
 
     // Filter adapters when --language is specified.
     // "typescript" maps to the JS adapter (language_name: "javascript").
@@ -232,6 +242,20 @@ pub fn analyze(
         } else {
             rel_path
         };
+        // Combine callers (EdgeKind::Calls) and importers (EdgeKind::References)
+        // to surface cross-file dependents in the called_by field.
+        let mut called_by = extract_called_by(&graph, sym_id);
+        for importer_id in graph.importers(sym_id) {
+            if importer_id != parser::ir::SymbolId::default() {
+                if let Some(s) = graph.get_symbol(importer_id) {
+                    let name = s.qualified_name.clone();
+                    if !called_by.contains(&name) {
+                        called_by.push(name);
+                    }
+                }
+            }
+        }
+
         entities.push(EntityEntry {
             id: symbol.qualified_name.clone(),
             kind: format_symbol_kind(symbol.kind),
@@ -239,7 +263,7 @@ pub fn analyze(
             sig: symbol.signature.clone().unwrap_or_default(),
             loc: format!("{}:{}", rel_path.display(), symbol.location.line),
             calls: extract_calls(&graph, sym_id),
-            called_by: extract_called_by(&graph, sym_id),
+            called_by,
             annotations: symbol.annotations.clone(),
         });
     }
@@ -275,6 +299,57 @@ pub fn analyze(
         })
         .collect();
     modules.sort_by(|a, b| b.entity_count.cmp(&a.entity_count));
+
+    // Stage 4b: Trace data flows through the call graph
+    let flow_paths = trace_all_flows(&graph);
+    let flows: Vec<FlowEntry> = flow_paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let entry_name = graph
+                .get_symbol(path.entry)
+                .map(|s| s.qualified_name.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let last_step = path.steps.last();
+            let exit_name = last_step
+                .and_then(|step| graph.get_symbol(step.symbol))
+                .map(|s| s.qualified_name.clone())
+                .unwrap_or_else(|| entry_name.clone());
+
+            let steps: Vec<manifest::types::FlowStep> = path
+                .steps
+                .iter()
+                .map(|step| {
+                    let entity = graph
+                        .get_symbol(step.symbol)
+                        .map(|s| s.qualified_name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    manifest::types::FlowStep {
+                        entity,
+                        action: "call".to_string(),
+                        in_type: "unknown".to_string(),
+                        out_type: "unknown".to_string(),
+                    }
+                })
+                .collect();
+
+            let description = if path.is_cyclic {
+                format!("Cyclic flow from {}", entry_name)
+            } else {
+                format!("Flow from {} to {}", entry_name, exit_name)
+            };
+
+            FlowEntry {
+                id: format!("F{:03}", i + 1),
+                description,
+                entry: entry_name,
+                exit: exit_name,
+                steps,
+                issues: Vec::new(),
+            }
+        })
+        .collect();
 
     // Stage 5: Assemble manifest
     let diagnostic_count = diagnostics.len() as u64;
@@ -325,7 +400,7 @@ pub fn analyze(
             languages: active_languages,
             file_count: parsed_file_count,
             entity_count: entities.len() as u64,
-            flow_count: 0,
+            flow_count: flows.len() as u64,
             diagnostic_count,
             incremental: false,
             files_changed: 0,
@@ -345,7 +420,7 @@ pub fn analyze(
         },
         diagnostics,
         entities,
-        flows: Vec::new(),
+        flows,
         boundaries: Vec::new(),
         dependency_graph: Vec::new(),
         type_flows: Vec::new(),

@@ -234,6 +234,24 @@ impl Graph {
             .unwrap_or_default()
     }
 
+    /// Returns all symbols that import the given symbol (cross-file references).
+    ///
+    /// Filters incoming edges for `EdgeKind::References` — which includes
+    /// `ReferenceKind::Import` edges created by cross-file resolution.
+    /// Use this together with `callers()` to get the full set of dependents.
+    pub fn importers(&self, id: SymbolId) -> Vec<SymbolId> {
+        self.incoming
+            .get(&id)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|e| e.kind == EdgeKind::References)
+                    .map(|e| e.target)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Returns the number of incoming edges (all types) for a symbol.
     pub fn incoming_edge_count(&self, id: SymbolId) -> usize {
         self.incoming.get(&id).map(|e| e.len()).unwrap_or(0)

@@ -1694,3 +1694,395 @@ fn test_js_only_analysis() {
         fns.len()
     );
 }
+
+// =========================================================================
+// Recursion Depth Protection Tests (D2)
+// =========================================================================
+
+#[test]
+fn test_python_256_depth_nested_functions_no_crash() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let mut source = String::new();
+    for i in 0..256 {
+        let indent = "    ".repeat(i);
+        source.push_str(&format!("{}def f{}():\n", indent, i));
+    }
+    let indent = "    ".repeat(256);
+    source.push_str(&format!("{}pass\n", indent));
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("deep_functions.py");
+    let result = adapter.parse_file(Path::new(&path), &source);
+
+    assert!(result.is_ok(), "Parser must not crash on 256-depth nesting");
+    let parse_result = result.unwrap();
+    assert!(
+        !parse_result.symbols.is_empty(),
+        "Must extract symbols for functions above the depth limit"
+    );
+}
+
+#[test]
+fn test_python_512_depth_nested_calls_no_crash() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let mut expr = "x".to_string();
+    for i in (0..512).rev() {
+        expr = format!("f{}({})", i, expr);
+    }
+    let source = format!("result = {}\n", expr);
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("deep_calls.py");
+    let result = adapter.parse_file(Path::new(&path), &source);
+
+    assert!(
+        result.is_ok(),
+        "Parser must not crash on 512-depth call nesting"
+    );
+}
+
+#[test]
+fn test_python_10k_depth_nesting_no_crash() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let mut source = String::new();
+    for i in 0..10_000 {
+        let indent = "    ".repeat(i);
+        source.push_str(&format!("{}def f{}():\n", indent, i));
+    }
+    let indent = "    ".repeat(10_000);
+    source.push_str(&format!("{}pass\n", indent));
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("adversarial.py");
+    let result = adapter.parse_file(Path::new(&path), &source);
+
+    assert!(result.is_ok(), "Parser MUST NOT crash on 10K-depth nesting");
+}
+
+#[test]
+fn test_python_mixed_nesting_partial_results() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let mut source = String::new();
+    for i in 0..300 {
+        let indent = "    ".repeat(i);
+        if i % 3 == 0 {
+            source.push_str(&format!("{}class C{}:\n", indent, i));
+        } else {
+            source.push_str(&format!("{}def f{}():\n", indent, i));
+        }
+    }
+    let indent = "    ".repeat(300);
+    source.push_str(&format!("{}pass\n", indent));
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("mixed_nesting.py");
+    let result = adapter.parse_file(Path::new(&path), &source).unwrap();
+
+    let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"C0"), "Class at depth 0 must be extracted");
+    assert!(
+        names.contains(&"f1"),
+        "Function at depth 1 must be extracted"
+    );
+    assert!(
+        names.contains(&"f2"),
+        "Function at depth 2 must be extracted"
+    );
+}
+
+#[test]
+fn test_python_depth_limit_preserves_shallow_symbols() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let mut source = String::from("def shallow_func():\n    pass\n\n");
+    for i in 0..500 {
+        let indent = "    ".repeat(i);
+        source.push_str(&format!("{}def f{}():\n", indent, i));
+    }
+    let indent = "    ".repeat(500);
+    source.push_str(&format!("{}pass\n", indent));
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("partial_results.py");
+    let result = adapter.parse_file(Path::new(&path), &source).unwrap();
+
+    let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"shallow_func"),
+        "Symbols at shallow depth MUST be extracted even when deep nesting exists"
+    );
+}
+
+#[test]
+fn test_python_deep_attribute_chain_no_crash() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let chain: Vec<String> = (0..500).map(|i| format!("a{}", i)).collect();
+    let source = format!("import {}\nresult = {}\n", chain[0], chain.join("."));
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("deep_attrs.py");
+    let result = adapter.parse_file(Path::new(&path), &source);
+
+    assert!(result.is_ok(), "Deep attribute chains must not crash");
+}
+
+#[test]
+fn test_python_all_three_traversals_depth_protected() {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+    use std::path::Path;
+
+    let mut source = String::new();
+    for i in 0..300 {
+        let indent = "    ".repeat(i);
+        source.push_str(&format!("{}def f{}():\n", indent, i));
+    }
+    let deep_indent = "    ".repeat(300);
+    let mut expr = "x".to_string();
+    for i in (0..300).rev() {
+        expr = format!("f{}({})", i, expr);
+    }
+    source.push_str(&format!("{}result = {}\n", deep_indent, expr));
+
+    let adapter = PythonAdapter::new();
+    let path = PathBuf::from("triple_stress.py");
+    let result = adapter.parse_file(Path::new(&path), &source);
+
+    assert!(
+        result.is_ok(),
+        "All three traversals must be depth-protected"
+    );
+}
+
+// =========================================================================
+// Cross-File Fixture Tests (D5)
+// =========================================================================
+
+#[test]
+fn test_fixture_simple_import_cross_file_resolution() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/simple_import");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // helper's called_by must include cross-file caller from a.py
+    let helper_entity = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("helper") && !e.id.contains("import"));
+    assert!(
+        helper_entity.is_some(),
+        "helper must appear in manifest entities"
+    );
+    if let Some(entity) = helper_entity {
+        assert!(
+            !entity.called_by.is_empty(),
+            "Simple import must create cross-file edge visible in called_by. \
+             called_by is empty for helper even though a.py imports and calls it."
+        );
+    }
+}
+
+#[test]
+fn test_fixture_aliased_import_resolves_original() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/aliased_import");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    let utility_exists = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| e.id.contains("utility"));
+    assert!(
+        utility_exists,
+        "utility function must be present in manifest"
+    );
+}
+
+#[test]
+fn test_fixture_missing_module_no_crash() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/missing_module");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    assert!(
+        result.manifest.metadata.entity_count > 0,
+        "Must extract symbols even with missing module"
+    );
+}
+
+#[test]
+fn test_fixture_circular_import_no_infinite_loop() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/circular_import");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // ping and pong are the two function entities (import symbols are Module kind, filtered)
+    assert!(
+        result.manifest.metadata.entity_count >= 2,
+        "Both files' symbols must be extracted despite circular import. Got {}",
+        result.manifest.metadata.entity_count
+    );
+}
+
+#[test]
+fn test_fixture_nested_package_import() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/nested_package");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    let tool_exists = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| e.id.contains("tool"));
+    assert!(tool_exists, "Nested package symbol must be extracted");
+}
+
+#[test]
+fn test_fixture_reexport_alias_chain() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/reexport");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    let core_exists = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| e.id.contains("core_function"));
+    let api_exists = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| e.id.contains("wrapper"));
+    assert!(
+        core_exists && api_exists,
+        "Both internal and API symbols must be present"
+    );
+}
+
+#[test]
+fn test_fixture_cross_file_full_pipeline() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/simple_import");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // main (a.py) + helper (b.py) = 2 function entities (import symbols are Module kind, filtered)
+    assert!(
+        result.manifest.entities.len() >= 2,
+        "Manifest must include entities from both a.py and b.py. Got {}",
+        result.manifest.entities.len()
+    );
+
+    let helper_entity = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("helper") && !e.id.contains("import"));
+    assert!(helper_entity.is_some(), "helper must appear in manifest");
+    if let Some(entity) = helper_entity {
+        assert!(
+            !entity.called_by.is_empty(),
+            "helper's called_by must include cross-file caller after M5 + called_by fix"
+        );
+    }
+}
+
+// =========================================================================
+// Flow Tracing Integration Tests (D5)
+// =========================================================================
+
+#[test]
+fn test_flow_trace_produces_output_through_pipeline() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // Check that main is detected as entry point
+    assert!(
+        result
+            .manifest
+            .summary
+            .entry_points
+            .iter()
+            .any(|ep| ep.contains("main")),
+        "main must be detected as entry point. Got: {:?}",
+        result.manifest.summary.entry_points
+    );
+
+    // Check flow_count is populated when flows exist
+    if !result.manifest.flows.is_empty() {
+        assert!(
+            result.manifest.metadata.flow_count > 0,
+            "flow_count must be > 0 when flows exist"
+        );
+    }
+}
+
+#[test]
+fn test_rust_adapter_registered_produces_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("sample.rs"),
+        "fn main() {}\nfn helper() { main(); }\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["rust".to_string()]).unwrap();
+
+    assert!(
+        !result.manifest.entities.is_empty(),
+        "RustAdapter must produce entities for .rs files. Got 0 entities."
+    );
+}

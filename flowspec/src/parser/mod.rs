@@ -12,6 +12,15 @@ pub mod rust;
 
 use std::path::Path;
 
+/// Maximum AST recursion depth for all language adapters.
+///
+/// When depth exceeds this limit during AST traversal, the adapter emits a
+/// `tracing::warn!` and returns partial results for the current subtree.
+/// Sibling nodes continue processing normally. This prevents stack overflow
+/// on adversarial input (e.g., 10,000-deep nested expressions) while
+/// preserving useful output for the rest of the file.
+pub const MAX_AST_DEPTH: usize = 256;
+
 use crate::error::FlowspecError;
 use ir::ParseResult;
 

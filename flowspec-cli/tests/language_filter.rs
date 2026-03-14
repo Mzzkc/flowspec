@@ -453,7 +453,7 @@ fn javascript_output_no_stale_ignores() {
 // === Category 3: SUPPORTED_LANGUAGES Warning (P2) ===
 
 #[test]
-fn language_rust_emits_warning_on_stderr() {
+fn language_rust_produces_results() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
 
@@ -466,20 +466,16 @@ fn language_rust_emits_warning_on_stderr() {
             "json",
             "--language",
             "rust",
-            "--verbose",
         ])
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let has_warning = stderr.to_lowercase().contains("warn")
-        && (stderr.contains("rust")
-            || stderr.contains("no analysis")
-            || stderr.contains("no entities"));
+    // RustAdapter is now registered — should succeed
+    let code = output.status.code().unwrap();
     assert!(
-        has_warning,
-        "--language rust --verbose should emit warning about no working adapter. stderr:\n{}",
-        stderr
+        code == 0 || code == 2,
+        "--language rust should succeed, got exit: {}",
+        code
     );
 }
 

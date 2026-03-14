@@ -209,7 +209,9 @@ fn sarif_format_is_accepted() {
 
 #[test]
 fn deferred_commands_give_not_implemented_error() {
-    for cmd_name in &["trace", "diff", "init", "watch"] {
+    // trace now requires --symbol, so it's tested separately in trace_command.rs.
+    // diff, init, watch are still stubs.
+    for cmd_name in &["diff", "init", "watch"] {
         let mut cmd = Command::cargo_bin("flowspec").unwrap();
         let assert = if *cmd_name == "diff" {
             // diff requires two path arguments

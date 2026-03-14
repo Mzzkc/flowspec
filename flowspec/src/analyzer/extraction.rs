@@ -6,10 +6,104 @@
 //! populated Graph. These replace the hardcoded placeholders from cycle 1's
 //! text scanner (`vis: "pub"`, `called_by: ["(detected)"]`).
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 
 use crate::graph::Graph;
 use crate::parser::ir::{Symbol, SymbolId, SymbolKind, Visibility};
+
+/// Direction of a module-level dependency edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DependencyDirection {
+    /// Only one module references the other.
+    Unidirectional,
+    /// Both modules reference each other.
+    Bidirectional,
+}
+
+/// A module-level dependency edge for the manifest's `dependency_graph` section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleDependency {
+    /// Source module file path.
+    pub from: String,
+    /// Target module file path.
+    pub to: String,
+    /// Number of cross-file references.
+    pub weight: usize,
+    /// Whether the dependency is unidirectional or bidirectional.
+    pub direction: DependencyDirection,
+    /// Related diagnostic IDs (e.g., circular dependency findings).
+    pub issues: Vec<String>,
+}
+
+/// Extracts module-level dependency edges from cross-file references in the graph.
+///
+/// Walks all symbols, checks outgoing edges for cross-file targets, and aggregates
+/// by file pair. Bidirectional edges (A→B and B→A both exist) are merged into a
+/// single entry with combined weight. The `from` field gets the lexicographically
+/// smaller path for deterministic ordering.
+pub fn extract_dependency_graph(graph: &Graph) -> Vec<ModuleDependency> {
+    // Count cross-file edges per (source_file, target_file) pair
+    let mut edge_counts: HashMap<(String, String), usize> = HashMap::new();
+
+    for (sym_id, symbol) in graph.all_symbols() {
+        let source_file = symbol.location.file.to_string_lossy().to_string();
+
+        for edge in graph.edges_from(sym_id) {
+            // Skip unresolved edges (SymbolId::default())
+            if edge.target == SymbolId::default() {
+                continue;
+            }
+
+            if let Some(target_sym) = graph.get_symbol(edge.target) {
+                let target_file = target_sym.location.file.to_string_lossy().to_string();
+
+                // Only count cross-file edges
+                if source_file != target_file {
+                    *edge_counts
+                        .entry((source_file.clone(), target_file))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Merge bidirectional edges: if both (A→B) and (B→A) exist, combine them
+    let mut merged: HashMap<(String, String), ModuleDependency> = HashMap::new();
+
+    for ((from, to), count) in edge_counts {
+        // Canonical key: lexicographically smaller path first
+        let (canonical_from, canonical_to) = if from <= to {
+            (from.clone(), to.clone())
+        } else {
+            (to.clone(), from.clone())
+        };
+
+        let key = (canonical_from.clone(), canonical_to.clone());
+
+        let entry = merged.entry(key).or_insert_with(|| ModuleDependency {
+            from: canonical_from,
+            to: canonical_to,
+            weight: 0,
+            direction: DependencyDirection::Unidirectional,
+            issues: vec![],
+        });
+
+        entry.weight += count;
+
+        // If the original (from, to) doesn't match canonical order,
+        // it means we have a reverse edge → bidirectional
+        if from > to {
+            entry.direction = DependencyDirection::Bidirectional;
+        }
+    }
+
+    let mut result: Vec<ModuleDependency> = merged.into_values().collect();
+    result.sort_by(|a, b| a.from.cmp(&b.from).then(a.to.cmp(&b.to)));
+    result
+}
 
 /// Extracts the qualified names of all symbols called by the given symbol.
 ///
@@ -113,10 +207,11 @@ pub fn infer_module_role(graph: &Graph, file_path: &Path) -> String {
         return "Test module".to_string();
     }
 
-    // Count symbol kinds (exclude Module symbols from counts)
+    // Count symbol kinds (exclude Module and Method symbols from counts).
+    // Methods belong to classes and should not dilute the class ratio.
     let non_module_symbols: Vec<&&Symbol> = symbols
         .iter()
-        .filter(|s| s.kind != SymbolKind::Module)
+        .filter(|s| s.kind != SymbolKind::Module && s.kind != SymbolKind::Method)
         .collect();
 
     if non_module_symbols.is_empty() {
@@ -1089,5 +1184,517 @@ mod tests {
             "app.spec.ts MUST be test module. Got: '{}'",
             role
         );
+    }
+
+    // =========================================================================
+    // QA-2: dependency_graph Extraction (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_dependency_graph_known_import_structure() {
+        let mut g = Graph::new();
+        let a_fn = g.add_symbol(make_symbol(
+            "func_a",
+            SymbolKind::Function,
+            Visibility::Public,
+            "mod_a.py",
+            1,
+        ));
+        let b_fn = g.add_symbol(make_symbol(
+            "func_b",
+            SymbolKind::Function,
+            Visibility::Public,
+            "mod_b.py",
+            1,
+        ));
+        add_ref(
+            &mut g,
+            a_fn,
+            b_fn,
+            crate::parser::ir::ReferenceKind::Import,
+            "mod_a.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert_eq!(deps.len(), 1, "Should have exactly one dependency edge");
+        assert_eq!(deps[0].from, "mod_a.py");
+        assert_eq!(deps[0].to, "mod_b.py");
+        assert_eq!(deps[0].weight, 1);
+        assert_eq!(deps[0].direction, DependencyDirection::Unidirectional);
+    }
+
+    #[test]
+    fn test_dependency_graph_empty_project() {
+        let g = Graph::new();
+        let deps = extract_dependency_graph(&g);
+        assert!(deps.is_empty(), "Empty graph must produce no dependencies");
+    }
+
+    #[test]
+    fn test_dependency_graph_single_file_no_edges() {
+        let mut g = Graph::new();
+        let a = g.add_symbol(make_symbol(
+            "func_a",
+            SymbolKind::Function,
+            Visibility::Public,
+            "main.py",
+            1,
+        ));
+        let b = g.add_symbol(make_symbol(
+            "func_b",
+            SymbolKind::Function,
+            Visibility::Public,
+            "main.py",
+            5,
+        ));
+        add_ref(
+            &mut g,
+            a,
+            b,
+            crate::parser::ir::ReferenceKind::Call,
+            "main.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert!(
+            deps.is_empty(),
+            "Intra-file edges must not produce dependency edges"
+        );
+    }
+
+    #[test]
+    fn test_dependency_graph_circular_bidirectional() {
+        let mut g = Graph::new();
+        let a = g.add_symbol(make_symbol(
+            "func_a",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        let b = g.add_symbol(make_symbol(
+            "func_b",
+            SymbolKind::Function,
+            Visibility::Public,
+            "b.py",
+            1,
+        ));
+        add_ref(
+            &mut g,
+            a,
+            b,
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+        add_ref(
+            &mut g,
+            b,
+            a,
+            crate::parser::ir::ReferenceKind::Call,
+            "b.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert_eq!(
+            deps.len(),
+            1,
+            "Bidirectional edges should be merged into one entry"
+        );
+        assert_eq!(deps[0].direction, DependencyDirection::Bidirectional);
+        assert_eq!(deps[0].weight, 2, "Weight should be sum of both directions");
+    }
+
+    #[test]
+    fn test_dependency_graph_edge_count_accuracy() {
+        let mut g = Graph::new();
+        let a1 = g.add_symbol(make_symbol(
+            "func_a1",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        let a2 = g.add_symbol(make_symbol(
+            "func_a2",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            5,
+        ));
+        let b1 = g.add_symbol(make_symbol(
+            "func_b1",
+            SymbolKind::Function,
+            Visibility::Public,
+            "b.py",
+            1,
+        ));
+        add_ref(
+            &mut g,
+            a1,
+            b1,
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+        add_ref(
+            &mut g,
+            a2,
+            b1,
+            crate::parser::ir::ReferenceKind::Import,
+            "a.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].weight, 2,
+            "Weight must reflect count of cross-file edges, not unique symbol pairs"
+        );
+    }
+
+    #[test]
+    fn test_dependency_graph_module_name_accuracy() {
+        let mut g = Graph::new();
+        let a = g.add_symbol(make_symbol(
+            "handler",
+            SymbolKind::Function,
+            Visibility::Public,
+            "src/api/handler.py",
+            1,
+        ));
+        let b = g.add_symbol(make_symbol(
+            "db_query",
+            SymbolKind::Function,
+            Visibility::Public,
+            "src/db/query.py",
+            1,
+        ));
+        add_ref(
+            &mut g,
+            a,
+            b,
+            crate::parser::ir::ReferenceKind::Call,
+            "src/api/handler.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].from, "src/api/handler.py");
+        assert_eq!(deps[0].to, "src/db/query.py");
+    }
+
+    #[test]
+    fn test_dependency_graph_excludes_unresolved_edges() {
+        let mut g = Graph::new();
+        let a = g.add_symbol(make_symbol(
+            "caller",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        // Add edge to SymbolId::default() (unresolved) via a reference
+        add_ref(
+            &mut g,
+            a,
+            SymbolId::default(),
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+        // Also add a valid cross-file edge
+        let b = g.add_symbol(make_symbol(
+            "callee",
+            SymbolKind::Function,
+            Visibility::Public,
+            "b.py",
+            1,
+        ));
+        add_ref(
+            &mut g,
+            a,
+            b,
+            crate::parser::ir::ReferenceKind::Call,
+            "a.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert_eq!(deps.len(), 1, "Unresolved edges must be excluded");
+        assert_eq!(deps[0].to, "b.py");
+    }
+
+    #[test]
+    fn test_dependency_graph_star_import_counts() {
+        let mut g = Graph::new();
+        let a = g.add_symbol(make_symbol(
+            "mod_a",
+            SymbolKind::Module,
+            Visibility::Public,
+            "a.py",
+            1,
+        ));
+        let b = g.add_symbol(make_symbol(
+            "mod_b",
+            SymbolKind::Module,
+            Visibility::Public,
+            "b.py",
+            1,
+        ));
+        add_ref(
+            &mut g,
+            a,
+            b,
+            crate::parser::ir::ReferenceKind::Import,
+            "a.py",
+        );
+
+        let deps = extract_dependency_graph(&g);
+        assert_eq!(deps.len(), 1, "Star import must produce a dependency edge");
+        assert_eq!(deps[0].weight, 1);
+    }
+
+    // =========================================================================
+    // QA-2: Module Role Misclassification Fix (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_module_role_classes_with_methods_not_service() {
+        let mut g = Graph::new();
+        let f = "models.py";
+        g.add_symbol(make_symbol(
+            "User",
+            SymbolKind::Class,
+            Visibility::Public,
+            f,
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "Product",
+            SymbolKind::Class,
+            Visibility::Public,
+            f,
+            10,
+        ));
+        g.add_symbol(make_symbol(
+            "save",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            3,
+        ));
+        g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            5,
+        ));
+        g.add_symbol(make_symbol(
+            "delete",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            7,
+        ));
+        g.add_symbol(make_symbol(
+            "get_name",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            12,
+        ));
+        g.add_symbol(make_symbol(
+            "set_price",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            14,
+        ));
+
+        let role = infer_module_role(&g, Path::new(f));
+        assert_eq!(
+            role, "Data model module",
+            "Module with 2 classes and 5 methods should be Data model, not Service"
+        );
+    }
+
+    #[test]
+    fn test_module_role_utility_still_correct_after_fix() {
+        let mut g = Graph::new();
+        let f = "utils.py";
+        g.add_symbol(make_symbol(
+            "parse_args",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "format_output",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            5,
+        ));
+        g.add_symbol(make_symbol(
+            "validate_input",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            9,
+        ));
+
+        let role = infer_module_role(&g, Path::new(f));
+        assert_eq!(
+            role, "Utility module",
+            "Module with only functions should remain Utility module"
+        );
+    }
+
+    #[test]
+    fn test_module_role_mixed_classes_methods_functions() {
+        let mut g = Graph::new();
+        let f = "mixed.py";
+        g.add_symbol(make_symbol(
+            "UserModel",
+            SymbolKind::Class,
+            Visibility::Public,
+            f,
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "ProductModel",
+            SymbolKind::Class,
+            Visibility::Public,
+            f,
+            20,
+        ));
+        for (i, name) in ["save", "delete_m", "validate_m", "update", "get_id"]
+            .iter()
+            .enumerate()
+        {
+            g.add_symbol(make_symbol(
+                name,
+                SymbolKind::Method,
+                Visibility::Public,
+                f,
+                (3 + i * 2) as u32,
+            ));
+        }
+        g.add_symbol(make_symbol(
+            "helper_a",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            30,
+        ));
+        g.add_symbol(make_symbol(
+            "helper_b",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            34,
+        ));
+        g.add_symbol(make_symbol(
+            "helper_c",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            38,
+        ));
+
+        let role = infer_module_role(&g, Path::new(f));
+        assert_eq!(
+            role, "Utility module",
+            "Mixed module with more functions than classes should be Utility"
+        );
+    }
+
+    #[test]
+    fn test_module_role_methods_only_no_classes() {
+        let mut g = Graph::new();
+        let f = "weird.py";
+        g.add_symbol(make_symbol(
+            "method_a",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "method_b",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            5,
+        ));
+
+        let role = infer_module_role(&g, Path::new(f));
+        assert_eq!(
+            role, "Empty module",
+            "Module with only methods (no classes) should be Empty after filtering"
+        );
+    }
+
+    // =========================================================================
+    // QA-2: Module Role Regression Guards (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_module_role_entry_point_unchanged() {
+        let mut g = Graph::new();
+        let f = "app.py";
+        g.add_symbol(make_entry_point(
+            "main",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "helper",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            5,
+        ));
+        g.add_symbol(make_symbol(
+            "process",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            8,
+        ));
+
+        let role = infer_module_role(&g, Path::new(f));
+        assert_eq!(role, "Entry point module");
+    }
+
+    #[test]
+    fn test_module_role_test_module_unchanged() {
+        let mut g = Graph::new();
+        let f = "test_models.py";
+        g.add_symbol(make_symbol(
+            "test_create_user",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            1,
+        ));
+        g.add_symbol(make_symbol(
+            "TestUser",
+            SymbolKind::Class,
+            Visibility::Public,
+            f,
+            5,
+        ));
+        g.add_symbol(make_symbol(
+            "setUp",
+            SymbolKind::Method,
+            Visibility::Public,
+            f,
+            7,
+        ));
+
+        let role = infer_module_role(&g, Path::new(f));
+        assert_eq!(role, "Test module");
     }
 }

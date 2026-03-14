@@ -100,10 +100,11 @@ impl LanguageAdapter for RustAdapter {
             &file_stem,
             root,
             None, // not inside impl block
+            0,
         );
 
         // Extract all function/method calls from the AST
-        extract_all_calls(&mut result, content_bytes, path, root);
+        extract_all_calls(&mut result, content_bytes, path, root, 0);
 
         Ok(result)
     }
@@ -218,6 +219,7 @@ fn extract_signature(content: &[u8], node: Node) -> Option<String> {
 }
 
 /// Visit all children of a node and extract IR.
+#[allow(clippy::too_many_arguments)]
 fn visit_children(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -226,7 +228,16 @@ fn visit_children(
     file_stem: &str,
     node: Node,
     impl_type: Option<&str>,
+    depth: usize,
 ) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit reached at {}:{}",
+            path.display(),
+            node.start_position().row + 1
+        );
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         visit_node(
@@ -237,11 +248,13 @@ fn visit_children(
             file_stem,
             child,
             impl_type,
+            depth + 1,
         );
     }
 }
 
 /// Visit a single AST node and extract IR.
+#[allow(clippy::too_many_arguments)]
 fn visit_node(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -250,6 +263,7 @@ fn visit_node(
     file_stem: &str,
     node: Node,
     impl_type: Option<&str>,
+    depth: usize,
 ) {
     match node.kind() {
         "function_item" => {
@@ -261,6 +275,7 @@ fn visit_node(
                 file_stem,
                 node,
                 impl_type,
+                depth,
             );
         }
         "struct_item" => {
@@ -297,7 +312,7 @@ fn visit_node(
             );
         }
         "impl_item" => {
-            extract_impl_block(result, scope_stack, content, path, file_stem, node);
+            extract_impl_block(result, scope_stack, content, path, file_stem, node, depth);
         }
         "const_item" | "static_item" => {
             extract_constant(result, scope_stack, content, path, file_stem, node);
@@ -306,7 +321,7 @@ fn visit_node(
             extract_use_declaration(result, content, path, node);
         }
         "mod_item" => {
-            extract_mod_item(result, scope_stack, content, path, file_stem, node);
+            extract_mod_item(result, scope_stack, content, path, file_stem, node, depth);
         }
         _ => {
             // Recurse into other nodes
@@ -318,12 +333,14 @@ fn visit_node(
                 file_stem,
                 node,
                 impl_type,
+                depth,
             );
         }
     }
 }
 
 /// Extract a function/method definition.
+#[allow(clippy::too_many_arguments)]
 fn extract_function(
     result: &mut ParseResult,
     scope_stack: &mut Vec<usize>,
@@ -332,6 +349,7 @@ fn extract_function(
     file_stem: &str,
     node: Node,
     impl_type: Option<&str>,
+    depth: usize,
 ) {
     let name = match extract_name(content, node) {
         Some(n) => n,
@@ -376,7 +394,16 @@ fn extract_function(
 
     // Visit body for nested functions (NOT as impl methods)
     if let Some(body) = node.child_by_field_name("body") {
-        visit_children(result, scope_stack, content, path, file_stem, body, None);
+        visit_children(
+            result,
+            scope_stack,
+            content,
+            path,
+            file_stem,
+            body,
+            None,
+            depth + 1,
+        );
     }
 
     scope_stack.pop();
@@ -422,6 +449,7 @@ fn extract_impl_block(
     path: &Path,
     file_stem: &str,
     node: Node,
+    depth: usize,
 ) {
     let type_name = extract_impl_type_name(content, node).unwrap_or_else(|| "Unknown".to_string());
 
@@ -447,6 +475,7 @@ fn extract_impl_block(
             file_stem,
             body,
             Some(&type_name),
+            depth + 1,
         );
     }
 
@@ -492,6 +521,7 @@ fn extract_mod_item(
     path: &Path,
     file_stem: &str,
     node: Node,
+    depth: usize,
 ) {
     let name = match extract_name(content, node) {
         Some(n) => n,
@@ -512,7 +542,16 @@ fn extract_mod_item(
 
     // Visit body if it has one (inline mod with braces)
     if let Some(body) = node.child_by_field_name("body") {
-        visit_children(result, scope_stack, content, path, file_stem, body, None);
+        visit_children(
+            result,
+            scope_stack,
+            content,
+            path,
+            file_stem,
+            body,
+            None,
+            depth + 1,
+        );
     }
 
     scope_stack.pop();
@@ -706,14 +745,30 @@ fn add_import_symbol(
 ///
 /// Walks the entire tree looking for `call_expression` nodes. For each one,
 /// extracts the callee name and creates a `ReferenceKind::Call` reference.
-fn extract_all_calls(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+/// Protected by depth limit to prevent stack overflow on deeply nested expressions.
+fn extract_all_calls(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        tracing::warn!(
+            "AST depth limit reached in call extraction at {}:{}",
+            path.display(),
+            node.start_position().row + 1
+        );
+        return;
+    }
+
     if node.kind() == "call_expression" {
         extract_call(result, content, path, node);
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        extract_all_calls(result, content, path, child);
+        extract_all_calls(result, content, path, child, depth + 1);
     }
 }
 
@@ -2101,6 +2156,126 @@ fn main() {
         assert_eq!(
             sym.qualified_name, "module::func",
             "test_utils make_symbol must trim .rs from qualified_name"
+        );
+    }
+
+    // =========================================================================
+    // QA-2: Recursion Depth Protection — Rust Adapter (Cycle 7)
+    // =========================================================================
+
+    #[test]
+    fn test_rust_deeply_nested_impl_blocks_no_crash() {
+        let adapter = RustAdapter::new();
+        let mut code = String::new();
+        for i in 0..300 {
+            code.push_str(&format!("struct S{i}; impl S{i} {{ fn m{i}() {{ "));
+        }
+        for _ in 0..300 {
+            code.push_str("} } ");
+        }
+        let path = Path::new("deep_impl.rs");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Must not crash on deeply nested impl blocks"
+        );
+        let parsed = result.unwrap();
+        assert!(
+            !parsed.symbols.is_empty(),
+            "Must extract symbols before depth limit"
+        );
+        let struct_count = parsed
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Struct)
+            .count();
+        assert!(
+            struct_count > 0,
+            "Structs at shallow depth must be extracted"
+        );
+    }
+
+    #[test]
+    fn test_rust_deeply_nested_mod_blocks_no_crash() {
+        let adapter = RustAdapter::new();
+        let mut code = String::new();
+        for i in 0..500 {
+            code.push_str(&format!("mod m{i} {{ "));
+        }
+        code.push_str("fn innermost() {}");
+        for _ in 0..500 {
+            code.push_str(" }");
+        }
+        let path = Path::new("deep_mod.rs");
+        let result = adapter.parse_file(path, &code);
+        assert!(result.is_ok(), "Must not crash on 500-deep mod nesting");
+    }
+
+    #[test]
+    fn test_rust_10k_expression_nesting_no_crash() {
+        let adapter = RustAdapter::new();
+        let inner = "1 + ".repeat(10_000);
+        let code = format!("fn f() {{ let x = {}1; }}", inner);
+        let path = Path::new("deep_expr.rs");
+        let result = adapter.parse_file(path, &code);
+        assert!(result.is_ok(), "Must not crash on 10K-deep expression tree");
+        let parsed = result.unwrap();
+        let has_fn = parsed.symbols.iter().any(|s| s.name == "f");
+        assert!(
+            has_fn,
+            "Top-level function must be extracted even when expressions are too deep"
+        );
+    }
+
+    #[test]
+    fn test_rust_deeply_nested_match_no_crash() {
+        let adapter = RustAdapter::new();
+        let mut code = String::from("fn f(x: i32) { ");
+        for _ in 0..400 {
+            code.push_str("match x { 0 => { ");
+        }
+        code.push_str("()");
+        for _ in 0..400 {
+            code.push_str(" }, _ => () }");
+        }
+        code.push_str(" }");
+        let path = Path::new("deep_match.rs");
+        let result = adapter.parse_file(path, &code);
+        assert!(result.is_ok(), "Must not crash on 400-deep match nesting");
+    }
+
+    #[test]
+    fn test_rust_partial_results_before_depth_limit() {
+        let adapter = RustAdapter::new();
+        let shallow_fn = "pub fn shallow_top() {}\n";
+        let inner = "1 + ".repeat(10_000);
+        let deep_fn = format!("fn deep_container() {{ let x = {}1; }}\n", inner);
+        let code = format!("{}{}", shallow_fn, deep_fn);
+
+        let path = Path::new("partial.rs");
+        let result = adapter.parse_file(path, &code).unwrap();
+
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"shallow_top"),
+            "Shallow function must be extracted"
+        );
+        assert!(
+            names.contains(&"deep_container"),
+            "Deep container function must be extracted"
+        );
+    }
+
+    #[test]
+    fn test_rust_deep_nesting_exit_code_not_sigabrt() {
+        let adapter = RustAdapter::new();
+        let inner = "1 + ".repeat(5_000);
+        let code = format!("fn f() {{ let x = {}1; }}", inner);
+        let path = Path::new("no_abort.rs");
+        let result = adapter.parse_file(path, &code);
+        assert!(
+            result.is_ok(),
+            "Deep nesting must produce Ok result, not crash"
         );
     }
 }

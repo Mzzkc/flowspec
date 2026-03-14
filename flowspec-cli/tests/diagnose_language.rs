@@ -306,10 +306,10 @@ fn diagnose_language_with_severity_filter() {
     );
 }
 
-// --- 6. Rust language with no adapter ---
+// --- 6. Rust language with adapter registered ---
 
 #[test]
-fn diagnose_language_rust_no_adapter() {
+fn diagnose_language_rust_adapter_registered() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("sample.rs"), "fn main() {}\n").unwrap();
 
@@ -325,20 +325,19 @@ fn diagnose_language_rust_no_adapter() {
         .output()
         .unwrap();
 
-    // Should produce empty diagnostics, not an error
+    // RustAdapter is now registered — should succeed without error
     assert_ne!(
         output.status.code(),
         Some(1),
-        "Rust (no adapter) should not error, should return empty diagnostics"
+        "Rust adapter should not error"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = parsed.as_array().unwrap();
+    // Exit 0 (no findings) or 2 (findings) are both acceptable
+    let code = output.status.code().unwrap();
     assert!(
-        arr.is_empty(),
-        "Rust with no adapter should produce empty diagnostics"
+        code == 0 || code == 2,
+        "Rust diagnose should exit 0 or 2, got {}",
+        code
     );
-    assert_eq!(output.status.code(), Some(0), "Empty diagnostics = exit 0");
 }
 
 // --- 7. diagnose --language with --format json ---
