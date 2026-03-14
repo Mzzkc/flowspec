@@ -1279,20 +1279,8 @@ mod tests {
             "b.py",
             1,
         ));
-        add_ref(
-            &mut g,
-            a,
-            b,
-            crate::parser::ir::ReferenceKind::Call,
-            "a.py",
-        );
-        add_ref(
-            &mut g,
-            b,
-            a,
-            crate::parser::ir::ReferenceKind::Call,
-            "b.py",
-        );
+        add_ref(&mut g, a, b, crate::parser::ir::ReferenceKind::Call, "a.py");
+        add_ref(&mut g, b, a, crate::parser::ir::ReferenceKind::Call, "b.py");
 
         let deps = extract_dependency_graph(&g);
         assert_eq!(
@@ -1408,13 +1396,7 @@ mod tests {
             "b.py",
             1,
         ));
-        add_ref(
-            &mut g,
-            a,
-            b,
-            crate::parser::ir::ReferenceKind::Call,
-            "a.py",
-        );
+        add_ref(&mut g, a, b, crate::parser::ir::ReferenceKind::Call, "a.py");
 
         let deps = extract_dependency_graph(&g);
         assert_eq!(deps.len(), 1, "Unresolved edges must be excluded");
