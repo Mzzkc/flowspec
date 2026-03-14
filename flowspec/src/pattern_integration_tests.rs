@@ -1125,3 +1125,271 @@ fn test_adversarial_mismatched_project_root() {
     assert!(!rel.is_empty(), "Must not be empty");
     // Fallback returns the original path — acceptable behavior
 }
+
+// =========================================================================
+// Category 14: phantom_dependency — Module.Attribute Access (Cycle 5 D2)
+// =========================================================================
+
+/// Parse inline Python content through the full pipeline and return the populated graph.
+fn graph_from_python_content(filename: &str, content: &str) -> Graph {
+    let clean_path = PathBuf::from(format!("fixtures/{}", filename));
+    let adapter = PythonAdapter::new();
+    let parse_result = adapter
+        .parse_file(&clean_path, content)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", filename, e));
+    let mut graph = Graph::new();
+    populate_graph(&mut graph, &parse_result);
+    graph
+}
+
+/// Core false positive fix: `import os; os.path.join()` must NOT be flagged.
+#[test]
+fn test_phantom_dependency_module_attribute_call_not_flagged() {
+    let content = "import os\n\ndef make_path():\n    return os.path.join(\"/tmp\", \"file\")\n";
+    let graph = graph_from_python_content("attr_call_os.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let os_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("os"))
+        .collect();
+
+    assert!(
+        os_findings.is_empty(),
+        "os must NOT be flagged as phantom dependency when os.path.join() is used. \
+         Got: {:?}",
+        os_findings.iter().map(|d| &d.entity).collect::<Vec<_>>()
+    );
+}
+
+/// Bare attribute access: `import sys; sys.argv[1:]`
+#[test]
+fn test_phantom_dependency_bare_attribute_not_flagged() {
+    let content = "import sys\n\ndef get_args():\n    return sys.argv[1:]\n";
+    let graph = graph_from_python_content("attr_sys.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let sys_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("sys"))
+        .collect();
+
+    assert!(
+        sys_findings.is_empty(),
+        "sys must NOT be flagged when sys.argv is accessed"
+    );
+}
+
+/// Single-level attribute call: `import json; json.dumps(data)`
+#[test]
+fn test_phantom_dependency_single_attribute_call_not_flagged() {
+    let content = "import json\n\ndef serialize(data):\n    return json.dumps(data)\n";
+    let graph = graph_from_python_content("attr_json.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let json_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("json"))
+        .collect();
+
+    assert!(
+        json_findings.is_empty(),
+        "json must NOT be flagged when json.dumps() is called"
+    );
+}
+
+/// from-import direct call must still work (regression guard).
+#[test]
+fn test_phantom_dependency_from_import_direct_call_regression() {
+    let content =
+        "from pathlib import Path\n\ndef resolve():\n    p = Path(\".\")\n    return p.resolve()\n";
+    let graph = graph_from_python_content("from_path.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let path_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("Path"))
+        .collect();
+
+    assert!(
+        path_findings.is_empty(),
+        "Path must NOT be flagged — direct call already works, this is a regression guard"
+    );
+}
+
+/// TRUE POSITIVE GUARD: `import os` with NO usage MUST still be flagged.
+#[test]
+fn test_phantom_dependency_truly_unused_import_still_flagged() {
+    let content = "import os\n\ndef process():\n    return \"done\"\n";
+    let graph = graph_from_python_content("unused_os.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let os_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("os"))
+        .collect();
+
+    assert!(
+        !os_findings.is_empty(),
+        "os MUST be flagged as phantom when it is imported but never referenced. \
+         If this test fails, the fix is too aggressive."
+    );
+}
+
+/// ADVERSARIAL: Name collision — `import os; os_count = 5`
+/// `os_count` is an identifier, NOT an attribute access on `os`.
+#[test]
+fn test_phantom_dependency_name_collision_not_false_negative() {
+    let content = "import os\n\ndef count():\n    os_count = 5\n    return os_count\n";
+    let graph = graph_from_python_content("name_collision.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let os_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("os"))
+        .collect();
+
+    assert!(
+        !os_findings.is_empty(),
+        "os MUST be flagged — 'os_count' is a different identifier, not an attribute access on 'os'."
+    );
+}
+
+/// Fixture test: unused_import.py — sys must NOT be flagged, os MUST be flagged.
+#[test]
+fn test_phantom_dependency_unused_import_fixture_accuracy() {
+    let graph = fixture_graph("unused_import.py");
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let entity_names: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
+
+    // TRUE POSITIVES: os and OrderedDict are never used
+    assert!(
+        entity_names.iter().any(|e| e.contains("os")),
+        "os MUST be flagged — it is imported but never referenced in unused_import.py"
+    );
+    assert!(
+        entity_names.iter().any(|e| e.contains("OrderedDict")),
+        "OrderedDict MUST be flagged — imported but never used"
+    );
+
+    // TRUE NEGATIVES: sys (sys.argv), Path (Path()) are used
+    assert!(
+        !entity_names.iter().any(|e| e.contains("sys")),
+        "sys must NOT be flagged — sys.argv is used on line 16"
+    );
+    assert!(
+        !entity_names.iter().any(|e| e.contains("Path")),
+        "Path must NOT be flagged — Path() is called on line 20"
+    );
+}
+
+/// Multiple attribute accesses on same import.
+#[test]
+fn test_phantom_dependency_multiple_attribute_accesses_same_import() {
+    let content =
+        "import os\n\ndef check():\n    os.path.join(\"/a\", \"b\")\n    os.path.exists(\"/c\")\n    os.getcwd()\n";
+    let graph = graph_from_python_content("multi_attr.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let os_findings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.entity.contains("os"))
+        .collect();
+
+    assert!(
+        os_findings.is_empty(),
+        "os must NOT be flagged when accessed via multiple attributes"
+    );
+}
+
+/// Deeply nested attribute chain: `import a; a.b.c.d.e.f()`
+#[test]
+fn test_phantom_dependency_deep_attribute_chain() {
+    let content = "import a\n\ndef deep():\n    return a.b.c.d.e.f()\n";
+    let graph = graph_from_python_content("deep_chain.py", content);
+    let diagnostics = phantom_dependency::detect(&graph, Path::new(""));
+
+    let a_findings: Vec<_> = diagnostics.iter().filter(|d| d.entity == "a").collect();
+
+    assert!(
+        a_findings.is_empty(),
+        "a must NOT be flagged — a.b.c.d.e.f() is a deeply nested attribute access on 'a'"
+    );
+}
+
+// =========================================================================
+// Category 15: Entity ID Uniqueness (Cycle 5 D4)
+// =========================================================================
+
+/// Mixed-language project: app.py::hello and app.js::hello must produce distinct entity IDs.
+#[test]
+fn test_entity_id_unique_across_languages() {
+    let py_adapter = PythonAdapter::new();
+    let js_adapter = crate::parser::javascript::JsAdapter::new();
+
+    let py_content = "def hello():\n    return 'hi'\n";
+    let js_content = "function hello() { return 'hi'; }\n";
+
+    let py_result = py_adapter
+        .parse_file(Path::new("app.py"), py_content)
+        .unwrap();
+    let js_result = js_adapter
+        .parse_file(Path::new("app.js"), js_content)
+        .unwrap();
+
+    let py_hello = py_result
+        .symbols
+        .iter()
+        .find(|s| s.name == "hello")
+        .unwrap();
+    let js_hello = js_result
+        .symbols
+        .iter()
+        .find(|s| s.name == "hello")
+        .unwrap();
+
+    assert_ne!(
+        py_hello.qualified_name, js_hello.qualified_name,
+        "Python and JS symbols with same name in same-stem files must have DIFFERENT qualified names. \
+         Python: {}, JS: {}",
+        py_hello.qualified_name, js_hello.qualified_name
+    );
+}
+
+/// Regression guard: single-language project IDs must still work.
+#[test]
+fn test_entity_id_single_language_regression() {
+    let graph = fixture_graph("basic_functions.py");
+    let symbols: Vec<_> = graph
+        .all_symbols()
+        .filter(|(_id, s)| s.kind != crate::parser::ir::SymbolKind::Module)
+        .collect();
+
+    let qualified_names: Vec<&str> = symbols
+        .iter()
+        .map(|(_id, s)| s.qualified_name.as_str())
+        .collect();
+
+    let unique: std::collections::HashSet<&&str> = qualified_names.iter().collect();
+    assert_eq!(
+        qualified_names.len(),
+        unique.len(),
+        "All qualified names must be unique within a single file. Got: {:?}",
+        qualified_names
+    );
+}
+
+/// Edge case: file without extension — no panic.
+#[test]
+fn test_entity_id_no_extension_no_panic() {
+    let py_adapter = PythonAdapter::new();
+    let content = "def hello():\n    pass\n";
+    let result = py_adapter.parse_file(Path::new("script"), content).unwrap();
+
+    let hello = result.symbols.iter().find(|s| s.name == "hello");
+    assert!(
+        hello.is_some(),
+        "Must extract function even from extensionless file"
+    );
+}

@@ -1176,4 +1176,156 @@ mod tests {
         assert!(init.qualified_name.contains("Animal"));
         assert!(init.qualified_name.contains("__init__"));
     }
+
+    // -- Helper for inline content tests ------------------------------------
+
+    fn parse_fixture_content(filename: &str, content: &str) -> ParseResult {
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from(filename);
+        adapter
+            .parse_file(&path, content)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", filename, e))
+    }
+
+    // -- Attribute access tracking (Cycle 5 D2) -----------------------------
+
+    /// Single-level attribute call: `import json; json.dumps(data)`
+    /// Adapter must produce a reference linking the attribute access to the `json` import.
+    #[test]
+    fn test_attribute_call_single_level_creates_reference() {
+        let content = "import json\n\ndef serialize(data):\n    return json.dumps(data)\n";
+        let result = parse_fixture_content("attr_call.py", content);
+
+        let import_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "json" && s.annotations.contains(&"import".to_string()));
+        assert!(import_sym.is_some(), "Must create import symbol for 'json'");
+
+        let json_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(info) if info.contains("json"))
+                    && matches!(r.kind, ReferenceKind::Read | ReferenceKind::Call)
+            })
+            .collect();
+
+        assert!(
+            !json_refs.is_empty(),
+            "Must create at least one reference for 'json.dumps()' attribute access. \
+             Got references: {:?}",
+            result
+                .references
+                .iter()
+                .map(|r| (&r.kind, &r.resolution))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Multi-level attribute chain: `import os; os.path.join("/tmp", "f")`
+    /// Root identifier `os` must be tracked as used.
+    #[test]
+    fn test_attribute_chain_multi_level_creates_reference() {
+        let content =
+            "import os\n\ndef make_path():\n    return os.path.join(\"/tmp\", \"file\")\n";
+        let result = parse_fixture_content("attr_chain.py", content);
+
+        let os_import = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "os" && s.annotations.contains(&"import".to_string()));
+        assert!(os_import.is_some(), "Must create import symbol for 'os'");
+
+        let os_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(info) if info.contains("os"))
+                    && matches!(r.kind, ReferenceKind::Read | ReferenceKind::Call)
+            })
+            .collect();
+
+        assert!(
+            !os_refs.is_empty(),
+            "Must create reference for 'os.path.join()' — root identifier 'os' must be tracked"
+        );
+    }
+
+    /// Bare attribute access (no call): `import sys; sys.argv`
+    /// This is NOT inside a call node — `extract_all_calls()` alone won't catch it.
+    #[test]
+    fn test_bare_attribute_access_creates_reference() {
+        let content = "import sys\n\ndef get_args():\n    return sys.argv[1:]\n";
+        let result = parse_fixture_content("bare_attr.py", content);
+
+        let sys_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(info) if info.contains("sys"))
+                    && matches!(r.kind, ReferenceKind::Read | ReferenceKind::Call)
+            })
+            .collect();
+
+        assert!(
+            !sys_refs.is_empty(),
+            "Bare attribute access 'sys.argv' must create a reference. \
+             This is the critical case — sys.argv is NOT a call, so extract_all_calls() alone misses it."
+        );
+    }
+
+    /// Aliased import: `import os as opsys; opsys.path.exists("/tmp")`
+    /// The alias name is what appears in code; it must be tracked.
+    #[test]
+    fn test_aliased_import_attribute_access() {
+        let content = "import os as opsys\n\ndef run():\n    return opsys.path.exists(\"/tmp\")\n";
+        let result = parse_fixture_content("alias_attr.py", content);
+
+        let alias_import = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "opsys" && s.annotations.contains(&"import".to_string()));
+        assert!(
+            alias_import.is_some(),
+            "Import symbol name must be the alias 'opsys'"
+        );
+
+        let refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(info) if info.contains("opsys"))
+            })
+            .collect();
+
+        assert!(
+            !refs.is_empty(),
+            "Attribute access on alias 'opsys.path.exists()' must create a reference"
+        );
+    }
+
+    // -- Qualified name includes extension (Cycle 5 D4) ---------------------
+
+    /// After fix: qualified name must use file_name() not file_stem().
+    /// `app.py` → qualified name starts with "app.py::" not "app::"
+    #[test]
+    fn test_qualified_name_includes_extension() {
+        let content = "def hello():\n    return \"hi\"\n";
+        let path = PathBuf::from("app.py");
+        let adapter = PythonAdapter::new();
+        let result = adapter.parse_file(&path, content).unwrap();
+
+        let hello = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "hello")
+            .expect("Must find function 'hello'");
+
+        assert!(
+            hello.qualified_name.starts_with("app.py::"),
+            "Qualified name must start with 'app.py::' (includes extension), got: {}",
+            hello.qualified_name
+        );
+    }
 }

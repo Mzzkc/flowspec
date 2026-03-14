@@ -1413,4 +1413,164 @@ function c() {}
             .collect();
         assert!(!imports.is_empty(), "Must create import reference");
     }
+
+    // -----------------------------------------------------------------------
+    // Cycle 5 — Export { name } clause (D3)
+    // -----------------------------------------------------------------------
+
+    /// Core fix: `function foo() {} export { foo }` — foo must be Public.
+    #[test]
+    fn test_export_clause_named_function_becomes_public() {
+        let content = "function foo() { return 1; }\n\nexport { foo };\n";
+        let result = parse_js("export_clause.js", content);
+
+        let foo = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("Must find function 'foo'");
+        assert_eq!(
+            foo.visibility,
+            Visibility::Public,
+            "export {{ foo }} must set foo's visibility to Public. Got: {:?}",
+            foo.visibility
+        );
+    }
+
+    /// Renamed export: `function foo() {} export { foo as bar }`
+    #[test]
+    fn test_export_clause_renamed_export_updates_visibility() {
+        let content = "function foo() { return 1; }\n\nexport { foo as bar };\n";
+        let result = parse_js("export_rename.js", content);
+
+        let foo = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "foo")
+            .expect("Must find function 'foo'");
+        assert_eq!(
+            foo.visibility,
+            Visibility::Public,
+            "export {{ foo as bar }} must set foo's visibility to Public"
+        );
+    }
+
+    /// Multiple named exports: `export { a, b, c }`
+    #[test]
+    fn test_export_clause_multiple_names_all_public() {
+        let content = "function a() {}\nfunction b() {}\nfunction c() {}\n\nexport { a, b, c };\n";
+        let result = parse_js("export_multi.js", content);
+
+        for name in &["a", "b", "c"] {
+            let sym = result
+                .symbols
+                .iter()
+                .find(|s| s.name == *name)
+                .unwrap_or_else(|| panic!("Must find function '{}'", name));
+            assert_eq!(
+                sym.visibility,
+                Visibility::Public,
+                "export {{ a, b, c }} must set {}'s visibility to Public",
+                name
+            );
+        }
+    }
+
+    /// Graceful handling: `export { nonexistent }` — no matching symbol.
+    #[test]
+    fn test_export_clause_nonexistent_name_no_panic() {
+        let content = "function realFn() {}\n\nexport { nonexistent };\n";
+        let result = parse_js("export_missing.js", content);
+
+        let real = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "realFn")
+            .expect("Must find function 'realFn'");
+        assert_eq!(
+            real.visibility,
+            Visibility::Private,
+            "realFn must remain Private — it's not in the export clause"
+        );
+    }
+
+    /// Arrow function via export clause: `const fn = () => {}; export { fn }`
+    #[test]
+    fn test_export_clause_arrow_function_becomes_public() {
+        let content = "const process = (data) => data.map(x => x * 2);\n\nexport { process };\n";
+        let result = parse_js("export_arrow_clause.js", content);
+
+        let p = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "process")
+            .expect("Must find arrow function 'process'");
+        assert_eq!(
+            p.visibility,
+            Visibility::Public,
+            "Arrow function in export clause must become Public"
+        );
+    }
+
+    /// Regression: inline exports must still work after adding export clause handling.
+    #[test]
+    fn test_export_inline_still_works_after_clause_support() {
+        let content = "export function inlined() { return 42; }\n";
+        let result = parse_js("export_inline_regression.js", content);
+
+        let f = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "inlined")
+            .expect("Must find function 'inlined'");
+        assert_eq!(
+            f.visibility,
+            Visibility::Public,
+            "Inline export must still produce Public — regression guard"
+        );
+    }
+
+    /// Re-export must NOT crash: `export { foo } from './other'`
+    #[test]
+    fn test_reexport_does_not_panic() {
+        let content = "function foo() {}\n\nexport { foo } from './other';\n";
+        let result = parse_js("reexport.js", content);
+        let _result = result; // Parse must succeed without panic
+    }
+
+    /// Export clause before declaration (legal but unusual JS).
+    #[test]
+    fn test_export_clause_before_declaration() {
+        let content = "export { foo };\n\nfunction foo() { return 1; }\n";
+        let result = parse_js("export_before_decl.js", content);
+
+        let foo = result.symbols.iter().find(|s| s.name == "foo");
+        assert!(
+            foo.is_some(),
+            "Function 'foo' must be extracted regardless of export clause order"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cycle 5 — Entity ID uniqueness (D4)
+    // -----------------------------------------------------------------------
+
+    /// JS adapter: qualified name must include extension.
+    #[test]
+    fn test_js_qualified_name_includes_extension() {
+        let content = "function hello() { return 'hi'; }\n";
+        let result = parse_js("app.js", content);
+
+        let hello = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "hello")
+            .expect("Must find function 'hello'");
+
+        assert!(
+            hello.qualified_name.starts_with("app.js::"),
+            "JS qualified name must start with 'app.js::' (includes extension), got: {}",
+            hello.qualified_name
+        );
+    }
 }
