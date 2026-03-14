@@ -25,11 +25,11 @@ pub mod parser;
 #[cfg(test)]
 pub mod test_utils;
 
+#[cfg(test)]
+mod pipeline_tests;
+
 // Re-export key public types
-pub use analyzer::diagnostic::{
-    Confidence as AnalyzerConfidence, Diagnostic, DiagnosticPattern, Evidence,
-    Severity as AnalyzerSeverity,
-};
+pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::patterns::{run_all_patterns, run_patterns, PatternFilter};
 pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
@@ -37,7 +37,17 @@ pub use graph::Graph;
 pub use manifest::types::*;
 pub use manifest::{OutputFormatter, YamlFormatter};
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use analyzer::conversion::to_manifest_entries;
+use analyzer::extraction::{
+    extract_called_by, extract_calls, extract_visibility, infer_module_role,
+};
+use graph::populate_graph;
+use parser::ir::SymbolKind;
+use parser::python::PythonAdapter;
+use parser::LanguageAdapter;
 
 /// Supported output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,52 +81,6 @@ const VALID_PATTERNS: &[&str] = &[
     "asymmetric_handling",
     "incomplete_migration",
 ];
-
-/// Severity levels for diagnostic filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Severity {
-    /// Informational — suboptimal but not broken.
-    Info,
-    /// Warning — structural defect that will cause problems.
-    Warning,
-    /// Critical — breaks correctness or causes data loss.
-    Critical,
-}
-
-/// Confidence levels for diagnostic filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Confidence {
-    /// Low confidence — may be a false positive.
-    Low,
-    /// Moderate confidence — likely a real issue.
-    Moderate,
-    /// High confidence — structural proof exists.
-    High,
-}
-
-impl Severity {
-    /// Parse a severity string.
-    pub fn from_str_checked(s: &str) -> Option<Self> {
-        match s {
-            "critical" => Some(Severity::Critical),
-            "warning" => Some(Severity::Warning),
-            "info" => Some(Severity::Info),
-            _ => None,
-        }
-    }
-}
-
-impl Confidence {
-    /// Parse a confidence string.
-    pub fn from_str_checked(s: &str) -> Option<Self> {
-        match s {
-            "high" => Some(Confidence::High),
-            "moderate" => Some(Confidence::Moderate),
-            "low" => Some(Confidence::Low),
-            _ => None,
-        }
-    }
-}
 
 /// Result of running `flowspec analyze` on a project.
 pub struct AnalysisResult {
@@ -172,15 +136,93 @@ pub fn analyze(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // For cycle 1: basic analysis — detect entities from Python files,
-    // run basic diagnostics (dead code, phantom dependency)
-    let (entities, diagnostics) = analyze_python_files(&files, project_path);
+    // Stage 1: Parse source files and populate the analysis graph
+    let adapter = PythonAdapter::new();
+    let mut graph = Graph::new();
 
+    let py_files: Vec<&PathBuf> = files.iter().filter(|f| adapter.can_handle(f)).collect();
+    let py_file_count = py_files.len() as u64;
+
+    for file in &py_files {
+        let content = match std::fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read {}: {}", file.display(), e);
+                continue;
+            }
+        };
+        match adapter.parse_file(file, &content) {
+            Ok(result) => populate_graph(&mut graph, &result),
+            Err(e) => {
+                tracing::warn!("Failed to parse {}: {}", file.display(), e);
+            }
+        }
+    }
+
+    // Stage 2: Run diagnostic patterns on the populated graph
+    let raw_diagnostics = run_all_patterns(&graph);
+    let diagnostics = to_manifest_entries(&raw_diagnostics);
+
+    // Stage 3: Build entity list from graph symbols
+    let mut entities = Vec::new();
+    for (sym_id, symbol) in graph.all_symbols() {
+        if symbol.kind == SymbolKind::Module {
+            continue; // Skip file-scope module symbols
+        }
+        let rel_path = symbol
+            .location
+            .file
+            .strip_prefix(project_path)
+            .unwrap_or(&symbol.location.file);
+        entities.push(EntityEntry {
+            id: symbol.qualified_name.clone(),
+            kind: format_symbol_kind(symbol.kind),
+            vis: extract_visibility(symbol),
+            sig: symbol.signature.clone().unwrap_or_default(),
+            loc: format!("{}:{}", rel_path.display(), symbol.location.line),
+            calls: extract_calls(&graph, sym_id),
+            called_by: extract_called_by(&graph, sym_id),
+            annotations: symbol.annotations.clone(),
+        });
+    }
+
+    // Stage 4: Build module summaries from graph file data
+    let mut file_set: HashSet<PathBuf> = HashSet::new();
+    for (_, sym) in graph.all_symbols() {
+        file_set.insert(sym.location.file.clone());
+    }
+    let mut modules: Vec<ModuleSummary> = file_set
+        .iter()
+        .map(|fp| {
+            let count = graph
+                .symbols_in_file(fp)
+                .iter()
+                .filter(|&&id| {
+                    graph
+                        .get_symbol(id)
+                        .map(|s| s.kind != SymbolKind::Module)
+                        .unwrap_or(false)
+                })
+                .count() as u64;
+            let role = infer_module_role(&graph, fp);
+            let name = fp
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            ModuleSummary {
+                name,
+                entity_count: count,
+                role,
+            }
+        })
+        .collect();
+    modules.sort_by(|a, b| b.entity_count.cmp(&a.entity_count));
+
+    // Stage 5: Assemble manifest
     let diagnostic_count = diagnostics.len() as u64;
     let has_critical = diagnostics.iter().any(|d| d.severity == "critical");
     let has_findings = !diagnostics.is_empty();
 
-    // Build diagnostic summary
     let critical_count = diagnostics
         .iter()
         .filter(|d| d.severity == "critical")
@@ -196,8 +238,6 @@ pub fn analyze(
         .map(|d| format!("{}: {}", d.pattern, d.message))
         .collect();
 
-    // Build summary
-    let modules: Vec<ModuleSummary> = group_entities_into_modules(&entities);
     let entry_points: Vec<String> = entities
         .iter()
         .filter(|e| e.id.ends_with("::main") || e.id.contains("__main__"))
@@ -220,7 +260,7 @@ pub fn analyze(
             analyzed_at: chrono::Utc::now().to_rfc3339(),
             flowspec_version: env!("CARGO_PKG_VERSION").to_string(),
             languages: active_languages,
-            file_count: files.len() as u64,
+            file_count: py_file_count,
             entity_count: entities.len() as u64,
             flow_count: 0,
             diagnostic_count,
@@ -386,357 +426,20 @@ fn walk_dir(path: &Path, skip_dirs: &[&str]) -> Result<Vec<std::path::PathBuf>, 
     Ok(result)
 }
 
-/// Basic Python file analysis for cycle 1.
-///
-/// Scans Python files for function/class definitions and imports,
-/// then detects dead code and phantom dependencies.
-fn analyze_python_files(
-    files: &[std::path::PathBuf],
-    project_root: &Path,
-) -> (Vec<EntityEntry>, Vec<DiagnosticEntry>) {
-    let mut entities = Vec::new();
-    let mut all_definitions: Vec<(String, String, String, u32)> = Vec::new(); // (id, kind, file_rel, line)
-    let mut all_calls: Vec<String> = Vec::new();
-    let mut all_imports: Vec<(String, String, u32)> = Vec::new(); // (import_name, file_rel, line)
-    let mut all_used_names: Vec<String> = Vec::new();
-
-    let py_files: Vec<&std::path::PathBuf> = files
-        .iter()
-        .filter(|f| f.extension().map(|e| e == "py").unwrap_or(false))
-        .collect();
-
-    for file in &py_files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let rel_path = file
-            .strip_prefix(project_root)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .to_string();
-
-        let module_name = file
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        for (line_num, line) in content.lines().enumerate() {
-            let trimmed = line.trim();
-            let line_number = (line_num + 1) as u32;
-
-            // Detect function definitions
-            if trimmed.starts_with("def ") {
-                if let Some(name) = extract_function_name(trimmed) {
-                    let id = format!("{}::{}", module_name, name);
-                    let sig = extract_signature(trimmed);
-                    let kind = if is_inside_class(&content, line_num) {
-                        "method"
-                    } else {
-                        "fn"
-                    };
-                    all_definitions.push((
-                        id.clone(),
-                        kind.to_string(),
-                        rel_path.clone(),
-                        line_number,
-                    ));
-                    entities.push(EntityEntry {
-                        id,
-                        kind: kind.to_string(),
-                        vis: "pub".to_string(),
-                        sig,
-                        loc: format!("{}:{}", rel_path, line_number),
-                        calls: Vec::new(),
-                        called_by: Vec::new(),
-                        annotations: Vec::new(),
-                    });
-                }
-            }
-
-            // Detect class definitions
-            if trimmed.starts_with("class ") {
-                if let Some(name) = extract_class_name(trimmed) {
-                    let id = format!("{}::{}", module_name, name);
-                    all_definitions.push((
-                        id.clone(),
-                        "class".to_string(),
-                        rel_path.clone(),
-                        line_number,
-                    ));
-                    entities.push(EntityEntry {
-                        id,
-                        kind: "class".to_string(),
-                        vis: "pub".to_string(),
-                        sig: String::new(),
-                        loc: format!("{}:{}", rel_path, line_number),
-                        calls: Vec::new(),
-                        called_by: Vec::new(),
-                        annotations: Vec::new(),
-                    });
-                }
-            }
-
-            // Detect imports
-            if trimmed.starts_with("import ") {
-                let import_name = trimmed
-                    .trim_start_matches("import ")
-                    .split(|c: char| c.is_whitespace() || c == ',')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !import_name.is_empty() {
-                    all_imports.push((import_name, rel_path.clone(), line_number));
-                }
-            } else if trimmed.starts_with("from ") && trimmed.contains("import") {
-                // from X import Y, Z
-                if let Some(imports_part) = trimmed.split("import").nth(1) {
-                    for name in imports_part.split(',') {
-                        let name = name.split_whitespace().next().unwrap_or("").trim();
-                        if !name.is_empty() && name != "*" {
-                            all_imports.push((name.to_string(), rel_path.clone(), line_number));
-                        }
-                    }
-                }
-            }
-
-            // Collect function calls and name references
-            // Skip def/class lines for call detection — those are definitions, not calls
-            let is_definition = trimmed.starts_with("def ") || trimmed.starts_with("class ");
-            for word in trimmed.split(|c: char| !c.is_alphanumeric() && c != '_') {
-                if !word.is_empty() && !is_python_keyword(word) {
-                    all_used_names.push(word.to_string());
-                    // Detect function calls (word followed by `(`)
-                    // but not on definition lines where `def name(` is not a call
-                    if !is_definition && trimmed.contains(&format!("{}(", word)) {
-                        all_calls.push(word.to_string());
-                    }
-                }
-            }
-        }
+/// Maps a [`SymbolKind`] to the abbreviated string used in entity entries.
+fn format_symbol_kind(kind: SymbolKind) -> String {
+    match kind {
+        SymbolKind::Function => "fn",
+        SymbolKind::Method => "method",
+        SymbolKind::Class => "class",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Module => "module",
+        SymbolKind::Variable => "var",
+        SymbolKind::Constant => "const",
+        SymbolKind::Macro => "macro",
+        SymbolKind::Enum => "enum",
     }
-
-    // Build call relationships
-    for entity in &mut entities {
-        let name = entity.id.split("::").last().unwrap_or("");
-        if all_calls.contains(&name.to_string()) {
-            // Mark as called
-        }
-    }
-
-    // Update called_by relationships
-    let call_set: std::collections::HashSet<String> = all_calls.into_iter().collect();
-    for entity in &mut entities {
-        let name = entity.id.split("::").last().unwrap_or("").to_string();
-        if call_set.contains(&name) {
-            // This entity is called by something
-            entity.called_by = vec!["(detected)".to_string()];
-        }
-    }
-
-    // Detect diagnostics
-    let mut diagnostics = Vec::new();
-    let mut diag_id = 1;
-
-    // data_dead_end: functions with zero callers
-    for (id, kind, file_rel, line) in &all_definitions {
-        if kind == "fn" || kind == "method" {
-            let name = id.split("::").last().unwrap_or("");
-            // Skip main, __main__, and entry points
-            if name == "main" || name.starts_with("__") || name.starts_with("test_") {
-                continue;
-            }
-            if !call_set.contains(name) {
-                diagnostics.push(DiagnosticEntry {
-                    id: format!("D{:03}", diag_id),
-                    pattern: "data_dead_end".to_string(),
-                    severity: "warning".to_string(),
-                    confidence: "high".to_string(),
-                    entity: id.clone(),
-                    message: format!("Function {} is never called", name),
-                    evidence: vec![EvidenceEntry {
-                        observation: format!(
-                            "Function `{}` at `{}:{}` has 0 callers across {} analyzed files",
-                            name, file_rel, line, py_files.len()
-                        ),
-                        location: Some(format!("{}:{}", file_rel, line)),
-                        context: None,
-                    }],
-                    suggestion: "Remove the function or add a caller. If intentionally unused, mark as entry point.".to_string(),
-                    loc: format!("{}:{}", file_rel, line),
-                });
-                diag_id += 1;
-            }
-        }
-    }
-
-    // phantom_dependency: imports where the imported name is never used
-    let used_set: std::collections::HashSet<&str> =
-        all_used_names.iter().map(|s| s.as_str()).collect();
-    for (import_name, file_rel, line) in &all_imports {
-        // Check if the imported name is actually used (beyond the import line itself)
-        let base_name = import_name.split('.').next_back().unwrap_or(import_name);
-        // Count occurrences — if only 1, it's just the import itself
-        let usage_count = all_used_names
-            .iter()
-            .filter(|n| n.as_str() == base_name)
-            .count();
-        if usage_count <= 1 && !used_set.contains(base_name) || usage_count == 0 {
-            diagnostics.push(DiagnosticEntry {
-                id: format!("D{:03}", diag_id),
-                pattern: "phantom_dependency".to_string(),
-                severity: "info".to_string(),
-                confidence: "high".to_string(),
-                entity: import_name.clone(),
-                message: format!("Import '{}' is never used", import_name),
-                evidence: vec![EvidenceEntry {
-                    observation: format!(
-                        "Import `{}` at `{}:{}` — imported symbol has 0 references in {} analyzed files",
-                        import_name, file_rel, line, py_files.len()
-                    ),
-                    location: Some(format!("{}:{}", file_rel, line)),
-                    context: None,
-                }],
-                suggestion: "Remove the unused import to reduce phantom dependencies.".to_string(),
-                loc: format!("{}:{}", file_rel, line),
-            });
-            diag_id += 1;
-        }
-    }
-
-    (entities, diagnostics)
-}
-
-/// Group entities into module summaries.
-fn group_entities_into_modules(entities: &[EntityEntry]) -> Vec<ModuleSummary> {
-    let mut modules: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for entity in entities {
-        let module = entity
-            .id
-            .split("::")
-            .next()
-            .unwrap_or("unknown")
-            .to_string();
-        *modules.entry(module).or_insert(0) += 1;
-    }
-    let mut result: Vec<ModuleSummary> = modules
-        .into_iter()
-        .map(|(name, count)| ModuleSummary {
-            name: name.clone(),
-            entity_count: count,
-            role: format!("Module with {} entities", count),
-        })
-        .collect();
-    result.sort_by(|a, b| b.entity_count.cmp(&a.entity_count));
-    result
-}
-
-/// Extract function name from a `def name(...)` line.
-fn extract_function_name(line: &str) -> Option<String> {
-    let after_def = line.strip_prefix("def ")?;
-    let name = after_def.split('(').next()?.trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
-}
-
-/// Extract class name from a `class Name(...)` or `class Name:` line.
-fn extract_class_name(line: &str) -> Option<String> {
-    let after_class = line.strip_prefix("class ")?;
-    let name = after_class.split(['(', ':']).next()?.trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
-}
-
-/// Extract a compact signature from a def line.
-fn extract_signature(line: &str) -> String {
-    if let Some(start) = line.find('(') {
-        if let Some(end) = line.rfind(')') {
-            let params = &line[start..=end];
-            // Check for return type
-            let rest = &line[end + 1..];
-            if let Some(arrow_pos) = rest.find("->") {
-                let ret_type = rest[arrow_pos + 2..].trim().trim_end_matches(':').trim();
-                return format!("{} -> {}", params, ret_type);
-            }
-            return params.to_string();
-        }
-    }
-    String::new()
-}
-
-/// Simple heuristic to detect if a line is inside a class body.
-fn is_inside_class(content: &str, target_line: usize) -> bool {
-    // Look backwards for a class definition with less indentation
-    let lines: Vec<&str> = content.lines().collect();
-    if target_line >= lines.len() {
-        return false;
-    }
-    let target_indent = lines[target_line].len() - lines[target_line].trim_start().len();
-    if target_indent == 0 {
-        return false;
-    }
-
-    for i in (0..target_line).rev() {
-        let line = lines[i];
-        let indent = line.len() - line.trim_start().len();
-        if indent < target_indent && line.trim().starts_with("class ") {
-            return true;
-        }
-        if indent == 0 && !line.trim().is_empty() && !line.trim().starts_with('#') {
-            break;
-        }
-    }
-    false
-}
-
-/// Check if a word is a Python keyword (to avoid counting as a reference).
-fn is_python_keyword(word: &str) -> bool {
-    matches!(
-        word,
-        "def"
-            | "class"
-            | "import"
-            | "from"
-            | "if"
-            | "else"
-            | "elif"
-            | "for"
-            | "while"
-            | "return"
-            | "yield"
-            | "with"
-            | "as"
-            | "try"
-            | "except"
-            | "finally"
-            | "raise"
-            | "pass"
-            | "break"
-            | "continue"
-            | "and"
-            | "or"
-            | "not"
-            | "in"
-            | "is"
-            | "lambda"
-            | "global"
-            | "nonlocal"
-            | "assert"
-            | "del"
-            | "True"
-            | "False"
-            | "None"
-            | "async"
-            | "await"
-            | "print"
-            | "self"
-    )
+    .to_string()
 }

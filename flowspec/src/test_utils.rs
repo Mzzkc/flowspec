@@ -608,3 +608,210 @@ pub fn build_all_fixtures_graph() -> Graph {
 
     g
 }
+
+// ---------------------------------------------------------------------------
+// Circular dependency fixtures
+// ---------------------------------------------------------------------------
+
+/// 3-module cycle: mod_a.py -> mod_b.py -> mod_c.py -> mod_a.py.
+/// Each module has one function that calls the next module's function.
+pub fn build_circular_dep_graph() -> Graph {
+    let mut g = Graph::new();
+
+    let a = g.add_symbol(make_symbol(
+        "func_a",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod_a.py",
+        1,
+    ));
+    let b = g.add_symbol(make_symbol(
+        "func_b",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod_b.py",
+        1,
+    ));
+    let c = g.add_symbol(make_symbol(
+        "func_c",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod_c.py",
+        1,
+    ));
+
+    // A -> B -> C -> A (cross-module calls)
+    add_ref(&mut g, a, b, ReferenceKind::Call, "mod_a.py");
+    add_ref(&mut g, b, c, ReferenceKind::Call, "mod_b.py");
+    add_ref(&mut g, c, a, ReferenceKind::Call, "mod_c.py");
+
+    g
+}
+
+/// Linear dependency chain: mod_a.py -> mod_b.py -> mod_c.py (NO back-edge).
+pub fn build_linear_dep_graph() -> Graph {
+    let mut g = Graph::new();
+
+    let a = g.add_symbol(make_symbol(
+        "func_a",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod_a.py",
+        1,
+    ));
+    let b = g.add_symbol(make_symbol(
+        "func_b",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod_b.py",
+        1,
+    ));
+    let c = g.add_symbol(make_symbol(
+        "func_c",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod_c.py",
+        1,
+    ));
+
+    add_ref(&mut g, a, b, ReferenceKind::Call, "mod_a.py");
+    add_ref(&mut g, b, c, ReferenceKind::Call, "mod_b.py");
+
+    g
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned implementation fixtures
+// ---------------------------------------------------------------------------
+
+/// Class with orphaned method: process_user has zero callers,
+/// validate is called by process_user, __init__ is a dunder.
+pub fn build_orphaned_method_graph() -> Graph {
+    let mut g = Graph::new();
+    let f = "service.py";
+
+    let _class = g.add_symbol(make_symbol(
+        "UserService",
+        SymbolKind::Class,
+        Visibility::Public,
+        f,
+        1,
+    ));
+    let m1 = g.add_symbol(make_symbol(
+        "process_user",
+        SymbolKind::Method,
+        Visibility::Public,
+        f,
+        3,
+    ));
+    let m2 = g.add_symbol(make_symbol(
+        "validate",
+        SymbolKind::Method,
+        Visibility::Public,
+        f,
+        10,
+    ));
+    let _m3 = g.add_symbol(make_symbol(
+        "__init__",
+        SymbolKind::Method,
+        Visibility::Public,
+        f,
+        20,
+    ));
+
+    // process_user calls validate (internal class call)
+    add_ref(&mut g, m1, m2, ReferenceKind::Call, f);
+
+    g
+}
+
+// ---------------------------------------------------------------------------
+// Missing re-export fixtures
+// ---------------------------------------------------------------------------
+
+/// Package with missing re-export: helper_a is re-exported, helper_b is not,
+/// _private_fn is private (should not trigger).
+pub fn build_missing_reexport_graph() -> Graph {
+    let mut g = Graph::new();
+
+    // Parent module (__init__.py) with one import
+    let _init_mod = g.add_symbol(make_symbol(
+        "pkg",
+        SymbolKind::Module,
+        Visibility::Public,
+        "pkg/__init__.py",
+        1,
+    ));
+    let _init_import = g.add_symbol(make_import("helper_a", "pkg/__init__.py", 2));
+
+    // Submodule with public and private functions
+    let _sub_mod = g.add_symbol(make_symbol(
+        "sub",
+        SymbolKind::Module,
+        Visibility::Public,
+        "pkg/sub.py",
+        1,
+    ));
+    let _sub_fn1 = g.add_symbol(make_symbol(
+        "helper_a",
+        SymbolKind::Function,
+        Visibility::Public,
+        "pkg/sub.py",
+        3,
+    ));
+    let _sub_fn2 = g.add_symbol(make_symbol(
+        "helper_b",
+        SymbolKind::Function,
+        Visibility::Public,
+        "pkg/sub.py",
+        7,
+    ));
+    let _sub_fn3 = g.add_symbol(make_symbol(
+        "_private_fn",
+        SymbolKind::Function,
+        Visibility::Private,
+        "pkg/sub.py",
+        11,
+    ));
+
+    g
+}
+
+/// Package with all public symbols properly re-exported.
+pub fn build_proper_reexport_graph() -> Graph {
+    let mut g = Graph::new();
+
+    let _init_mod = g.add_symbol(make_symbol(
+        "pkg",
+        SymbolKind::Module,
+        Visibility::Public,
+        "pkg/__init__.py",
+        1,
+    ));
+    let _i1 = g.add_symbol(make_import("helper_fn", "pkg/__init__.py", 2));
+    let _i2 = g.add_symbol(make_import("HelperClass", "pkg/__init__.py", 3));
+
+    let _helpers_mod = g.add_symbol(make_symbol(
+        "helpers",
+        SymbolKind::Module,
+        Visibility::Public,
+        "pkg/helpers.py",
+        1,
+    ));
+    let _h1 = g.add_symbol(make_symbol(
+        "helper_fn",
+        SymbolKind::Function,
+        Visibility::Public,
+        "pkg/helpers.py",
+        3,
+    ));
+    let _h2 = g.add_symbol(make_symbol(
+        "HelperClass",
+        SymbolKind::Class,
+        Visibility::Public,
+        "pkg/helpers.py",
+        7,
+    ));
+
+    g
+}

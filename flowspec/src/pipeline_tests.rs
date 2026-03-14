@@ -1,0 +1,1366 @@
+//! End-to-end pipeline integration tests.
+//!
+//! These tests verify that `analyze()` uses the real pipeline
+//! (tree-sitter -> Graph -> patterns -> extraction) and produces
+//! correct manifest data. They are the contract that proves the
+//! text scanner has been replaced.
+
+use std::path::PathBuf;
+
+use crate::config::Config;
+use crate::{analyze, diagnose, Severity};
+
+// =========================================================================
+// 1. End-to-End Pipeline Tests (P0)
+// =========================================================================
+
+#[test]
+fn test_pipeline_real_visibility_private_underscore() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let private_entity = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("_private_util"))
+        .expect("Must find _private_util entity in manifest");
+
+    assert_eq!(
+        private_entity.vis, "priv",
+        "Underscore-prefixed _private_util MUST have vis 'priv', not '{}'. \
+        If vis is 'pub', the text scanner is still active.",
+        private_entity.vis
+    );
+}
+
+#[test]
+fn test_pipeline_real_visibility_public_no_underscore() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let public_entity = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("unused_helper"))
+        .expect("Must find unused_helper entity in manifest");
+
+    assert_eq!(
+        public_entity.vis, "pub",
+        "No-underscore unused_helper must have vis 'pub', got '{}'",
+        public_entity.vis
+    );
+}
+
+#[test]
+fn test_pipeline_real_called_by_not_detected_placeholder() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for entity in &result.manifest.entities {
+        for caller in &entity.called_by {
+            assert_ne!(
+                caller, "(detected)",
+                "Entity '{}' has placeholder called_by '(detected)'. \
+                Text scanner is still active.",
+                entity.id
+            );
+        }
+    }
+}
+
+#[test]
+fn test_pipeline_real_call_edges_main_handler_calls_active() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let main_handler = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("main_handler"))
+        .expect("Must find main_handler entity");
+
+    for call in &main_handler.calls {
+        assert_ne!(
+            call, "(detected)",
+            "calls must contain real data, not placeholder"
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_module_roles_not_vacuous() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for module in &result.manifest.summary.modules {
+        assert!(
+            !module.role.contains("Module with"),
+            "Module '{}' has vacuous role '{}'. Must use infer_module_role().",
+            module.name,
+            module.role
+        );
+        assert!(
+            !module.role.is_empty(),
+            "Module '{}' has empty role",
+            module.name
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_no_module_kind_entities() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for entity in &result.manifest.entities {
+        assert_ne!(
+            entity.kind, "module",
+            "Entity '{}' has kind 'module'. File-scope Module symbols must be filtered out.",
+            entity.id
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_entity_locations_are_relative() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let abs_prefix = tmp.path().to_string_lossy().to_string();
+
+    for entity in &result.manifest.entities {
+        assert!(
+            !entity.loc.starts_with(&abs_prefix),
+            "Entity '{}' loc '{}' contains absolute path prefix. Must be relative.",
+            entity.id,
+            entity.loc,
+        );
+        assert!(
+            !entity.loc.starts_with('/'),
+            "Entity '{}' loc '{}' starts with '/'. Must be relative path.",
+            entity.id,
+            entity.loc
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_entity_loc_includes_line_number() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for entity in &result.manifest.entities {
+        assert!(
+            entity.loc.contains(':'),
+            "Entity '{}' loc '{}' must be in 'file:line' format",
+            entity.id,
+            entity.loc
+        );
+        let parts: Vec<&str> = entity.loc.splitn(2, ':').collect();
+        assert_eq!(parts.len(), 2, "loc must have exactly file:line format");
+        let line: u32 = parts[1].parse().unwrap_or_else(|_| {
+            panic!(
+                "Entity '{}' loc '{}' line part '{}' is not a valid number",
+                entity.id, entity.loc, parts[1]
+            )
+        });
+        assert!(
+            line > 0,
+            "Line number must be 1-based, got 0 for '{}'",
+            entity.id
+        );
+    }
+}
+
+// =========================================================================
+// 2. Pattern Firing Through Real Pipeline (P0)
+// =========================================================================
+
+#[test]
+fn test_pipeline_data_dead_end_fires_on_dead_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let dead_end_diagnostics: Vec<_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "data_dead_end")
+        .collect();
+
+    assert!(
+        !dead_end_diagnostics.is_empty(),
+        "data_dead_end must fire on dead_code.py. Total diagnostics: {}",
+        result.manifest.diagnostics.len()
+    );
+
+    let flagged_entities: Vec<&str> = dead_end_diagnostics
+        .iter()
+        .map(|d| d.entity.as_str())
+        .collect();
+    let has_dead_code = flagged_entities
+        .iter()
+        .any(|e| e.contains("unused_helper") || e.contains("_private_util"));
+    assert!(
+        has_dead_code,
+        "data_dead_end must flag unused_helper or _private_util. Flagged: {:?}",
+        flagged_entities
+    );
+}
+
+#[test]
+fn test_pipeline_phantom_dependency_pattern_runs_on_unused_import() {
+    // Known limitation: PythonAdapter creates Reference objects for imports but
+    // does NOT create Symbol objects with "import" annotation. The
+    // phantom_dependency pattern looks for symbols with "import" annotation
+    // (matching mock graph behavior). Until the adapter emits import symbols,
+    // phantom_dependency won't fire on real parser output.
+    //
+    // This test verifies the pipeline IS wired and produces real data from
+    // unused_import.py — even if phantom_dependency specifically doesn't fire.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("unused_import.py"),
+        include_str!("../../tests/fixtures/python/unused_import.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // Pipeline must produce entities from real parsing
+    assert!(
+        !result.manifest.entities.is_empty(),
+        "unused_import.py must produce entities from real pipeline"
+    );
+
+    // Should find get_args, resolve_path, process as entities
+    let entity_names: Vec<&str> = result
+        .manifest
+        .entities
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    assert!(
+        entity_names.iter().any(|n| n.contains("get_args")),
+        "Must find get_args from unused_import.py. Entities: {:?}",
+        entity_names
+    );
+
+    // Diagnostics should come from real pattern engine (not text scanner)
+    for d in &result.manifest.diagnostics {
+        assert!(
+            !d.evidence.is_empty(),
+            "All diagnostics must have structured evidence from real patterns"
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_isolated_cluster_fires_on_multi_file_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("isolated_module.py"),
+        include_str!("../../tests/fixtures/python/isolated_module.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("clean_code.py"),
+        include_str!("../../tests/fixtures/python/clean_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let cluster_diagnostics: Vec<_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "isolated_cluster")
+        .collect();
+
+    assert!(
+        !cluster_diagnostics.is_empty(),
+        "isolated_cluster must fire when isolated_module.py is analyzed with other files. \
+        Got 0 isolated_cluster diagnostics. Total: {}. All patterns: {:?}",
+        result.manifest.diagnostics.len(),
+        result
+            .manifest
+            .diagnostics
+            .iter()
+            .map(|d| &d.pattern)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_pipeline_clean_code_minimal_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("clean_code.py"),
+        include_str!("../../tests/fixtures/python/clean_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let path_phantom = result
+        .manifest
+        .diagnostics
+        .iter()
+        .any(|d| d.pattern == "phantom_dependency" && d.entity.contains("Path"));
+    assert!(
+        !path_phantom,
+        "phantom_dependency must NOT fire for Path import in clean_code.py"
+    );
+}
+
+#[test]
+fn test_pipeline_diagnostic_evidence_is_structured() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for diag in &result.manifest.diagnostics {
+        assert!(
+            !diag.evidence.is_empty(),
+            "Diagnostic '{}' ({}) has empty evidence.",
+            diag.id,
+            diag.pattern
+        );
+        for ev in &diag.evidence {
+            assert!(
+                !ev.observation.is_empty(),
+                "Evidence in diagnostic '{}' has empty observation",
+                diag.id
+            );
+        }
+    }
+}
+
+// =========================================================================
+// 3. Text Scanner Deletion Verification (P0)
+// =========================================================================
+
+#[test]
+fn test_text_scanner_functions_deleted_from_source() {
+    let lib_source = include_str!("lib.rs");
+
+    let scanner_hallmarks = [
+        "analyze_python_files",
+        "group_entities_into_modules",
+        "extract_function_name",
+        "extract_class_name",
+        "extract_signature",
+        "is_inside_class",
+        "is_python_keyword",
+    ];
+
+    for hallmark in &scanner_hallmarks {
+        assert!(
+            !lib_source.contains(hallmark),
+            "lib.rs still contains text scanner function '{}'.",
+            hallmark
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_imports_present_in_lib() {
+    let lib_source = include_str!("lib.rs");
+
+    assert!(
+        lib_source.contains("PythonAdapter") || lib_source.contains("python::"),
+        "lib.rs must use PythonAdapter for real parsing"
+    );
+    assert!(
+        lib_source.contains("populate_graph"),
+        "lib.rs must use populate_graph to build the analysis graph"
+    );
+    assert!(
+        lib_source.contains("run_all_patterns") || lib_source.contains("run_patterns"),
+        "lib.rs must use run_all_patterns or run_patterns for diagnostics"
+    );
+}
+
+// =========================================================================
+// 4. Empty and Edge Case Projects (P1)
+// =========================================================================
+
+#[test]
+fn test_pipeline_empty_project_no_python_files() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.entities.is_empty(),
+        "Empty project must have 0 entities, got {}",
+        result.manifest.entities.len()
+    );
+    assert!(
+        result.manifest.diagnostics.is_empty(),
+        "Empty project must have 0 diagnostics, got {}",
+        result.manifest.diagnostics.len()
+    );
+    assert_eq!(result.manifest.metadata.entity_count, 0);
+    assert_eq!(result.manifest.metadata.diagnostic_count, 0);
+    assert!(!result.has_critical);
+    assert!(!result.has_findings);
+}
+
+#[test]
+fn test_pipeline_empty_python_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("empty.py"), "").unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.entities.is_empty(),
+        "Empty .py file should produce 0 entities (Module kind filtered out), got {}",
+        result.manifest.entities.len()
+    );
+    assert_eq!(
+        result.manifest.metadata.file_count, 1,
+        "One .py file must be counted even if empty"
+    );
+}
+
+#[test]
+fn test_pipeline_comments_only_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("comments.py"),
+        "# Just a comment\n# Another comment\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.entities.is_empty(),
+        "Comments-only file should produce 0 entities"
+    );
+}
+
+#[test]
+fn test_pipeline_syntax_errors_partial_parse() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("broken.py"),
+        "def valid_function():\n    return 42\n\ndef this is broken syntax!!!\n\ndef another_valid():\n    return \"ok\"\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let names: Vec<&str> = result
+        .manifest
+        .entities
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    let has_valid = names.iter().any(|n| n.contains("valid_function"));
+    assert!(
+        has_valid,
+        "Tree-sitter should parse valid_function despite syntax errors. Found: {:?}",
+        names
+    );
+}
+
+#[test]
+fn test_pipeline_unreadable_file_skipped_gracefully() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("good.py"), "def hello(): return 1\n").unwrap();
+    std::fs::create_dir(tmp.path().join("bad.py")).unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]);
+
+    match result {
+        Ok(r) => {
+            let has_hello = r.manifest.entities.iter().any(|e| e.id.contains("hello"));
+            assert!(
+                has_hello,
+                "Pipeline should have parsed good.py despite bad.py existing"
+            );
+        }
+        Err(_) => {
+            // Acceptable if the pipeline returns an error, but must not panic
+        }
+    }
+}
+
+// =========================================================================
+// 5. Multi-File Projects (P1)
+// =========================================================================
+
+#[test]
+fn test_pipeline_multi_file_all_entities_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("module_a.py"),
+        "def func_a(): return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("module_b.py"),
+        "def func_b(): return 2\ndef func_c(): return 3\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let entity_names: Vec<&str> = result
+        .manifest
+        .entities
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+
+    assert!(
+        entity_names.iter().any(|n| n.contains("func_a")),
+        "Must find func_a. Entities: {:?}",
+        entity_names
+    );
+    assert!(
+        entity_names.iter().any(|n| n.contains("func_b")),
+        "Must find func_b. Entities: {:?}",
+        entity_names
+    );
+    assert!(
+        entity_names.iter().any(|n| n.contains("func_c")),
+        "Must find func_c. Entities: {:?}",
+        entity_names
+    );
+    assert_eq!(result.manifest.metadata.file_count, 2, "file_count must be 2");
+}
+
+#[test]
+fn test_pipeline_entity_count_matches_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("a.py"),
+        "def f1(): pass\ndef f2(): pass\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("b.py"), "class C1: pass\n").unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert_eq!(
+        result.manifest.metadata.entity_count,
+        result.manifest.entities.len() as u64,
+        "metadata.entity_count must match entities.len()"
+    );
+    assert_eq!(
+        result.manifest.metadata.diagnostic_count,
+        result.manifest.diagnostics.len() as u64,
+        "metadata.diagnostic_count must match diagnostics.len()"
+    );
+}
+
+#[test]
+fn test_pipeline_multi_file_module_summaries() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("utils.py"),
+        "def helper(): pass\ndef parse(): pass\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models.py"),
+        "class User: pass\nclass Order: pass\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert_eq!(
+        result.manifest.summary.modules.len(),
+        2,
+        "Two .py files should produce 2 module summaries, got {}",
+        result.manifest.summary.modules.len()
+    );
+
+    let module_names: Vec<&str> = result
+        .manifest
+        .summary
+        .modules
+        .iter()
+        .map(|m| m.name.as_str())
+        .collect();
+    assert!(
+        module_names.iter().any(|n| n.contains("utils")),
+        "Module summary must include utils. Got: {:?}",
+        module_names
+    );
+    assert!(
+        module_names.iter().any(|n| n.contains("models")),
+        "Module summary must include models. Got: {:?}",
+        module_names
+    );
+}
+
+#[test]
+fn test_pipeline_project_with_issues_fixture() {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/fixtures/python/project_with_issues");
+
+    if !fixture_path.exists() {
+        return;
+    }
+
+    let config = Config::load(&fixture_path, None).unwrap();
+    let result = analyze(&fixture_path, &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.entities.len() >= 3,
+        "project_with_issues should have >= 3 entities. Got {}",
+        result.manifest.entities.len()
+    );
+
+    let dead_end_count = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "data_dead_end")
+        .count();
+    assert!(
+        dead_end_count >= 1,
+        "project_with_issues has dead functions -> data_dead_end must fire. Got {}",
+        dead_end_count
+    );
+}
+
+// =========================================================================
+// 6. AnalysisResult Contract (P1)
+// =========================================================================
+
+#[test]
+fn test_pipeline_has_critical_false_for_warnings_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        !result.has_critical,
+        "dead_code.py diagnostics are warnings, not criticals. has_critical must be false"
+    );
+}
+
+#[test]
+fn test_pipeline_has_findings_true_with_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    if !result.manifest.diagnostics.is_empty() {
+        assert!(
+            result.has_findings,
+            "has_findings must be true when diagnostics exist"
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_has_findings_false_for_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        !result.has_findings,
+        "Empty project must have has_findings=false"
+    );
+    assert!(
+        !result.has_critical,
+        "Empty project must have has_critical=false"
+    );
+}
+
+// =========================================================================
+// 7. Diagnostic Summary Integrity (P2)
+// =========================================================================
+
+#[test]
+fn test_pipeline_summary_counts_match_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("unused_import.py"),
+        include_str!("../../tests/fixtures/python/unused_import.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let actual_critical = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "critical")
+        .count() as u64;
+    let actual_warning = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count() as u64;
+    let actual_info = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "info")
+        .count() as u64;
+
+    assert_eq!(
+        result.manifest.summary.diagnostic_summary.critical, actual_critical
+    );
+    assert_eq!(
+        result.manifest.summary.diagnostic_summary.warning, actual_warning
+    );
+    assert_eq!(
+        result.manifest.summary.diagnostic_summary.info, actual_info
+    );
+}
+
+#[test]
+fn test_pipeline_diagnostic_ids_sequential() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for (i, diag) in result.manifest.diagnostics.iter().enumerate() {
+        let expected_id = format!("D{:03}", i + 1);
+        assert_eq!(
+            diag.id, expected_id,
+            "Diagnostic {} should have id '{}', got '{}'",
+            i, expected_id, diag.id
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_diagnostic_fields_lowercase() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for diag in &result.manifest.diagnostics {
+        assert_eq!(diag.severity, diag.severity.to_lowercase());
+        assert_eq!(diag.confidence, diag.confidence.to_lowercase());
+        assert!(!diag.suggestion.is_empty(), "Diagnostic '{}' needs suggestion", diag.id);
+        assert!(!diag.message.is_empty(), "Diagnostic '{}' needs message", diag.id);
+    }
+}
+
+// =========================================================================
+// 8. Entity Data Fidelity (P1)
+// =========================================================================
+
+#[test]
+fn test_pipeline_entity_kind_strings_valid() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("classes.py"),
+        include_str!("../../tests/fixtures/python/classes.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let valid_kinds = [
+        "fn", "method", "class", "struct", "trait", "interface", "var", "const", "macro", "enum",
+    ];
+
+    for entity in &result.manifest.entities {
+        assert!(
+            valid_kinds.contains(&entity.kind.as_str()),
+            "Entity '{}' has invalid kind '{}'",
+            entity.id,
+            entity.kind,
+        );
+    }
+
+    let class_entities: Vec<_> = result
+        .manifest
+        .entities
+        .iter()
+        .filter(|e| e.kind == "class")
+        .collect();
+    assert!(
+        !class_entities.is_empty(),
+        "classes.py must produce entities with kind 'class'"
+    );
+
+    let fn_entities: Vec<_> = result
+        .manifest
+        .entities
+        .iter()
+        .filter(|e| e.kind == "fn")
+        .collect();
+    assert!(
+        !fn_entities.is_empty(),
+        "dead_code.py must produce entities with kind 'fn'"
+    );
+}
+
+#[test]
+fn test_pipeline_class_methods_have_method_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("classes.py"),
+        include_str!("../../tests/fixtures/python/classes.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let methods: Vec<_> = result
+        .manifest
+        .entities
+        .iter()
+        .filter(|e| e.kind == "method")
+        .collect();
+    assert!(
+        !methods.is_empty(),
+        "classes.py methods must have kind 'method'. Entity kinds found: {:?}",
+        result
+            .manifest
+            .entities
+            .iter()
+            .map(|e| (&e.id, &e.kind))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_pipeline_entity_ids_contain_module() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("mymodule.py"),
+        "def my_func(): pass\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for entity in &result.manifest.entities {
+        assert!(
+            entity.id.contains("mymodule") || entity.id.contains("::"),
+            "Entity id '{}' should contain module name or :: separator",
+            entity.id
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_annotations_preserved() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("deco.py"),
+        "class Animal:\n    @staticmethod\n    def species():\n        return \"unknown\"\n\n    @property\n    def name(self):\n        return self._name\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let species = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("species"));
+    if let Some(s) = species {
+        assert!(
+            s.annotations.iter().any(|a| a.contains("staticmethod")),
+            "species() must preserve @staticmethod annotation. Got: {:?}",
+            s.annotations
+        );
+    }
+}
+
+// =========================================================================
+// 9. Unicode and Special Cases (P2)
+// =========================================================================
+
+#[test]
+fn test_pipeline_unicode_identifiers() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("unicode.py"),
+        "def café():\n    return \"coffee\"\n\nclass Ñoño:\n    pass\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let has_cafe = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| e.id.contains("café"));
+    assert!(
+        has_cafe,
+        "Unicode function name 'café' must survive the full pipeline. Entities: {:?}",
+        result
+            .manifest
+            .entities
+            .iter()
+            .map(|e| &e.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_pipeline_deeply_nested_functions() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("nested.py"),
+        "def level0():\n    def level1():\n        def level2():\n            def level3():\n                return \"deep\"\n            return level3()\n        return level2()\n    return level1()\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.entities.len() >= 4,
+        "Deeply nested functions must all appear as entities. Got {}",
+        result.manifest.entities.len()
+    );
+}
+
+#[test]
+fn test_pipeline_large_file_no_crash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut content = String::new();
+    for i in 0..200 {
+        content.push_str(&format!("def func_{}():\n    return {}\n\n", i, i));
+    }
+    std::fs::write(tmp.path().join("large.py"), &content).unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.entities.len() >= 200,
+        "200-function file should produce >= 200 entities, got {}",
+        result.manifest.entities.len()
+    );
+}
+
+// =========================================================================
+// 10. Regression Guards (P0)
+// =========================================================================
+
+#[test]
+fn test_regression_not_all_entities_pub() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("mixed.py"),
+        "def public_func():\n    return 1\n\ndef _private_func():\n    return 2\n\nclass _InternalClass:\n    pass\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let vis_values: Vec<&str> = result
+        .manifest
+        .entities
+        .iter()
+        .map(|e| e.vis.as_str())
+        .collect();
+
+    let all_pub = vis_values.iter().all(|&v| v == "pub");
+    assert!(
+        !all_pub,
+        "NOT all entities should be 'pub'. Visibility values: {:?}.",
+        vis_values
+    );
+
+    let has_priv = vis_values.iter().any(|&v| v == "priv");
+    assert!(
+        has_priv,
+        "Must have at least one 'priv' entity. Got: {:?}",
+        vis_values
+    );
+}
+
+#[test]
+fn test_regression_no_detected_placeholder() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for entity in &result.manifest.entities {
+        assert!(
+            !entity.called_by.contains(&"(detected)".to_string()),
+            "REGRESSION: Entity '{}' still has '(detected)' placeholder.",
+            entity.id
+        );
+    }
+}
+
+#[test]
+fn test_regression_no_module_with_n_entities_role() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("utils.py"),
+        "def a(): pass\ndef b(): pass\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for module in &result.manifest.summary.modules {
+        let role_matches_vacuous =
+            module.role.starts_with("Module with") && module.role.ends_with("entities");
+        assert!(
+            !role_matches_vacuous,
+            "REGRESSION: Module '{}' has vacuous role '{}'.",
+            module.name,
+            module.role
+        );
+    }
+}
+
+#[test]
+fn test_regression_no_duplicate_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("unused_import.py"),
+        include_str!("../../tests/fixtures/python/unused_import.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for (i, d1) in result.manifest.diagnostics.iter().enumerate() {
+        for (j, d2) in result.manifest.diagnostics.iter().enumerate() {
+            if i != j {
+                let is_dup =
+                    d1.entity == d2.entity && d1.pattern == d2.pattern && d1.loc == d2.loc;
+                assert!(
+                    !is_dup,
+                    "Duplicate diagnostic: pattern={}, entity={}, loc={}",
+                    d1.pattern,
+                    d1.entity,
+                    d1.loc
+                );
+            }
+        }
+    }
+}
+
+// =========================================================================
+// 11. Comprehensive Integration Test (P0)
+// =========================================================================
+
+#[test]
+fn test_pipeline_full_integration_all_patterns() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("integration.py"),
+        "import os  # phantom: os never used\n\ndef public_function():\n    return 42\n\ndef _private_unused():\n    return None\n\ndef main_handler():\n    return public_function()\n\nclass IsolatedProcessor:\n    def process(self, data):\n        return self._validate(data)\n\n    def _validate(self, data):\n        return data is not None\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        tmp.path().join("connected.py"),
+        "def connected_func():\n    return \"I exist to make isolated_module detectable\"\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // === ENTITY VERIFICATION ===
+    assert!(
+        result.manifest.entities.len() >= 5,
+        "Integration test must find at least 5 entities. Got {}",
+        result.manifest.entities.len()
+    );
+
+    let private_entity = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("_private_unused"));
+    if let Some(p) = private_entity {
+        assert_eq!(
+            p.vis, "priv",
+            "_private_unused must have vis 'priv', got '{}'",
+            p.vis
+        );
+    }
+
+    for entity in &result.manifest.entities {
+        for cb in &entity.called_by {
+            assert_ne!(
+                cb, "(detected)",
+                "No placeholders in called_by for '{}'",
+                entity.id
+            );
+        }
+        assert_ne!(
+            entity.kind, "module",
+            "Module kind must be filtered: '{}'",
+            entity.id
+        );
+        assert!(
+            !entity.loc.starts_with('/'),
+            "Relative paths required: '{}'",
+            entity.loc
+        );
+    }
+
+    // === DIAGNOSTIC VERIFICATION ===
+    let patterns_fired: Vec<&str> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .map(|d| d.pattern.as_str())
+        .collect();
+
+    assert!(
+        patterns_fired.contains(&"data_dead_end"),
+        "data_dead_end must fire. Patterns: {:?}",
+        patterns_fired
+    );
+
+    assert!(
+        patterns_fired.contains(&"phantom_dependency"),
+        "phantom_dependency must fire (import os is unused). Patterns: {:?}",
+        patterns_fired
+    );
+
+    for diag in &result.manifest.diagnostics {
+        assert!(
+            !diag.evidence.is_empty(),
+            "Diagnostic '{}' ({}) has empty evidence",
+            diag.id,
+            diag.pattern
+        );
+    }
+
+    // === MODULE SUMMARY VERIFICATION ===
+    assert!(!result.manifest.summary.modules.is_empty());
+    for module in &result.manifest.summary.modules {
+        assert!(
+            !module.role.contains("Module with"),
+            "Module '{}' has vacuous role: '{}'",
+            module.name,
+            module.role
+        );
+    }
+
+    // === METADATA VERIFICATION ===
+    assert_eq!(result.manifest.metadata.file_count, 2);
+    assert_eq!(
+        result.manifest.metadata.entity_count,
+        result.manifest.entities.len() as u64
+    );
+    assert_eq!(
+        result.manifest.metadata.diagnostic_count,
+        result.manifest.diagnostics.len() as u64
+    );
+}
+
+// =========================================================================
+// 12. diagnose() Function Tests (P2)
+// =========================================================================
+
+#[test]
+fn test_diagnose_uses_real_pipeline() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let (diagnostics, has_findings) =
+        diagnose(tmp.path(), &config, &["python".to_string()], None, None, None).unwrap();
+
+    assert!(has_findings, "dead_code.py should produce findings");
+    assert!(
+        !diagnostics.is_empty(),
+        "diagnose() must return diagnostics from real pipeline"
+    );
+
+    for d in &diagnostics {
+        assert!(
+            !d.evidence.is_empty(),
+            "diagnose() diagnostic '{}' has empty evidence",
+            d.id
+        );
+    }
+}
+
+#[test]
+fn test_diagnose_severity_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+
+    let (critical_only, _) = diagnose(
+        tmp.path(),
+        &config,
+        &["python".to_string()],
+        Some(Severity::Critical),
+        None,
+        None,
+    )
+    .unwrap();
+
+    for d in &critical_only {
+        assert_eq!(
+            d.severity, "critical",
+            "With critical filter, only critical diagnostics should appear. Got: {}",
+            d.severity
+        );
+    }
+}

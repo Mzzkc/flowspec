@@ -179,7 +179,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {}", e);
+            tracing::error!("{}", e);
             ExitCode::from(1)
         }
     }
