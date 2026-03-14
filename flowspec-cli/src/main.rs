@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use flowspec::{Config, FlowspecError, JsonFormatter, OutputFormatter, YamlFormatter};
+use flowspec::{
+    Config, FlowspecError, JsonFormatter, OutputFormatter, SarifFormatter, YamlFormatter,
+};
 
 /// Static code analyzer that traces the flow of all data in a codebase.
 #[derive(Parser)]
@@ -81,6 +83,10 @@ enum Commands {
         /// Minimum confidence to report.
         #[arg(long)]
         confidence: Option<ConfidenceArg>,
+
+        /// Restrict analysis to specific language(s).
+        #[arg(short, long)]
+        language: Vec<String>,
     },
 
     /// Trace a single symbol's complete flow (not yet implemented).
@@ -218,8 +224,10 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             checks,
             severity,
             confidence,
+            language,
         } => run_diagnose(
             &path,
+            &language,
             &checks,
             severity.as_ref(),
             confidence.as_ref(),
@@ -249,7 +257,7 @@ fn run_analyze(
     output_path: Option<&std::path::Path>,
     config_path: Option<&std::path::Path>,
 ) -> Result<ExitCode, FlowspecError> {
-    if !matches!(format, Format::Yaml | Format::Json) {
+    if !matches!(format, Format::Yaml | Format::Json | Format::Sarif) {
         return Err(FlowspecError::FormatNotImplemented {
             format: format_name(format).to_string(),
         });
@@ -284,8 +292,10 @@ fn run_analyze(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_diagnose(
     path: &PathBuf,
+    languages: &[String],
     checks: &[String],
     severity: Option<&SeverityArg>,
     confidence: Option<&ConfidenceArg>,
@@ -293,7 +303,7 @@ fn run_diagnose(
     output_path: Option<&std::path::Path>,
     config_path: Option<&std::path::Path>,
 ) -> Result<ExitCode, FlowspecError> {
-    if !matches!(format, Format::Yaml | Format::Json) {
+    if !matches!(format, Format::Yaml | Format::Json | Format::Sarif) {
         return Err(FlowspecError::FormatNotImplemented {
             format: format_name(format).to_string(),
         });
@@ -305,6 +315,11 @@ fn run_diagnose(
 
     let canonical = resolve_path(path)?;
     let config = Config::load(&canonical, config_path)?;
+
+    // Validate languages before analysis
+    for lang in languages {
+        validate_language(lang)?;
+    }
 
     let severity_filter = severity.map(|s| s.to_severity());
     let confidence_filter = confidence.map(|c| c.to_confidence());
@@ -319,7 +334,7 @@ fn run_diagnose(
     let (diagnostics, has_findings) = flowspec::diagnose(
         &canonical,
         &config,
-        &[],
+        languages,
         severity_filter,
         confidence_filter,
         checks_filter,
@@ -388,6 +403,7 @@ where
     let result = match format {
         Format::Yaml => f(&YamlFormatter::new()),
         Format::Json => f(&JsonFormatter::new()),
+        Format::Sarif => f(&SarifFormatter::new()),
         _ => unreachable!("format guard should reject unsupported formats"),
     };
     result.map_err(FlowspecError::from)

@@ -80,11 +80,12 @@ fn exit_1_on_nonexistent_path() {
 fn exit_1_on_unimplemented_format() {
     let project = create_clean_project();
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
+    // SARIF is now implemented; summary is still unimplemented
     cmd.args([
         "analyze",
         project.path().to_str().unwrap(),
         "--format",
-        "sarif",
+        "summary",
     ])
     .assert()
     .code(1);

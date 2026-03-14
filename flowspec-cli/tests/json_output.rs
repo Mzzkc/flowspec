@@ -360,15 +360,11 @@ fn json_output_flag_writes_valid_json_to_file() {
 }
 
 #[test]
-fn sarif_format_still_not_implemented() {
+fn sarif_format_is_now_implemented() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "sarif"])
         .assert()
-        .code(1)
-        .stderr(
-            predicate::str::contains("not yet implemented")
-                .or(predicate::str::contains("not implemented")),
-        );
+        .code(predicate::in_iter([0, 2]));
 }
 
 #[test]
