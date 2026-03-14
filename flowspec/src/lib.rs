@@ -174,6 +174,18 @@ pub fn analyze(
             .file
             .strip_prefix(project_path)
             .unwrap_or(&symbol.location.file);
+        // When analyzing a single file, strip_prefix removes the entire path,
+        // producing an empty string. Fall back to the filename component.
+        let rel_path = if rel_path.as_os_str().is_empty() {
+            symbol
+                .location
+                .file
+                .file_name()
+                .map(std::path::Path::new)
+                .unwrap_or(&symbol.location.file)
+        } else {
+            rel_path
+        };
         entities.push(EntityEntry {
             id: symbol.qualified_name.clone(),
             kind: format_symbol_kind(symbol.kind),

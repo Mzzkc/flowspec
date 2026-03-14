@@ -1374,6 +1374,187 @@ fn test_diagnose_uses_real_pipeline() {
     }
 }
 
+// =========================================================================
+// 13. Loc Path Correctness — QA-3 Cycle 2 (P0)
+// =========================================================================
+
+#[test]
+fn test_single_file_analysis_loc_includes_filename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file_path = tmp.path().join("dead_code.py");
+    std::fs::write(
+        &file_path,
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    // KEY: pass the FILE path as project_path, not the directory.
+    // This triggers the strip_prefix bug where strip_prefix(file_path)
+    // on the same file_path produces an empty string.
+    let config = Config::load(file_path.parent().unwrap(), None).unwrap();
+    let result = analyze(&file_path, &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        !result.manifest.entities.is_empty(),
+        "Single-file analysis must produce entities"
+    );
+
+    for entity in &result.manifest.entities {
+        let parts: Vec<&str> = entity.loc.splitn(2, ':').collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "Entity '{}' loc '{}' must be in file:line format",
+            entity.id,
+            entity.loc
+        );
+
+        let filename_part = parts[0];
+        assert!(
+            !filename_part.is_empty(),
+            "Entity '{}' loc '{}' has EMPTY filename — strip_prefix bug (lib.rs:172-176) not fixed. \
+             Expected 'dead_code.py:N', got ':N'",
+            entity.id,
+            entity.loc
+        );
+        assert_eq!(
+            filename_part, "dead_code.py",
+            "Entity '{}' loc filename should be 'dead_code.py', got '{}'",
+            entity.id, filename_part
+        );
+
+        let line: u32 = parts[1].parse().unwrap_or_else(|_| {
+            panic!(
+                "Entity '{}' loc '{}' — line part '{}' is not a valid number",
+                entity.id, entity.loc, parts[1]
+            )
+        });
+        assert!(line > 0, "Line number must be 1-based for '{}'", entity.id);
+    }
+}
+
+#[test]
+fn test_loc_filename_never_empty_invariant() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for entity in &result.manifest.entities {
+        let parts: Vec<&str> = entity.loc.splitn(2, ':').collect();
+        assert!(
+            parts.len() == 2 && !parts[0].is_empty(),
+            "Entity '{}' loc '{}' violates file:line invariant — \
+             filename portion is empty or colon missing. \
+             Every loc must have a non-empty filename before the colon.",
+            entity.id,
+            entity.loc
+        );
+    }
+}
+
+#[test]
+fn test_loc_path_nested_subdirectory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let subdir = tmp.path().join("subdir");
+    std::fs::create_dir(&subdir).unwrap();
+    std::fs::write(
+        subdir.join("module.py"),
+        "def helper():\n    pass\n\ndef unused():\n    pass\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        !result.manifest.entities.is_empty(),
+        "Nested subdirectory analysis must produce entities"
+    );
+
+    for entity in &result.manifest.entities {
+        let parts: Vec<&str> = entity.loc.splitn(2, ':').collect();
+        assert_eq!(parts.len(), 2, "loc must be file:line format");
+
+        let path_part = parts[0];
+        assert!(
+            path_part.starts_with("subdir/"),
+            "Entity '{}' loc '{}' must show relative path including subdirectory 'subdir/', got '{}'",
+            entity.id,
+            entity.loc,
+            path_part
+        );
+        assert!(
+            !path_part.starts_with('/'),
+            "Entity '{}' loc must be relative, not absolute",
+            entity.id
+        );
+        assert!(
+            path_part.ends_with(".py"),
+            "Entity '{}' loc path '{}' should end with .py",
+            entity.id,
+            path_part
+        );
+    }
+}
+
+// =========================================================================
+// 14. Scanner Deletion Verification — QA-3 Cycle 2 (P0)
+// =========================================================================
+
+#[test]
+fn test_scanner_function_definitions_absent() {
+    let lib_source = include_str!("lib.rs");
+
+    let scanner_definitions = [
+        "fn analyze_python_files",
+        "fn group_entities_into_modules",
+        "fn extract_function_name",
+        "fn extract_class_name",
+        "fn extract_signature",
+        "fn is_inside_class",
+        "fn is_python_keyword",
+    ];
+
+    for def in &scanner_definitions {
+        assert!(
+            !lib_source.contains(def),
+            "lib.rs still contains dead scanner function definition: '{}'. \
+             All 7 scanner functions must be physically deleted.",
+            def
+        );
+    }
+}
+
+#[test]
+fn test_no_scanner_call_sites_in_lib() {
+    let lib_source = include_str!("lib.rs");
+
+    let call_patterns = [
+        "analyze_python_files(",
+        "group_entities_into_modules(",
+        "extract_function_name(",
+        "extract_class_name(",
+        "extract_signature(",
+        "is_inside_class(",
+        "is_python_keyword(",
+    ];
+
+    for pattern in &call_patterns {
+        assert!(
+            !lib_source.contains(pattern),
+            "lib.rs contains what looks like a call to deleted scanner function: '{}'. \
+             All call sites to deleted functions must be removed.",
+            pattern
+        );
+    }
+}
+
 #[test]
 fn test_diagnose_severity_filter() {
     let tmp = tempfile::tempdir().unwrap();

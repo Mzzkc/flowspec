@@ -264,6 +264,84 @@ fn entity_kind_uses_abbreviated_values() {
 }
 
 #[test]
+fn entity_loc_filename_never_empty_in_directory_mode() {
+    let project = create_project_with_issues();
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
+    let output = cmd
+        .args(["analyze", project.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
+    let entities = parsed["entities"].as_sequence().unwrap();
+
+    for entity in entities {
+        if let Some(loc) = entity.get("loc").and_then(|l| l.as_str()) {
+            let parts: Vec<&str> = loc.splitn(2, ':').collect();
+            assert!(
+                parts.len() == 2 && !parts[0].is_empty(),
+                "Entity loc '{}' has empty filename — every loc must have a non-empty \
+                 filename before the colon.",
+                loc
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_single_file_loc_not_empty_prefix() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file_path = tmp.path().join("simple.py");
+    fs::write(
+        &file_path,
+        "def hello():\n    return 'world'\n\ndef unused():\n    pass\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("flowspec").unwrap();
+    let output = cmd
+        .args(["analyze", file_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    // Accept exit 0 (no findings) or exit 2 (has findings)
+    let code = output.status.code().unwrap_or(-1);
+    assert!(
+        code == 0 || code == 2,
+        "Unexpected exit code {} for single-file analysis",
+        code
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "Failed to parse YAML: {}. Raw: {}",
+            e,
+            &stdout[..stdout.len().min(300)]
+        )
+    });
+
+    if let Some(entities) = parsed["entities"].as_sequence() {
+        assert!(
+            !entities.is_empty(),
+            "Single-file CLI analysis produced zero entities"
+        );
+        for entity in entities {
+            if let Some(loc) = entity.get("loc").and_then(|l| l.as_str()) {
+                let parts: Vec<&str> = loc.splitn(2, ':').collect();
+                assert!(
+                    parts.len() == 2 && !parts[0].is_empty(),
+                    "CLI entity loc '{}' has empty filename — the strip_prefix bug \
+                     (lib.rs:172-176) is not fixed in the CLI path. Expected 'simple.py:N', got ':N'",
+                    loc
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn entity_loc_format_is_file_colon_line() {
     let project = create_project_with_issues();
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
