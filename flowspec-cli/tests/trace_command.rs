@@ -159,16 +159,18 @@ fn trace_format_yaml_produces_valid_yaml() {
         .output()
         .unwrap();
 
-    let code = output.status.code().unwrap();
-    if code == 0 {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&stdout);
-        assert!(
-            parsed.is_ok(),
-            "trace --format yaml must produce valid YAML on success, got:\n{}",
-            &stdout[..stdout.len().min(500)]
-        );
-    }
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "trace --symbol main must succeed on valid fixture"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&stdout);
+    assert!(
+        parsed.is_ok(),
+        "trace --format yaml must produce valid YAML, got:\n{}",
+        &stdout[..stdout.len().min(500)]
+    );
 }
 
 /// TEST 1.6: trace with --format json produces valid JSON
@@ -187,16 +189,18 @@ fn trace_format_json_produces_valid_json() {
         .output()
         .unwrap();
 
-    let code = output.status.code().unwrap();
-    if code == 0 {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
-        assert!(
-            parsed.is_ok(),
-            "trace --format json must produce valid JSON on success, got:\n{}",
-            &stdout[..stdout.len().min(500)]
-        );
-    }
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "trace --symbol main must succeed on valid fixture"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    assert!(
+        parsed.is_ok(),
+        "trace --format json must produce valid JSON, got:\n{}",
+        &stdout[..stdout.len().min(500)]
+    );
 }
 
 /// TEST 1.7: trace with --format summary gives clear error (not unreachable!() panic)

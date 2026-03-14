@@ -51,7 +51,8 @@ use std::path::{Path, PathBuf};
 
 use analyzer::conversion::to_manifest_entries;
 use analyzer::extraction::{
-    extract_called_by, extract_calls, extract_visibility, infer_module_role,
+    extract_called_by, extract_calls, extract_dependency_graph, extract_visibility,
+    infer_module_role,
 };
 use graph::populate_graph;
 use graph::resolve_cross_file_imports;
@@ -422,7 +423,23 @@ pub fn analyze(
         entities,
         flows,
         boundaries: Vec::new(),
-        dependency_graph: Vec::new(),
+        dependency_graph: extract_dependency_graph(&graph)
+            .into_iter()
+            .map(|dep| DependencyEdge {
+                from: dep.from,
+                to: dep.to,
+                weight: dep.weight as u64,
+                direction: match dep.direction {
+                    analyzer::extraction::DependencyDirection::Unidirectional => {
+                        "unidirectional".to_string()
+                    }
+                    analyzer::extraction::DependencyDirection::Bidirectional => {
+                        "bidirectional".to_string()
+                    }
+                },
+                issues: dep.issues,
+            })
+            .collect(),
         type_flows: Vec::new(),
     };
 

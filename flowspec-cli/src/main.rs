@@ -102,6 +102,14 @@ enum Commands {
         /// Restrict analysis to specific language(s).
         #[arg(short, long)]
         language: Vec<String>,
+
+        /// Maximum traversal depth for flow tracing.
+        #[arg(long, short = 'd', default_value = "10")]
+        depth: usize,
+
+        /// Trace direction: forward (callees), backward (callers), or both.
+        #[arg(long, default_value = "forward")]
+        direction: TraceDirection,
     },
 
     /// Compare two manifests — show structural changes (not yet implemented).
@@ -147,6 +155,17 @@ enum ConfidenceArg {
     High,
     Moderate,
     Low,
+}
+
+/// Trace direction for the `trace` command.
+#[derive(Clone, ValueEnum)]
+enum TraceDirection {
+    /// Trace callees (forward data flow).
+    Forward,
+    /// Trace callers (backward data flow — not yet implemented).
+    Backward,
+    /// Trace both directions (not yet implemented).
+    Both,
 }
 
 impl SeverityArg {
@@ -247,10 +266,14 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             path,
             symbol,
             language,
+            depth,
+            direction,
         } => run_trace(
             &path,
             &symbol,
             &language,
+            depth,
+            &direction,
             &cli.format,
             cli.output.as_deref(),
             cli.config.as_deref(),
@@ -376,13 +399,16 @@ fn run_diagnose(
 
 /// Run trace command — trace a single symbol's flow through the codebase.
 ///
-/// Currently returns a "not yet available" message while the flow tracing
-/// engine is being built. Once Worker 1's API lands, this will call the
-/// flow tracer and format the resulting paths.
+/// Runs full analysis, finds the requested symbol, then outputs only the
+/// flow data relevant to that symbol. Supports `--depth` for path truncation
+/// and `--direction` for trace direction (forward only for now).
+#[allow(clippy::too_many_arguments)]
 fn run_trace(
     path: &PathBuf,
     symbol: &str,
     languages: &[String],
+    depth: usize,
+    direction: &TraceDirection,
     format: &Format,
     output_path: Option<&std::path::Path>,
     config_path: Option<&std::path::Path>,
@@ -392,6 +418,23 @@ fn run_trace(
         return Err(FlowspecError::FormatNotImplemented {
             format: format_name(format).to_string(),
         });
+    }
+
+    // Guard unsupported directions
+    match direction {
+        TraceDirection::Forward => {}
+        TraceDirection::Backward => {
+            return Err(FlowspecError::SymbolNotFound(
+                "Backward flow tracing is not yet implemented. Use --direction forward."
+                    .to_string(),
+            ));
+        }
+        TraceDirection::Both => {
+            return Err(FlowspecError::SymbolNotFound(
+                "Bidirectional flow tracing is not yet implemented. Use --direction forward."
+                    .to_string(),
+            ));
+        }
     }
 
     if path.as_os_str().is_empty() {
@@ -409,29 +452,158 @@ fn run_trace(
 
     tracing::info!("Tracing symbol '{}' in {}", symbol, canonical.display());
 
-    // Run analysis to find the symbol
+    // Run analysis to get the manifest (includes flows from trace_all_flows)
     let result = flowspec::analyze(&canonical, &config, &normalized_languages)?;
 
-    // Search for the symbol in entities
-    let found = result
-        .manifest
-        .entities
-        .iter()
-        .any(|e| e.id.contains(symbol));
+    // Symbol matching: exact qualified name → name part → substring
+    let matched_entity = find_matching_symbol(symbol, &result.manifest.entities)?;
 
-    if !found {
-        return Err(FlowspecError::SymbolNotFound(format!(
-            "Symbol '{}' not found. Run `flowspec analyze` to see available entities.",
-            symbol
-        )));
+    // Filter flows to only those relevant to the matched symbol
+    let mut flow_entries: Vec<flowspec::FlowEntry> = result
+        .manifest
+        .flows
+        .into_iter()
+        .filter(|flow| {
+            flow.entry == matched_entity
+                || flow.exit == matched_entity
+                || flow.steps.iter().any(|s| s.entity == matched_entity)
+        })
+        .collect();
+
+    // Apply depth truncation: truncate steps beyond --depth
+    for flow in &mut flow_entries {
+        if flow.steps.len() > depth {
+            flow.steps.truncate(depth);
+        }
     }
 
-    // Build a trace-focused manifest with just the matching entity's flow data.
-    // For now, produce the full manifest since the dedicated flow tracer is pending.
-    let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
+    // Serialize focused output directly (bypasses OutputFormatter — no manifest wrapper)
+    let output = match format {
+        Format::Yaml => {
+            serde_yaml::to_string(&flow_entries).map_err(|e| FlowspecError::Manifest {
+                reason: format!("YAML serialization failed: {}", e),
+            })?
+        }
+        Format::Json => {
+            serde_json::to_string_pretty(&flow_entries).map_err(|e| FlowspecError::Manifest {
+                reason: format!("JSON serialization failed: {}", e),
+            })?
+        }
+        Format::Sarif => {
+            // Wrap flow entries in a minimal SARIF v2.1.0 envelope
+            format_trace_sarif(&flow_entries)?
+        }
+        Format::Summary => {
+            return Err(FlowspecError::FormatNotImplemented {
+                format: "summary".to_string(),
+            })
+        }
+    };
+
     write_output(&output, output_path)?;
 
     Ok(ExitCode::from(0))
+}
+
+/// Find a matching symbol in the entity list using cascading match strategy.
+///
+/// Priority: exact qualified name → exact name part → substring match.
+/// Returns an error if no match or multiple ambiguous matches are found.
+fn find_matching_symbol(
+    symbol: &str,
+    entities: &[flowspec::EntityEntry],
+) -> Result<String, FlowspecError> {
+    // 1. Exact match on qualified name (e.g., "main.py::process")
+    let exact_matches: Vec<&flowspec::EntityEntry> =
+        entities.iter().filter(|e| e.id == symbol).collect();
+    if exact_matches.len() == 1 {
+        return Ok(exact_matches[0].id.clone());
+    }
+
+    // 2. Exact match on the name part (after last ::)
+    let name_matches: Vec<&flowspec::EntityEntry> = entities
+        .iter()
+        .filter(|e| {
+            e.id.rsplit("::")
+                .next()
+                .map(|name| name == symbol)
+                .unwrap_or(false)
+        })
+        .collect();
+    if name_matches.len() == 1 {
+        return Ok(name_matches[0].id.clone());
+    }
+    if name_matches.len() > 1 {
+        let options: Vec<&str> = name_matches.iter().map(|e| e.id.as_str()).collect();
+        return Err(FlowspecError::SymbolNotFound(format!(
+            "Symbol '{}' matches multiple entities: {}. Use a qualified name to disambiguate.",
+            symbol,
+            options.join(", ")
+        )));
+    }
+
+    // 3. Substring match
+    let substring_matches: Vec<&flowspec::EntityEntry> =
+        entities.iter().filter(|e| e.id.contains(symbol)).collect();
+    if substring_matches.len() == 1 {
+        return Ok(substring_matches[0].id.clone());
+    }
+    if substring_matches.len() > 1 {
+        let options: Vec<&str> = substring_matches.iter().map(|e| e.id.as_str()).collect();
+        return Err(FlowspecError::SymbolNotFound(format!(
+            "Symbol '{}' matches multiple entities: {}. Use a qualified name to disambiguate.",
+            symbol,
+            options.join(", ")
+        )));
+    }
+
+    // No match
+    Err(FlowspecError::SymbolNotFound(format!(
+        "Symbol '{}' not found. Run `flowspec analyze` to see available entities.",
+        symbol
+    )))
+}
+
+/// Format flow entries as a minimal SARIF v2.1.0 envelope.
+fn format_trace_sarif(flow_entries: &[flowspec::FlowEntry]) -> Result<String, FlowspecError> {
+    let results: Vec<serde_json::Value> = flow_entries
+        .iter()
+        .map(|flow| {
+            serde_json::json!({
+                "ruleId": "flow-trace",
+                "message": { "text": flow.description },
+                "properties": {
+                    "entry": flow.entry,
+                    "exit": flow.exit,
+                    "steps": flow.steps.iter().map(|s| {
+                        serde_json::json!({
+                            "entity": s.entity,
+                            "action": s.action,
+                        })
+                    }).collect::<Vec<_>>(),
+                }
+            })
+        })
+        .collect();
+
+    let sarif = serde_json::json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "flowspec",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "informationUri": "https://github.com/anthropics/flowspec"
+                }
+            },
+            "results": results,
+        }]
+    });
+
+    serde_json::to_string_pretty(&sarif).map_err(|e| FlowspecError::Manifest {
+        reason: format!("SARIF serialization failed: {}", e),
+    })
 }
 
 /// Resolve a path, checking existence.

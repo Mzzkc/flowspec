@@ -16,6 +16,7 @@ use crate::parser::ir::{Symbol, SymbolId, SymbolKind, Visibility};
 
 /// Direction of a module-level dependency edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DependencyDirection {
     /// Only one module references the other.
     Unidirectional,

@@ -47,18 +47,19 @@ pub struct FlowPath {
 /// step. Detects cycles via per-path visited sets and stops at terminal symbols
 /// (no outgoing call edges). Returns all discovered flow paths.
 ///
+/// Import symbols are transparently resolved to their real targets by following
+/// `EdgeKind::References` edges from cross-file import resolution. This allows
+/// flow paths to cross file boundaries without leaking import proxy names.
+///
+/// `max_depth` limits the maximum path depth. Use `MAX_FLOW_DEPTH` for the
+/// default limit.
+///
 /// Returns an empty `Vec` if the start symbol has no outgoing call edges.
-pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId) -> Vec<FlowPath> {
+pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId, max_depth: usize) -> Vec<FlowPath> {
     let mut paths = Vec::new();
 
-    // Get outgoing call edges from start
-    let call_targets: Vec<SymbolId> = graph
-        .edges_from(start_symbol)
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Calls)
-        .map(|e| e.target)
-        .filter(|&t| t != SymbolId::default())
-        .collect();
+    // Get outgoing call edges from start, resolving imports transparently
+    let call_targets = resolve_call_targets(graph, start_symbol);
 
     if call_targets.is_empty() {
         // Terminal node — no outgoing calls, no paths
@@ -79,6 +80,7 @@ pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId) -> Vec<FlowPath> 
             &mut current_steps,
             &mut paths,
             0,
+            max_depth,
         );
     }
 
@@ -87,17 +89,19 @@ pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId) -> Vec<FlowPath> 
 
 /// Traces flows from all detected entry points in the graph.
 ///
-/// Entry points are symbols named `main` or `__main__`, matching the
-/// detection logic in the analyze pipeline. Returns all flow paths
-/// from all entry points.
+/// Entry points are symbols named `main` or `__main__`, or symbols annotated
+/// with `entry_point`, matching the detection logic in `infer_module_role`.
+/// Returns all flow paths from all entry points.
 pub fn trace_all_flows(graph: &Graph) -> Vec<FlowPath> {
     let mut all_paths = Vec::new();
 
     for (sym_id, symbol) in graph.all_symbols() {
-        let is_entry = (symbol.name == "main" || symbol.name == "__main__")
+        let is_entry = (symbol.name == "main"
+            || symbol.name == "__main__"
+            || symbol.annotations.contains(&"entry_point".to_string()))
             && symbol.kind != SymbolKind::Module;
         if is_entry {
-            let mut paths = trace_flows_from(graph, sym_id);
+            let mut paths = trace_flows_from(graph, sym_id, MAX_FLOW_DEPTH);
             all_paths.append(&mut paths);
         }
     }
@@ -105,11 +109,50 @@ pub fn trace_all_flows(graph: &Graph) -> Vec<FlowPath> {
     all_paths
 }
 
+/// Resolves call targets for a symbol, transparently following import proxies.
+///
+/// Collects outgoing `EdgeKind::Calls` edges. For each target that is an import
+/// symbol (annotated with `"import"`), follows outgoing `EdgeKind::References`
+/// edges to the resolved definition. This ensures flow paths record real
+/// function targets, not import proxy names.
+///
+/// If an import symbol has no resolved target (unresolved/stdlib), it is kept
+/// as-is — the path will terminate at the import symbol.
+fn resolve_call_targets(graph: &Graph, symbol_id: SymbolId) -> Vec<SymbolId> {
+    graph
+        .edges_from(symbol_id)
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .map(|e| e.target)
+        .filter(|&t| t != SymbolId::default())
+        .flat_map(|target| {
+            if let Some(sym) = graph.get_symbol(target) {
+                if sym.annotations.contains(&"import".to_string()) {
+                    // This is an import proxy — resolve to the real target
+                    let resolved: Vec<SymbolId> = graph
+                        .edges_from(target)
+                        .iter()
+                        .filter(|e| e.kind == EdgeKind::References)
+                        .map(|e| e.target)
+                        .filter(|&t| t != SymbolId::default())
+                        .collect();
+                    if !resolved.is_empty() {
+                        return resolved;
+                    }
+                }
+            }
+            vec![target]
+        })
+        .collect()
+}
+
 /// DFS recursive helper for flow tracing.
 ///
 /// Explores the call graph from `current`, building up `current_steps`.
 /// When a terminal (no outgoing calls) or cycle is detected, records
-/// the complete path.
+/// the complete path. Import symbols are transparently resolved via
+/// `resolve_call_targets`.
+#[allow(clippy::too_many_arguments)]
 fn dfs_trace(
     graph: &Graph,
     current: SymbolId,
@@ -118,10 +161,11 @@ fn dfs_trace(
     current_steps: &mut Vec<FlowStep>,
     paths: &mut Vec<FlowPath>,
     depth: usize,
+    max_depth: usize,
 ) {
     // Max depth enforcement
-    if depth >= MAX_FLOW_DEPTH {
-        tracing::warn!("Flow trace depth limit ({}) reached", MAX_FLOW_DEPTH,);
+    if depth >= max_depth {
+        tracing::warn!("Flow trace depth limit ({}) reached", max_depth);
         // Record the path as-is (truncated)
         paths.push(FlowPath {
             entry,
@@ -154,14 +198,8 @@ fn dfs_trace(
         edge_kind: EdgeKind::Calls,
     });
 
-    // Find outgoing call edges
-    let call_targets: Vec<SymbolId> = graph
-        .edges_from(current)
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Calls)
-        .map(|e| e.target)
-        .filter(|&t| t != SymbolId::default())
-        .collect();
+    // Find outgoing call edges, resolving import proxies transparently
+    let call_targets = resolve_call_targets(graph, current);
 
     if call_targets.is_empty() {
         // Terminal node — record the complete path
@@ -181,6 +219,7 @@ fn dfs_trace(
                 current_steps,
                 paths,
                 depth + 1,
+                max_depth,
             );
         }
     }
@@ -244,7 +283,7 @@ mod tests {
         add_call(&mut g, a, b, "main.py");
         add_call(&mut g, b, c, "main.py");
 
-        let paths = trace_flows_from(&g, a);
+        let paths = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         assert_eq!(paths.len(), 1, "Linear chain produces one path");
         assert_eq!(paths[0].steps.len(), 2, "Two steps: B, C");
@@ -262,7 +301,7 @@ mod tests {
         add_call(&mut g, a, b, "app.py");
         add_call(&mut g, a, c, "app.py");
 
-        let paths = trace_flows_from(&g, a);
+        let paths = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         let all_symbols: Vec<SymbolId> = paths
             .iter()
@@ -281,7 +320,7 @@ mod tests {
         add_call(&mut g, a, b, "cycle.py");
         add_call(&mut g, b, a, "cycle.py");
 
-        let paths = trace_flows_from(&g, a);
+        let paths = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         assert!(
             !paths.is_empty(),
@@ -301,7 +340,7 @@ mod tests {
         let helper = g.add_symbol(make_symbol("helper", SymbolKind::Function, "b.py", 1));
         add_call(&mut g, main_fn, helper, "a.py");
 
-        let paths = trace_flows_from(&g, main_fn);
+        let paths = trace_flows_from(&g, main_fn, MAX_FLOW_DEPTH);
 
         assert_eq!(paths.len(), 1);
         let step_symbols: Vec<SymbolId> = paths[0].steps.iter().map(|s| s.symbol).collect();
@@ -319,7 +358,7 @@ mod tests {
         let b = g.add_symbol(make_symbol("terminal", SymbolKind::Function, "main.py", 5));
         add_call(&mut g, a, b, "main.py");
 
-        let paths = trace_flows_from(&g, a);
+        let paths = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         assert_eq!(paths.len(), 1);
         assert!(!paths[0].is_cyclic);
@@ -343,7 +382,7 @@ mod tests {
             add_call(&mut g, ids[i], ids[i + 1], "deep.py");
         }
 
-        let paths = trace_flows_from(&g, ids[0]);
+        let paths = trace_flows_from(&g, ids[0], MAX_FLOW_DEPTH);
 
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].steps.len(), 14);
@@ -363,7 +402,7 @@ mod tests {
         let mut g = Graph::new();
         let solo = g.add_symbol(make_symbol("main", SymbolKind::Function, "solo.py", 1));
 
-        let paths = trace_flows_from(&g, solo);
+        let paths = trace_flows_from(&g, solo, MAX_FLOW_DEPTH);
 
         // Terminal entry point with no outgoing calls — no flow paths
         assert!(paths.is_empty());
@@ -377,7 +416,7 @@ mod tests {
         let helper = g.add_symbol(make_symbol("helper", SymbolKind::Function, "b.py", 1));
         add_call(&mut g, main_fn, helper, "a.py");
 
-        let paths = trace_flows_from(&g, main_fn);
+        let paths = trace_flows_from(&g, main_fn, MAX_FLOW_DEPTH);
 
         assert_eq!(paths.len(), 1);
         let step_symbols: Vec<SymbolId> = paths[0].steps.iter().map(|s| s.symbol).collect();
@@ -394,8 +433,8 @@ mod tests {
         add_call(&mut g, a, b, "main.py");
         add_call(&mut g, b, c, "main.py");
 
-        let paths1 = trace_flows_from(&g, a);
-        let paths2 = trace_flows_from(&g, a);
+        let paths1 = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
+        let paths2 = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         assert_eq!(paths1.len(), paths2.len(), "Trace must be idempotent");
         for (p1, p2) in paths1.iter().zip(paths2.iter()) {
@@ -426,7 +465,7 @@ mod tests {
             resolution: ResolutionStatus::Unresolved,
         });
 
-        let paths = trace_flows_from(&g, a);
+        let paths = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         // Unresolved targets are filtered — no valid call targets, so no paths
         for path in &paths {
@@ -458,7 +497,7 @@ mod tests {
             add_call(&mut g, ids[i], ids[i + 1], "huge.py");
         }
 
-        let paths = trace_flows_from(&g, ids[0]);
+        let paths = trace_flows_from(&g, ids[0], MAX_FLOW_DEPTH);
 
         assert!(!paths.is_empty());
         for path in &paths {
@@ -489,7 +528,7 @@ mod tests {
         add_call(&mut g, b, d, "diamond.py");
         add_call(&mut g, c, d, "diamond.py");
 
-        let paths = trace_flows_from(&g, a);
+        let paths = trace_flows_from(&g, a, MAX_FLOW_DEPTH);
 
         assert!(
             paths.len() >= 2,

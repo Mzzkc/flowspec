@@ -774,12 +774,14 @@ fn test_pipeline_has_findings_true_with_diagnostics() {
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    if !result.manifest.diagnostics.is_empty() {
-        assert!(
-            result.has_findings,
-            "has_findings must be true when diagnostics exist"
-        );
-    }
+    assert!(
+        !result.manifest.diagnostics.is_empty(),
+        "diagnostics must be populated for dead_code fixture"
+    );
+    assert!(
+        result.has_findings,
+        "has_findings must be true when diagnostics exist"
+    );
 }
 
 #[test]
@@ -2060,13 +2062,15 @@ fn test_flow_trace_produces_output_through_pipeline() {
         result.manifest.summary.entry_points
     );
 
-    // Check flow_count is populated when flows exist
-    if !result.manifest.flows.is_empty() {
-        assert!(
-            result.manifest.metadata.flow_count > 0,
-            "flow_count must be > 0 when flows exist"
-        );
-    }
+    // Flows must be populated for cross-file fixture with entry point
+    assert!(
+        !result.manifest.flows.is_empty(),
+        "flows must be populated when flow tracing is active on cross-file fixture"
+    );
+    assert!(
+        result.manifest.metadata.flow_count > 0,
+        "flow_count must be > 0 when flows exist"
+    );
 }
 
 #[test]
@@ -2085,4 +2089,334 @@ fn test_rust_adapter_registered_produces_output() {
         !result.manifest.entities.is_empty(),
         "RustAdapter must produce entities for .rs files. Got 0 entities."
     );
+}
+
+// ============================================================================
+// Cycle 8 QA-Foundation Tests (T1-T4: dependency_graph, T5-T10+R1: cross-file flow)
+// ============================================================================
+
+// T1: dependency_graph populated for cross-file Python fixture (P0 HARD GATE)
+#[test]
+fn test_dependency_graph_populated_for_cross_file_project() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // UNCONDITIONAL. This is the Phase 1 hard gate test.
+    assert!(
+        !result.manifest.dependency_graph.is_empty(),
+        "dependency_graph must be populated for cross-file projects. \
+         The flow_trace fixture has 3 files with cross-file imports. \
+         Got empty Vec — is extract_dependency_graph() wired at lib.rs:425?"
+    );
+}
+
+// T2: dependency_graph edges contain correct file pairs
+#[test]
+fn test_dependency_graph_contains_correct_file_pairs() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    assert!(
+        !result.manifest.dependency_graph.is_empty(),
+        "dependency_graph must be populated (precondition)"
+    );
+
+    let all_pairs: Vec<(String, String)> = result
+        .manifest
+        .dependency_graph
+        .iter()
+        .map(|dep| (dep.from.clone(), dep.to.clone()))
+        .collect();
+
+    // main.py <-> utils.py edge must exist
+    let has_main_utils = all_pairs.iter().any(|(from, to)| {
+        (from.contains("main") && to.contains("utils"))
+            || (from.contains("utils") && to.contains("main"))
+    });
+    assert!(
+        has_main_utils,
+        "dependency_graph must contain main.py <-> utils.py edge. Got: {:?}",
+        all_pairs
+    );
+
+    // utils.py <-> helpers.py edge must exist
+    let has_utils_helpers = all_pairs.iter().any(|(from, to)| {
+        (from.contains("utils") && to.contains("helpers"))
+            || (from.contains("helpers") && to.contains("utils"))
+    });
+    assert!(
+        has_utils_helpers,
+        "dependency_graph must contain utils.py <-> helpers.py edge. Got: {:?}",
+        all_pairs
+    );
+}
+
+// T3: single-file project produces empty dependency_graph (true negative)
+#[test]
+fn test_dependency_graph_empty_for_single_file_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("single.py"),
+        "def main():\n    return 42\n\ndef helper():\n    return main()\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    assert!(
+        result.manifest.dependency_graph.is_empty(),
+        "dependency_graph must be empty for single-file projects. \
+         Got {} edges: {:?}",
+        result.manifest.dependency_graph.len(),
+        result.manifest.dependency_graph
+    );
+}
+
+// T4: dependency_graph weights nonzero and direction valid
+#[test]
+fn test_dependency_graph_weights_nonzero() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    assert!(
+        !result.manifest.dependency_graph.is_empty(),
+        "dependency_graph must be populated (precondition)"
+    );
+
+    for dep in &result.manifest.dependency_graph {
+        assert!(
+            dep.weight > 0,
+            "dependency_graph edge {} → {} has weight 0. \
+             Every cross-file edge must have at least 1 reference.",
+            dep.from, dep.to
+        );
+    }
+
+    for dep in &result.manifest.dependency_graph {
+        assert!(
+            dep.direction == "Unidirectional" || dep.direction == "Bidirectional",
+            "dependency_graph edge {} → {} has invalid direction '{}'. \
+             Expected 'Unidirectional' or 'Bidirectional'.",
+            dep.from, dep.to, dep.direction
+        );
+    }
+}
+
+// T5: Flow from main reaches utils.py::process (P1 HARD GATE)
+#[test]
+fn test_cross_file_flow_reaches_resolved_target() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    assert!(
+        !result.manifest.flows.is_empty(),
+        "flows must be populated for cross-file flow_trace fixture"
+    );
+
+    let main_flow = result
+        .manifest
+        .flows
+        .iter()
+        .find(|f| f.entry.contains("main"));
+    assert!(
+        main_flow.is_some(),
+        "Must have a flow from entry point 'main'. Got entries: {:?}",
+        result
+            .manifest
+            .flows
+            .iter()
+            .map(|f| &f.entry)
+            .collect::<Vec<_>>()
+    );
+    let flow = main_flow.unwrap();
+
+    let step_entities: Vec<&str> = flow.steps.iter().map(|s| s.entity.as_str()).collect();
+    let reaches_utils = step_entities
+        .iter()
+        .any(|e| e.contains("utils") && !e.contains("import::"));
+    assert!(
+        reaches_utils,
+        "Flow from main must reach utils.py::process (resolved target), \
+         not stop at import proxy. Got steps: {:?}",
+        step_entities
+    );
+}
+
+// T6: Cross-file flow steps have correct file attribution (no import:: prefix)
+#[test]
+fn test_cross_file_flow_steps_have_file_attribution() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    assert!(
+        !result.manifest.flows.is_empty(),
+        "flows must be populated (precondition)"
+    );
+
+    let main_flow = result
+        .manifest
+        .flows
+        .iter()
+        .find(|f| f.entry.contains("main"));
+    assert!(main_flow.is_some(), "main flow must exist (precondition)");
+    let flow = main_flow.unwrap();
+
+    let has_import_prefix = flow.steps.iter().any(|s| s.entity.contains("import::"));
+    assert!(
+        !has_import_prefix,
+        "Flow steps must not contain 'import::' prefix — that's an internal proxy. \
+         Got steps: {:?}",
+        flow.steps.iter().map(|s| &s.entity).collect::<Vec<_>>()
+    );
+}
+
+// T7: Circular import does not infinite-loop (adversarial)
+#[test]
+fn test_circular_import_flow_trace_terminates() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/circular_import");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    // This MUST complete without hanging.
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // The real assertion: we reached this line (no infinite loop)
+    assert!(
+        result.manifest.metadata.entity_count > 0,
+        "circular_import fixture must produce entities"
+    );
+}
+
+// T8: Multi-hop cross-file flow (A → B → C)
+#[test]
+fn test_multi_hop_cross_file_flow() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    assert!(
+        !result.manifest.flows.is_empty(),
+        "flows must be populated (precondition)"
+    );
+
+    let main_flow = result
+        .manifest
+        .flows
+        .iter()
+        .find(|f| f.entry.contains("main"));
+    assert!(main_flow.is_some(), "main flow must exist (precondition)");
+    let flow = main_flow.unwrap();
+
+    // main.py::main → utils.py::process → helpers.py::format_output
+    let step_entities: Vec<&str> = flow.steps.iter().map(|s| s.entity.as_str()).collect();
+    let reaches_helpers = step_entities
+        .iter()
+        .any(|e| e.contains("helpers") || e.contains("format_output"));
+    assert!(
+        reaches_helpers,
+        "Multi-hop flow must reach helpers.py::format_output. \
+         main → process (utils.py) → format_output (helpers.py). \
+         Got steps: {:?}",
+        step_entities
+    );
+}
+
+// T9: Unresolved import produces partial path (no crash)
+#[test]
+fn test_unresolved_import_in_flow_produces_partial_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("main.py"),
+        "from nonexistent_module import magic\n\ndef main():\n    result = magic()\n    return result\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // Must not crash. Flow steps must not contain empty entities.
+    for flow in &result.manifest.flows {
+        for step in &flow.steps {
+            assert!(
+                !step.entity.is_empty(),
+                "Flow step entity must not be empty (would indicate SymbolId::default() leak)"
+            );
+        }
+    }
+}
+
+// T10: Flow depth limit applies across file boundaries
+#[test]
+fn test_flow_depth_limit_applies_cross_file() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    for flow in &result.manifest.flows {
+        assert!(
+            flow.steps.len() <= 64,
+            "Flow path must respect MAX_FLOW_DEPTH (64). \
+             Got {} steps in flow from entry '{}'",
+            flow.steps.len(),
+            flow.entry
+        );
+    }
+}
+
+// R1: Regression — no import:: prefix in flow step entity IDs
+#[test]
+fn test_no_import_prefix_in_flow_step_entities() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/flow_trace");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    for flow in &result.manifest.flows {
+        for step in &flow.steps {
+            assert!(
+                !step.entity.starts_with("import::"),
+                "Flow step entity must not start with 'import::' prefix. Got: '{}'",
+                step.entity
+            );
+        }
+    }
 }
