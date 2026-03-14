@@ -886,11 +886,18 @@ mod tests {
         assert_eq!(results.len(), 1, "Should detect exactly 1 cycle");
 
         let d = &results[0];
-        assert_eq!(d.evidence.len(), 3, "Three-step cycle needs 3 evidence entries");
+        assert_eq!(
+            d.evidence.len(),
+            3,
+            "Three-step cycle needs 3 evidence entries"
+        );
 
         // Each evidence entry should reference specific cross-module calls
         for ev in &d.evidence {
-            assert!(!ev.observation.is_empty(), "Evidence observation must not be empty");
+            assert!(
+                !ev.observation.is_empty(),
+                "Evidence observation must not be empty"
+            );
         }
 
         // Verify all 3 modules are in the entity
@@ -968,8 +975,12 @@ mod tests {
 
         // Each diagnostic mentions different modules
         let all_entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
-        let has_ab = all_entities.iter().any(|e| e.contains("mod_a.py") && e.contains("mod_b.py"));
-        let has_xy = all_entities.iter().any(|e| e.contains("mod_x.py") && e.contains("mod_y.py"));
+        let has_ab = all_entities
+            .iter()
+            .any(|e| e.contains("mod_a.py") && e.contains("mod_b.py"));
+        let has_xy = all_entities
+            .iter()
+            .any(|e| e.contains("mod_x.py") && e.contains("mod_y.py"));
         assert!(has_ab, "Should have A-B cycle");
         assert!(has_xy, "Should have X-Y cycle");
     }
@@ -1100,7 +1111,10 @@ mod tests {
     fn test_circular_dependency_empty_graph_no_panic() {
         let graph = Graph::new();
         let results = circular_dependency::detect(&graph);
-        assert!(results.is_empty(), "Empty graph must produce zero diagnostics");
+        assert!(
+            results.is_empty(),
+            "Empty graph must produce zero diagnostics"
+        );
     }
 
     #[test]
@@ -1331,12 +1345,21 @@ mod tests {
             "validate (has caller) should NOT be flagged"
         );
 
-        let d = results.iter().find(|d| d.entity.contains("process_user")).unwrap();
+        let d = results
+            .iter()
+            .find(|d| d.entity.contains("process_user"))
+            .unwrap();
         assert_eq!(d.pattern, DiagnosticPattern::OrphanedImplementation);
         assert_eq!(d.severity, Severity::Warning);
-        assert_eq!(d.confidence, Confidence::Moderate, "Public method should be Moderate confidence");
+        assert_eq!(
+            d.confidence,
+            Confidence::Moderate,
+            "Public method should be Moderate confidence"
+        );
         assert!(
-            d.evidence.iter().any(|e| e.observation.contains("0 callers")),
+            d.evidence
+                .iter()
+                .any(|e| e.observation.contains("0 callers")),
             "Evidence must mention 0 callers"
         );
         assert!(d.suggestion.len() > 10, "Suggestion must be actionable");
@@ -1572,10 +1595,7 @@ mod tests {
         ));
 
         let results = orphaned_implementation::detect(&graph);
-        assert!(
-            results.is_empty(),
-            "Methods in test files must be excluded"
-        );
+        assert!(results.is_empty(), "Methods in test files must be excluded");
     }
 
     #[test]
@@ -1707,7 +1727,10 @@ mod tests {
             "_private_fn (private) should NOT be flagged"
         );
 
-        let d = results.iter().find(|d| d.entity.contains("helper_b")).unwrap();
+        let d = results
+            .iter()
+            .find(|d| d.entity.contains("helper_b"))
+            .unwrap();
         assert_eq!(d.pattern, DiagnosticPattern::MissingReexport);
         assert_eq!(d.severity, Severity::Info);
         assert_eq!(d.confidence, Confidence::Moderate);
@@ -2017,7 +2040,10 @@ mod tests {
         let results = missing_reexport::detect(&graph);
         // Name "parse" in init matches both — no crash, no panic
         // At most 0 diagnostics for "parse" (name-match satisfies both)
-        let parse_diags: Vec<_> = results.iter().filter(|d| d.entity.contains("parse")).collect();
+        let parse_diags: Vec<_> = results
+            .iter()
+            .filter(|d| d.entity.contains("parse"))
+            .collect();
         assert!(
             parse_diags.is_empty(),
             "Name match for 'parse' in __init__.py should satisfy both submodules"
@@ -2054,9 +2080,9 @@ mod tests {
         let results = missing_reexport::detect(&graph);
         // Module symbol "sub" should NOT be flagged
         assert!(
-            !results.iter().any(|d| {
-                d.entity.contains("sub") && !d.entity.contains("real_fn")
-            }),
+            !results
+                .iter()
+                .any(|d| { d.entity.contains("sub") && !d.entity.contains("real_fn") }),
             "Module symbols should not be candidates for re-export checking"
         );
     }
@@ -2155,7 +2181,8 @@ mod tests {
             "imports.py",
             5,
         ));
-        let sys_import_id = graph.all_symbols()
+        let sys_import_id = graph
+            .all_symbols()
             .find(|(_, s)| s.name == "sys" && s.location.file.to_string_lossy().contains("imports"))
             .map(|(id, _)| id)
             .unwrap();
@@ -2265,7 +2292,11 @@ mod tests {
 
         // All diagnostics have non-empty evidence
         for d in &diagnostics {
-            assert!(!d.evidence.is_empty(), "Diagnostic must have evidence: {}", d.message);
+            assert!(
+                !d.evidence.is_empty(),
+                "Diagnostic must have evidence: {}",
+                d.message
+            );
         }
     }
 
@@ -2313,7 +2344,14 @@ mod tests {
         for ev in &d.evidence {
             assert!(!ev.observation.is_empty());
             // Must use failure-pattern language
-            let forbidden = ["vertex", "edge", "adjacency", "node", "in-degree", "out-degree"];
+            let forbidden = [
+                "vertex",
+                "edge",
+                "adjacency",
+                "node",
+                "in-degree",
+                "out-degree",
+            ];
             for term in &forbidden {
                 assert!(
                     !ev.observation.to_lowercase().contains(term),
@@ -2325,8 +2363,9 @@ mod tests {
         }
         // At least one evidence entry references specific file paths
         assert!(
-            d.evidence.iter().any(|e| e.observation.contains("mod_a.py")
-                || e.observation.contains("mod_b.py")),
+            d.evidence
+                .iter()
+                .any(|e| e.observation.contains("mod_a.py") || e.observation.contains("mod_b.py")),
             "Evidence should reference specific file paths"
         );
     }
@@ -2342,14 +2381,19 @@ mod tests {
             .expect("Should find process_user diagnostic");
 
         assert!(
-            d.evidence.iter().any(|e| e.observation.contains("0 callers")),
+            d.evidence
+                .iter()
+                .any(|e| e.observation.contains("0 callers")),
             "Evidence must mention 0 callers"
         );
         assert!(
             d.evidence.iter().any(|e| e.location.is_some()),
             "Evidence must have location"
         );
-        assert_ne!(d.suggestion, d.message, "Suggestion must differ from message");
+        assert_ne!(
+            d.suggestion, d.message,
+            "Suggestion must differ from message"
+        );
         assert!(d.suggestion.len() > 10);
     }
 
@@ -2364,7 +2408,9 @@ mod tests {
             .expect("Should find helper_b diagnostic");
 
         assert!(
-            d.evidence.iter().any(|e| e.observation.contains("__init__.py")),
+            d.evidence
+                .iter()
+                .any(|e| e.observation.contains("__init__.py")),
             "Evidence should mention __init__.py as parent module"
         );
         assert!(
@@ -2500,8 +2546,14 @@ mod tests {
 
         let results = orphaned_implementation::detect(&graph);
 
-        let pub_d = results.iter().find(|d| d.entity.contains("pub_method")).unwrap();
-        let priv_d = results.iter().find(|d| d.entity.contains("_priv_method")).unwrap();
+        let pub_d = results
+            .iter()
+            .find(|d| d.entity.contains("pub_method"))
+            .unwrap();
+        let priv_d = results
+            .iter()
+            .find(|d| d.entity.contains("_priv_method"))
+            .unwrap();
 
         assert_eq!(
             pub_d.confidence,
@@ -2766,9 +2818,16 @@ mod tests {
         }
 
         // Evidence mentions specific symbol names
-        let all_observations: String = d.evidence.iter().map(|e| e.observation.clone()).collect::<Vec<_>>().join(" ");
+        let all_observations: String = d
+            .evidence
+            .iter()
+            .map(|e| e.observation.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            all_observations.contains("func_a") || all_observations.contains("func_b") || all_observations.contains("func_c"),
+            all_observations.contains("func_a")
+                || all_observations.contains("func_b")
+                || all_observations.contains("func_c"),
             "Evidence should mention specific symbol names"
         );
     }
@@ -2808,14 +2867,22 @@ mod tests {
         ));
 
         let results = orphaned_implementation::detect(&graph);
-        let d = results.iter().find(|d| d.entity.contains("orphan_method")).unwrap();
+        let d = results
+            .iter()
+            .find(|d| d.entity.contains("orphan_method"))
+            .unwrap();
 
         // Evidence should mention the scope of analysis
         assert!(
-            d.evidence.iter().any(|e| e.observation.contains("0 callers")
-                && e.observation.contains("analyzed files")),
+            d.evidence
+                .iter()
+                .any(|e| e.observation.contains("0 callers")
+                    && e.observation.contains("analyzed files")),
             "Evidence should quantify analysis scope. Got: {:?}",
-            d.evidence.iter().map(|e| &e.observation).collect::<Vec<_>>()
+            d.evidence
+                .iter()
+                .map(|e| &e.observation)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2876,7 +2943,11 @@ mod tests {
         );
 
         let results = circular_dependency::detect(&graph);
-        assert_eq!(results.len(), 1, "Only the cross-module cycle should be detected");
+        assert_eq!(
+            results.len(),
+            1,
+            "Only the cross-module cycle should be detected"
+        );
 
         let d = &results[0];
         // Only boundary_a.py and boundary_b.py should be in the cycle
