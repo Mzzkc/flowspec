@@ -49,6 +49,9 @@ cargo fmt --check              # Format check
 cargo tarpaulin                # Coverage (target: 89%)
 ```
 
+**Before committing:** Always run `cargo fmt` to auto-format your code.
+`cargo fmt --check` is enforced by CI — unformatted code will fail validation.
+
 ## Module Structure
 
 ```

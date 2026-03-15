@@ -2403,7 +2403,28 @@ fn test_flow_depth_limit_applies_cross_file() {
     }
 }
 
-// R1: Regression — no import:: prefix in flow step entity IDs
+// R1: Regression — diagnostics still fire after stale_reference pattern addition
+#[test]
+fn test_diagnostics_still_fire_after_stale_reference_addition() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/simple_import");
+
+    let config = Config::load(&fixture_dir, None).unwrap();
+    let result = analyze(&fixture_dir, &config, &[]).unwrap();
+
+    // The diagnostic pipeline must still produce findings on a cross-file project.
+    // Adding stale_reference to the pattern registry must not break existing patterns.
+    assert!(
+        !result.manifest.diagnostics.is_empty(),
+        "Diagnostics must still fire on cross-file fixture after stale_reference addition. \
+         If this fails, adding stale_reference to the pattern registry may have broken \
+         the diagnostic pipeline."
+    );
+}
+
+// R1b: Regression — no import:: prefix in flow step entity IDs
 #[test]
 fn test_no_import_prefix_in_flow_step_entities() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
