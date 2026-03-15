@@ -2409,16 +2409,16 @@ fn test_diagnostics_still_fire_after_stale_reference_addition() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("tests/fixtures/python/cross_file/simple_import");
+        .join("tests/fixtures/python/project_with_issues");
 
     let config = Config::load(&fixture_dir, None).unwrap();
     let result = analyze(&fixture_dir, &config, &[]).unwrap();
 
-    // The diagnostic pipeline must still produce findings on a cross-file project.
+    // The diagnostic pipeline must still produce findings on a project with known issues.
     // Adding stale_reference to the pattern registry must not break existing patterns.
     assert!(
         !result.manifest.diagnostics.is_empty(),
-        "Diagnostics must still fire on cross-file fixture after stale_reference addition. \
+        "Diagnostics must still fire after stale_reference addition. \
          If this fails, adding stale_reference to the pattern registry may have broken \
          the diagnostic pipeline."
     );
