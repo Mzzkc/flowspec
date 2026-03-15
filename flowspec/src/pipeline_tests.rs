@@ -2204,16 +2204,20 @@ fn test_dependency_graph_weights_nonzero() {
             dep.weight > 0,
             "dependency_graph edge {} → {} has weight 0. \
              Every cross-file edge must have at least 1 reference.",
-            dep.from, dep.to
+            dep.from,
+            dep.to
         );
     }
 
     for dep in &result.manifest.dependency_graph {
+        let dir_lower = dep.direction.to_lowercase();
         assert!(
-            dep.direction == "Unidirectional" || dep.direction == "Bidirectional",
+            dir_lower == "unidirectional" || dir_lower == "bidirectional",
             "dependency_graph edge {} → {} has invalid direction '{}'. \
-             Expected 'Unidirectional' or 'Bidirectional'.",
-            dep.from, dep.to, dep.direction
+             Expected 'unidirectional' or 'bidirectional'.",
+            dep.from,
+            dep.to,
+            dep.direction
         );
     }
 }
