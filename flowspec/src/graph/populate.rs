@@ -621,10 +621,24 @@ fn find_module_key_for_file(
 }
 
 /// Resolves `super::` and `self::` to absolute `crate::` paths.
+/// Handles chained prefixes like `self::super::` by normalizing first.
 fn resolve_relative_rust_path(module_name: &str, importing_module_key: &str) -> String {
-    if let Some(rest) = module_name.strip_prefix("self::") {
+    // Normalize self::super → super (self:: is the current module, super:: goes up)
+    let normalized = if module_name.starts_with("self::super") {
+        &module_name[6..] // strip "self::" prefix, leaving "super" or "super::..."
+    } else {
+        module_name
+    };
+    if let Some(rest) = normalized.strip_prefix("self::") {
         format!("{}::{}", importing_module_key, rest)
-    } else if let Some(rest) = module_name.strip_prefix("super::") {
+    } else if normalized == "super" {
+        // Bare super (from self::super normalization) → parent module
+        if let Some(parent_end) = importing_module_key.rfind("::") {
+            importing_module_key[..parent_end].to_string()
+        } else {
+            "crate".to_string()
+        }
+    } else if let Some(rest) = normalized.strip_prefix("super::") {
         if let Some(parent_end) = importing_module_key.rfind("::") {
             let parent = &importing_module_key[..parent_end];
             format!("{}::{}", parent, rest)
