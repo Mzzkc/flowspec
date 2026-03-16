@@ -15,6 +15,8 @@ pub mod contract_mismatch;
 pub mod data_dead_end;
 /// Shared exclusion logic — path relativization and symbol filtering helpers.
 pub mod exclusion;
+/// Old/new patterns coexisting with split callers.
+pub mod incomplete_migration;
 /// Connected components with zero inbound external edges.
 pub mod isolated_cluster;
 /// Cross-module references violating user-defined layer rules.
@@ -100,6 +102,10 @@ pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) 
         (
             DiagnosticPattern::ContractMismatch,
             contract_mismatch::detect(graph, project_root),
+        ),
+        (
+            DiagnosticPattern::IncompleteMigration,
+            incomplete_migration::detect(graph, project_root),
         ),
         // Unimplemented patterns return empty Vec (registered but inactive)
     ];
