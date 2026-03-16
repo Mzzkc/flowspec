@@ -519,6 +519,73 @@ fn insert_boundaries(graph: &mut Graph, boundaries: &[Boundary], scope_id_map: &
     }
 }
 
+/// Resolves a JS relative import path to a file in the module map.
+///
+/// For `./provider` imported from `/project/src/consumer.js`, resolves to
+/// `/project/src/provider.js` by:
+/// 1. Getting the importing file's directory (`/project/src/`)
+/// 2. Joining the relative path (`./provider` → `/project/src/provider`)
+/// 3. Looking up the resolved path in the module map
+///
+/// Handles `./`, `../`, and index file resolution. Returns `None` if the
+/// module is not found (external or missing file).
+fn resolve_js_relative_import(
+    import_path: &str,
+    importing_file: &std::path::Path,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let import_dir = importing_file.parent()?;
+
+    // Join the relative path with the importing file's directory
+    let resolved = import_dir.join(import_path);
+
+    // Normalize the path (resolve ../ components)
+    let normalized = normalize_path(&resolved);
+
+    // Try to find in module map by checking each entry's absolute path
+    // The module map values are absolute paths; we compare against our resolved path
+    for file_path in module_map.values() {
+        let file_without_ext = file_path.with_extension("");
+        if file_without_ext == normalized {
+            return Some(file_path.clone());
+        }
+        // Also check index file: ./utils → utils/index.js
+        if let Some(file_stem) = file_path.file_stem().and_then(|s| s.to_str()) {
+            if file_stem == "index" {
+                if let Some(parent) = file_path.parent() {
+                    if parent == normalized {
+                        return Some(file_path.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Normalizes a path by resolving `.` and `..` components without filesystem access.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Pop the last normal component if possible
+                if !components.is_empty() {
+                    components.pop();
+                }
+            }
+            std::path::Component::CurDir => {
+                // Skip . components
+            }
+            _ => {
+                components.push(component);
+            }
+        }
+    }
+    components.iter().collect()
+}
+
 /// Resolves cross-file import references by matching import symbols to definitions
 /// in other files via a module-to-file mapping.
 ///
@@ -554,7 +621,8 @@ pub fn resolve_cross_file_imports(
 
     // Phase 1: Collect import symbols that need resolution.
     // We collect IDs first to avoid borrow checker issues with simultaneous read+write.
-    let mut imports_to_resolve: Vec<(SymbolId, String, String)> = Vec::new(); // (id, module_name, lookup_name)
+    // Tuple: (id, module_name, lookup_name, importing_file_path)
+    let mut imports_to_resolve: Vec<(SymbolId, String, String, std::path::PathBuf)> = Vec::new();
 
     for (id, symbol) in graph.all_symbols() {
         if !symbol.annotations.contains(&"import".to_string()) {
@@ -586,7 +654,7 @@ pub fn resolve_cross_file_imports(
             .map(|s| s.to_string())
             .unwrap_or_else(|| symbol.name.clone());
 
-        imports_to_resolve.push((id, module_name, lookup_name));
+        imports_to_resolve.push((id, module_name, lookup_name, symbol.location.file.clone()));
     }
 
     // Phase 2: Build a reverse index from file path to symbols defined in that file.
@@ -608,8 +676,15 @@ pub fn resolve_cross_file_imports(
     let mut new_references: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
     let mut resolution_updates: Vec<(SymbolId, ResolutionStatus)> = Vec::new();
 
-    for (import_id, module_name, lookup_name) in &imports_to_resolve {
-        let target_file = module_map.get(module_name.as_str());
+    for (import_id, module_name, lookup_name, importing_file) in &imports_to_resolve {
+        // For JS relative imports (./foo, ../bar), resolve relative to the importing file
+        let target_file = if module_name.starts_with("./") || module_name.starts_with("../") {
+            resolve_js_relative_import(module_name, importing_file, module_map)
+        } else {
+            // Python dotted modules or non-relative JS imports
+            module_map.get(module_name.as_str()).cloned()
+        };
+        let target_file = target_file.as_ref();
 
         let Some(target_file) = target_file else {
             // Module not found in map — likely stdlib/third-party. Leave as-is.
@@ -3003,16 +3078,19 @@ def setup():
     }
 
     #[test]
-    fn test_module_map_ignores_non_python() {
+    fn test_module_map_includes_python_and_js() {
         let files = vec![
             PathBuf::from("project/utils.py"),
             PathBuf::from("project/app.js"),
         ];
         let map = crate::build_module_map(&files);
-        assert!(map.contains_key("utils"));
         assert!(
-            !map.contains_key("app"),
-            "JS files must not be in module map"
+            map.contains_key("utils"),
+            "Python files must be in module map"
+        );
+        assert!(
+            map.contains_key("app"),
+            "JS files must be in module map (cross-file resolution)"
         );
     }
 

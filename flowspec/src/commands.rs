@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{FlowspecError, ManifestError};
 use crate::manifest::types::FlowEntry;
-use crate::manifest::OutputFormatter;
+use crate::manifest::{validate_manifest_size, OutputFormatter};
 use crate::{Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter, YamlFormatter};
 
 /// Trace direction for flow tracing commands.
@@ -60,6 +60,8 @@ pub fn run_analyze(
     let result = crate::analyze(&canonical, &config, &normalized)?;
 
     let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
+
+    validate_manifest_size(&output, result.source_bytes)?;
 
     write_output(&output, output_path)?;
 

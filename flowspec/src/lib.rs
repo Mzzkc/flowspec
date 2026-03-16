@@ -20,12 +20,19 @@
 //! for different consumers (YAML for agents, JSON for tools, SARIF for CI,
 //! summary for humans).
 
+/// Diagnostic detection, flow tracing, and boundary analysis.
 pub mod analyzer;
+/// Extracted CLI command logic — testable library functions for analyze, diagnose, trace.
 pub mod commands;
+/// Configuration loading and validation.
 pub mod config;
+/// Library-level error types — `FlowspecError` and `ManifestError`.
 pub mod error;
+/// Persistent in-memory analysis graph — flat symbol tables with bidirectional edges.
 pub mod graph;
+/// Output formatting — YAML, JSON, SARIF, summary. One formatter per output format.
 pub mod manifest;
+/// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
 
 #[cfg(test)]
@@ -36,6 +43,12 @@ mod pipeline_tests;
 
 #[cfg(test)]
 mod pattern_integration_tests;
+
+#[cfg(test)]
+mod cycle10_surface_tests;
+
+#[cfg(test)]
+mod cycle10_js_cross_file_tests;
 
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
@@ -75,7 +88,7 @@ pub enum OutputFormat {
     Json,
     /// SARIF v2.1.0 output for CI integration (GitHub Code Scanning, Azure DevOps).
     Sarif,
-    /// Human-readable summary (not yet implemented).
+    /// Human-readable summary — compact plain-text output (~2K tokens).
     Summary,
 }
 
@@ -621,40 +634,114 @@ fn format_symbol_kind(kind: SymbolKind) -> String {
     .to_string()
 }
 
-/// Builds a mapping from Python module names to file paths.
+/// JS/TS file extensions recognized for module mapping.
+const JS_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "ts", "tsx"];
+
+/// Builds a mapping from module names to file paths for both Python and JS/TS.
 ///
-/// Maps file paths to their Python module names using standard Python conventions:
+/// **Python:** Maps file paths to dotted module names using standard conventions:
 /// - `utils.py` → `"utils"`
 /// - `my_package/__init__.py` → `"my_package"`
 /// - `my_package/core.py` → `"my_package.core"`
 ///
-/// Only Python files (`.py` extension) are included. The mapping uses paths
-/// relative to the discovered project structure, with path separators converted
-/// to dots.
+/// **JavaScript/TypeScript:** Maps file paths to path-based keys (relative to
+/// the common prefix, without extension):
+/// - `utils.js` → `"utils"`
+/// - `src/helpers.js` → `"src/helpers"`
+/// - `components/App.tsx` → `"components/App"`
+///
+/// Both Python and JS/TS entries coexist in the same map. The resolution pass
+/// uses the `"from:<module>"` annotation to determine the key format.
 pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
 
+    // Phase 1: Python files (dotted module names)
     let py_files: Vec<&PathBuf> = files
         .iter()
         .filter(|f| f.extension().map(|e| e == "py").unwrap_or(false))
         .collect();
 
-    if py_files.is_empty() {
-        return map;
+    if !py_files.is_empty() {
+        let common_prefix = find_common_prefix(&py_files);
+        for file in &py_files {
+            let rel = file.strip_prefix(&common_prefix).unwrap_or(file);
+            let module_name = path_to_module_name(rel);
+            if !module_name.is_empty() {
+                map.insert(module_name, (*file).clone());
+            }
+        }
     }
 
-    // Find the common prefix (project root) for all Python files
-    let common_prefix = find_common_prefix(&py_files);
+    // Phase 2: JS/TS files (path-based keys, no extension)
+    let js_files: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| {
+            f.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| JS_EXTENSIONS.contains(&e))
+                .unwrap_or(false)
+        })
+        .collect();
 
-    for file in &py_files {
-        let rel = file.strip_prefix(&common_prefix).unwrap_or(file);
-        let module_name = path_to_module_name(rel);
-        if !module_name.is_empty() {
-            map.insert(module_name, (*file).clone());
+    if !js_files.is_empty() {
+        let js_prefix = find_js_common_prefix(&js_files);
+        for file in &js_files {
+            let rel = file.strip_prefix(&js_prefix).unwrap_or(file);
+            let key = js_path_to_module_key(rel);
+            if !key.is_empty() {
+                map.insert(key, (*file).clone());
+            }
         }
     }
 
     map
+}
+
+/// Finds the common directory prefix for JS/TS files.
+fn find_js_common_prefix(files: &[&PathBuf]) -> PathBuf {
+    if files.is_empty() {
+        return PathBuf::new();
+    }
+
+    let roots: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|f| f.parent().map(|p| p.to_path_buf()))
+        .collect();
+
+    if roots.is_empty() {
+        return PathBuf::new();
+    }
+
+    let mut prefix = roots[0].clone();
+    for root in &roots[1..] {
+        while !root.starts_with(&prefix) {
+            if !prefix.pop() {
+                return PathBuf::new();
+            }
+        }
+    }
+
+    prefix
+}
+
+/// Converts a relative JS/TS file path to a module map key.
+///
+/// Strips the file extension and converts to forward-slash path:
+/// - `helpers.js` → `"helpers"`
+/// - `src/utils.ts` → `"src/utils"`
+/// - `index.js` → `"index"`
+fn js_path_to_module_key(rel_path: &Path) -> String {
+    let stem = rel_path.with_extension("");
+    stem.components()
+        .filter_map(|c| {
+            if let std::path::Component::Normal(s) = c {
+                s.to_str()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Finds the project root directory for module name computation.
