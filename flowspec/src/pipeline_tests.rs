@@ -2942,10 +2942,7 @@ fn test_stale_reference_pipeline_integration() {
         old_fn_finding.is_some(),
         "old_function (imported from utils but renamed to new_function) must be \
          detected as a stale reference in the pipeline. Stale findings: {:?}",
-        stale_findings
-            .iter()
-            .map(|d| &d.entity)
-            .collect::<Vec<_>>()
+        stale_findings.iter().map(|d| &d.entity).collect::<Vec<_>>()
     );
 }
 
