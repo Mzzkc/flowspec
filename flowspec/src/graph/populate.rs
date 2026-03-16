@@ -309,6 +309,12 @@ fn insert_references(
                 // Resolve to: match callee name against same-file symbols
                 new_ref.to =
                     resolve_callee(callee_name, &new_ref.from, graph, symbol_id_map, symbols);
+
+                // Skip adding unresolved call edges — they create phantom edges to
+                // SymbolId::default() that pollute callees()/callers() results.
+                if new_ref.to == SymbolId::default() {
+                    continue;
+                }
             }
             ResolutionStatus::Partial(info) if info.starts_with("attribute_access:") => {
                 let root_name = &info["attribute_access:".len()..];

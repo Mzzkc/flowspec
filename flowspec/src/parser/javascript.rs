@@ -49,7 +49,7 @@ impl LanguageAdapter for JsAdapter {
     fn can_handle(&self, path: &Path) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
-            .map(|e| matches!(e, "js" | "jsx" | "ts" | "tsx" | "mjs"))
+            .map(|e| matches!(e, "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs"))
             .unwrap_or(false)
     }
 

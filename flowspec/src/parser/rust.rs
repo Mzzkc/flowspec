@@ -782,10 +782,25 @@ fn extract_call(result: &mut ParseResult, content: &[u8], path: &Path, node: Nod
                 last_identifier_segment(content, func_node)
             }
             "field_expression" => {
-                // object.method() — take the field name
-                func_node
+                // object.method() — extract field name, detect self.method() pattern
+                let field_name = func_node
                     .child_by_field_name("field")
-                    .map(|f| node_text(content, f).to_string())
+                    .map(|f| node_text(content, f).to_string());
+
+                if let Some(value_node) = func_node.child_by_field_name("value") {
+                    let value_text = node_text(content, value_node);
+                    if value_text == "self" || value_text == "Self" {
+                        // self.method() → emit "self.<field>" to trigger resolve_callee's
+                        // self-method resolution path (same pattern as Python adapter)
+                        field_name.map(|f| format!("self.{}", f))
+                    } else {
+                        // obj.method() → emit "obj.method" so resolve_callee's dotted
+                        // name check correctly marks it unresolved (type inference needed)
+                        field_name.map(|f| format!("{}.{}", value_text, f))
+                    }
+                } else {
+                    field_name
+                }
             }
             _ => {
                 // Fallback: use the full text

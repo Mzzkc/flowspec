@@ -50,9 +50,17 @@ mod cycle10_surface_tests;
 #[cfg(test)]
 mod cycle10_js_cross_file_tests;
 
+#[cfg(test)]
+mod cycle11_rust_call_tests;
+
+#[cfg(test)]
+mod cycle11_surface_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
-pub use analyzer::flow::{trace_all_flows, trace_flows_from, FlowPath, FlowStep as FlowPathStep};
+pub use analyzer::flow::{
+    trace_all_flows, trace_flows_from, trace_flows_to, FlowPath, FlowStep as FlowPathStep,
+};
 pub use analyzer::patterns::{run_all_patterns, run_patterns, PatternFilter};
 pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
@@ -562,7 +570,7 @@ fn discover_source_files(project_path: &Path) -> (Vec<std::path::PathBuf>, Vec<S
                         files.push(entry);
                         languages.insert("python".to_string());
                     }
-                    Some("js" | "jsx" | "mjs") => {
+                    Some("js" | "jsx" | "mjs" | "cjs") => {
                         files.push(entry);
                         languages.insert("javascript".to_string());
                     }
@@ -635,7 +643,7 @@ fn format_symbol_kind(kind: SymbolKind) -> String {
 }
 
 /// JS/TS file extensions recognized for module mapping.
-const JS_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "ts", "tsx"];
+const JS_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "cjs", "ts", "tsx"];
 
 /// Builds a mapping from module names to file paths for both Python and JS/TS.
 ///
