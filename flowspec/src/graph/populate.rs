@@ -782,6 +782,51 @@ pub fn resolve_cross_file_imports(
             resolution: ResolutionStatus::Resolved,
         });
     }
+
+    // Phase 5: Create transitive call edges through resolved import chains.
+    // When a call edge points to an import symbol that was just resolved,
+    // create a direct call edge from the caller to the resolved definition.
+    // This makes `callers(def_id)` return cross-file callers.
+    let mut transitive_calls: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
+    for (id, symbol) in graph.all_symbols() {
+        if !symbol.annotations.contains(&"import".to_string()) {
+            continue;
+        }
+        if symbol.resolution != ResolutionStatus::Resolved {
+            continue;
+        }
+        // Find the resolved definition target from import edges
+        let import_targets: Vec<SymbolId> = graph
+            .edges_from(id)
+            .iter()
+            .filter(|e| e.kind == EdgeKind::References)
+            .map(|e| e.target)
+            .collect();
+        if import_targets.is_empty() {
+            continue;
+        }
+        // Find callers of this import symbol (intra-file call resolution)
+        let callers_of_import = graph.callers(id);
+        for caller_id in callers_of_import {
+            if let Some(caller_sym) = graph.get_symbol(caller_id) {
+                let loc = caller_sym.location.clone();
+                for &target_id in &import_targets {
+                    transitive_calls.push((caller_id, target_id, loc.clone()));
+                }
+            }
+        }
+    }
+
+    for (caller_id, def_id, location) in transitive_calls {
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from: caller_id,
+            to: def_id,
+            kind: ReferenceKind::Call,
+            location,
+            resolution: ResolutionStatus::Resolved,
+        });
+    }
 }
 
 #[cfg(test)]
