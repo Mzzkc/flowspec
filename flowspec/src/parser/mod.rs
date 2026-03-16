@@ -5,9 +5,13 @@
 //! Parsers produce language-agnostic IR from source files. The engine
 //! never sees raw AST — only the IR produced here.
 
+/// Intermediate representation types — `Symbol`, `Scope`, `Reference`, `Boundary`, and their IDs.
 pub mod ir;
+/// JavaScript/TypeScript language adapter (ES modules, CommonJS, JSX/TSX).
 pub mod javascript;
+/// Python language adapter (imports, decorators, class hierarchy, attribute access).
 pub mod python;
+/// Rust language adapter (modules, traits, impls, use declarations).
 pub mod rust;
 
 use std::path::Path;

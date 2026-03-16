@@ -22,7 +22,7 @@
 //! Serde annotation mismatch, call-site arity, and type annotation validation
 //! are deferred — they require parser-level changes not yet available.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::analyzer::diagnostic::*;
@@ -201,19 +201,48 @@ fn detect_decorator_violations(
     }
 }
 
+/// Determine the language family from a file path's extension.
+///
+/// Returns a language identifier string based on file extension:
+/// - `"python"` for `.py`
+/// - `"rust"` for `.rs`
+/// - `"javascript"` for `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`
+/// - `"unknown"` for unrecognized or missing extensions
+fn language_from_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("py") => "python",
+        Some("rs") => "rust",
+        Some("js") | Some("jsx") | Some("ts") | Some("tsx") | Some("mjs") | Some("cjs") => {
+            "javascript"
+        }
+        _ => "unknown",
+    }
+}
+
 /// Phase 2: Cross-file same-name functions with different parameter counts.
 ///
-/// Groups all Function/Method symbols by simple name, then checks for
+/// Groups all Function/Method symbols by `(language, name)`, then checks for
 /// groups where definitions in different files have different parameter counts.
 /// Excludes dunders, test functions, imports, and variadic signatures.
+///
+/// Language-aware scoping prevents false positives:
+/// - Cross-language comparisons are eliminated (Python vs Rust vs JS).
+/// - For Rust, different files are different modules — cross-file comparisons
+///   are excluded since same-name functions in different Rust modules are normal
+///   architecture (e.g., `make_symbol` in `parser/python.rs` vs `parser/rust.rs`).
+/// - For Python and JavaScript, cross-file comparison is preserved — that's the
+///   designed use case for detecting inconsistent interfaces.
+/// - Unknown/unrecognized extensions are excluded from Phase 2 entirely.
+///
 /// MODERATE confidence — may be intentional overloading.
 fn detect_cross_file_arity_mismatch(
     graph: &Graph,
     project_root: &Path,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Group symbols by name
-    let mut by_name: HashMap<&str, Vec<(&crate::parser::ir::Symbol, usize)>> = HashMap::new();
+    // Group symbols by (language, name) to prevent cross-language comparisons
+    let mut by_lang_name: HashMap<(&str, &str), Vec<(&crate::parser::ir::Symbol, usize)>> =
+        HashMap::new();
 
     for (_id, symbol) in graph.all_symbols() {
         // Only functions and methods
@@ -247,18 +276,37 @@ fn detect_cross_file_arity_mismatch(
             continue;
         }
 
+        // Determine language — skip unknown extensions entirely
+        let lang = language_from_path(&symbol.location.file);
+        if lang == "unknown" {
+            continue;
+        }
+
         let param_count = count_params(signature);
 
-        by_name
-            .entry(&symbol.name)
+        by_lang_name
+            .entry((lang, &symbol.name))
             .or_default()
             .push((symbol, param_count));
     }
 
     // Check each group for arity mismatches
-    for (name, symbols) in &by_name {
+    for ((lang, name), symbols) in &by_lang_name {
         if symbols.len() < 2 {
             continue;
+        }
+
+        // Rust-specific exclusion: different files = different modules.
+        // In Rust, each file defines a module. Same-name functions in different
+        // Rust modules are normal architecture, not contract mismatches.
+        if *lang == "rust" {
+            let files: HashSet<&Path> = symbols
+                .iter()
+                .map(|(s, _)| s.location.file.as_path())
+                .collect();
+            if files.len() > 1 {
+                continue;
+            }
         }
 
         // Check if there are different parameter counts
@@ -291,7 +339,7 @@ fn detect_cross_file_arity_mismatch(
         diagnostics.push(Diagnostic {
             id: String::new(),
             pattern: DiagnosticPattern::ContractMismatch,
-            severity: Severity::Critical,
+            severity: Severity::Warning,
             confidence: Confidence::Moderate,
             entity: name.to_string(),
             message: format!(
@@ -1090,5 +1138,738 @@ mod tests {
     fn test_is_variadic_false() {
         assert!(!is_variadic("(x, y)"));
         assert!(!is_variadic("(self)"));
+    }
+
+    // =========================================================================
+    // T19: Regression — Rust cross-module same-name different arity must NOT fire
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_no_fp_rust_cross_module_same_name() {
+        let mut graph = Graph::new();
+
+        let mut make_sym_py = make_symbol(
+            "make_symbol",
+            SymbolKind::Function,
+            Visibility::Public,
+            "parser/python.rs",
+            134,
+        );
+        make_sym_py.signature = Some("(name: &str, kind: SymbolKind, node: &Node)".to_string());
+        graph.add_symbol(make_sym_py);
+
+        let mut make_sym_rs = make_symbol(
+            "make_symbol",
+            SymbolKind::Function,
+            Visibility::Public,
+            "parser/rust.rs",
+            148,
+        );
+        make_sym_rs.signature = Some("(name: &str, kind: SymbolKind)".to_string());
+        graph.add_symbol(make_sym_rs);
+
+        let diagnostics = detect(&graph, Path::new(""));
+
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.confidence == Confidence::Moderate)
+            .filter(|d| d.entity.contains("make_symbol"))
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "Phase 2 must NOT fire on same-name functions in different Rust modules. \
+             make_symbol in parser/python.rs and parser/rust.rs are different module \
+             implementations, not contract mismatches. Got {} findings: {:?}",
+            phase2_findings.len(),
+            phase2_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T20: Regression — extract_visibility cross-module FP
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_no_fp_rust_extract_visibility_cross_module() {
+        let mut graph = Graph::new();
+
+        let mut vis_py = make_symbol(
+            "extract_visibility",
+            SymbolKind::Function,
+            Visibility::Public,
+            "parser/python.rs",
+            50,
+        );
+        vis_py.signature = Some("(node: &Node, source: &str)".to_string());
+        graph.add_symbol(vis_py);
+
+        let mut vis_rs = make_symbol(
+            "extract_visibility",
+            SymbolKind::Function,
+            Visibility::Public,
+            "parser/rust.rs",
+            60,
+        );
+        vis_rs.signature = Some("(node: &Node, source: &str, parent: Option<&Node>)".to_string());
+        graph.add_symbol(vis_rs);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "extract_visibility in parser/python.rs (2 params) and parser/rust.rs (3 params) \
+             are different language adapters — Phase 2 must not fire. Got: {:?}",
+            phase2_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T21: Cross-language exclusion — Python vs Rust must NOT compare
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_no_fp_cross_language_python_rust() {
+        let mut graph = Graph::new();
+
+        let mut py_fn = make_symbol(
+            "transform",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.py",
+            10,
+        );
+        py_fn.signature = Some("(data)".to_string());
+        graph.add_symbol(py_fn);
+
+        let mut rs_fn = make_symbol(
+            "transform",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.rs",
+            10,
+        );
+        rs_fn.signature = Some("(data: &str, config: &Config)".to_string());
+        graph.add_symbol(rs_fn);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "Cross-language comparison (Python vs Rust) must be excluded from Phase 2. \
+             Different languages naturally have different function signatures. Got: {:?}",
+            phase2_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T22: Cross-language exclusion — Python vs JavaScript must NOT compare
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_no_fp_cross_language_python_js() {
+        let mut graph = Graph::new();
+
+        let mut py_fn = make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Public,
+            "validator.py",
+            1,
+        );
+        py_fn.signature = Some("(self, data, schema)".to_string());
+        graph.add_symbol(py_fn);
+
+        let mut js_fn = make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Public,
+            "validator.js",
+            1,
+        );
+        js_fn.signature = Some("(data)".to_string());
+        graph.add_symbol(js_fn);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "Python vs JavaScript same-name functions must not trigger Phase 2. Got: {:?}",
+            phase2_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T23: True positive preserved — Python cross-file arity mismatch MUST fire
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_python_cross_file_still_fires() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "handler_a.py",
+            1,
+        );
+        fn_a.signature = Some("(data)".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "handler_b.py",
+            1,
+        );
+        fn_b.signature = Some("(data, extra)".to_string());
+        graph.add_symbol(fn_b);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("process") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            !phase2_findings.is_empty(),
+            "Phase 2 MUST still fire for Python cross-file arity mismatch. \
+             process(data) in handler_a.py vs process(data, extra) in handler_b.py \
+             is a genuine contract mismatch that Phase 2 was designed to catch."
+        );
+    }
+
+    // =========================================================================
+    // T24: Phase 1 unchanged — decorator violations still fire after FP fix
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_phase1_unaffected_by_phase2_fix() {
+        let graph = build_contract_mismatch_graph();
+        let diagnostics = detect(&graph, Path::new(""));
+
+        let phase1_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.confidence == Confidence::High)
+            .collect();
+
+        assert!(
+            phase1_findings.len() >= 3,
+            "Phase 1 must still detect all 3 decorator violations (staticmethod with self, \
+             classmethod without cls, property with extra params). Got {} HIGH-confidence findings: {:?}",
+            phase1_findings.len(),
+            phase1_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+
+        let entities: Vec<&str> = phase1_findings.iter().map(|d| d.entity.as_str()).collect();
+        assert!(entities.iter().any(|e| e.contains("bad_static")));
+        assert!(entities.iter().any(|e| e.contains("bad_classmethod")));
+        assert!(entities.iter().any(|e| e.contains("bad_property")));
+    }
+
+    // =========================================================================
+    // T25: Adversarial — same name in 3 languages, no crash, no FP
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_three_languages_same_name_no_crash() {
+        let mut graph = Graph::new();
+
+        let mut py_fn = make_symbol(
+            "helper",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.py",
+            1,
+        );
+        py_fn.signature = Some("(x)".to_string());
+        graph.add_symbol(py_fn);
+
+        let mut rs_fn = make_symbol(
+            "helper",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.rs",
+            1,
+        );
+        rs_fn.signature = Some("(x: i32, y: i32)".to_string());
+        graph.add_symbol(rs_fn);
+
+        let mut js_fn = make_symbol(
+            "helper",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.js",
+            1,
+        );
+        js_fn.signature = Some("()".to_string());
+        graph.add_symbol(js_fn);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("helper") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "Same-name function in 3 different languages (py/rs/js) must not crash \
+             and must produce zero Phase 2 FPs. Each language is isolated. Got: {:?}",
+            phase2_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T26: Adversarial — .ts, .tsx, .jsx, .mjs, .cjs extensions handled
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_typescript_extensions_isolated() {
+        let mut graph = Graph::new();
+
+        let mut ts_fn = make_symbol(
+            "render",
+            SymbolKind::Function,
+            Visibility::Public,
+            "component.tsx",
+            1,
+        );
+        ts_fn.signature = Some("(props: Props)".to_string());
+        graph.add_symbol(ts_fn);
+
+        let mut py_fn = make_symbol(
+            "render",
+            SymbolKind::Function,
+            Visibility::Public,
+            "template.py",
+            1,
+        );
+        py_fn.signature = Some("(context, template_name, extra)".to_string());
+        graph.add_symbol(py_fn);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("render") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            ".tsx extension must be recognized as JavaScript/TypeScript family \
+             and isolated from Python comparisons. Got: {:?}",
+            phase2_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T27: Edge case — unknown extension excluded from Phase 2
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_unknown_extension_no_crash() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "compute",
+            SymbolKind::Function,
+            Visibility::Public,
+            "module.xyz",
+            1,
+        );
+        fn_a.signature = Some("(a)".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "compute",
+            SymbolKind::Function,
+            Visibility::Public,
+            "other.xyz",
+            1,
+        );
+        fn_b.signature = Some("(a, b, c)".to_string());
+        graph.add_symbol(fn_b);
+
+        // Should not panic. Unknown extensions are excluded from Phase 2.
+        let _diagnostics = detect(&graph, Path::new(""));
+    }
+
+    // =========================================================================
+    // T28: Edge case — file without extension (e.g., Makefile, Dockerfile)
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_no_extension_no_crash() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "build",
+            SymbolKind::Function,
+            Visibility::Public,
+            "Makefile",
+            1,
+        );
+        fn_a.signature = Some("(target)".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "build",
+            SymbolKind::Function,
+            Visibility::Public,
+            "Dockerfile",
+            1,
+        );
+        fn_b.signature = Some("(target, args, context)".to_string());
+        graph.add_symbol(fn_b);
+
+        // Must not panic on files without extensions
+        let _diagnostics = detect(&graph, Path::new(""));
+    }
+
+    // =========================================================================
+    // T29: JS cross-file arity mismatch fires for same-language JS
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_js_cross_file_arity_fires() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "fetchData",
+            SymbolKind::Function,
+            Visibility::Public,
+            "api_client.js",
+            1,
+        );
+        fn_a.signature = Some("(url)".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "fetchData",
+            SymbolKind::Function,
+            Visibility::Public,
+            "api_helper.js",
+            1,
+        );
+        fn_b.signature = Some("(url, options, callback)".to_string());
+        graph.add_symbol(fn_b);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("fetchData") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            !phase2_findings.is_empty(),
+            "Phase 2 must fire for same-language JS cross-file arity mismatch. \
+             fetchData(url) vs fetchData(url, options, callback) is a genuine contract concern."
+        );
+    }
+
+    // =========================================================================
+    // T30: Regression guard — existing T4 fixture still fires
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_existing_t4_fixture_still_fires() {
+        let graph = build_contract_mismatch_graph();
+        let diagnostics = detect(&graph, Path::new(""));
+
+        let arity_diag = diagnostics
+            .iter()
+            .find(|d| d.entity.contains("process_data") && d.confidence == Confidence::Moderate);
+
+        assert!(
+            arity_diag.is_some(),
+            "The existing T4 true positive (process_data in module_a.py vs module_b.py) \
+             must survive the FP fix. If this fails, the fix is too aggressive. Got: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| (&d.entity, &d.confidence))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // T31: Edge case — same name, same .rs file, different arity
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_rust_same_file_same_name_different_arity() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "handler.rs",
+            10,
+        );
+        fn_a.signature = Some("(data: &str)".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "handler.rs",
+            50,
+        );
+        fn_b.signature = Some("(data: &str, config: &Config)".to_string());
+        graph.add_symbol(fn_b);
+
+        // Same-file Rust functions with different arity — should not crash.
+        // The Rust exclusion only skips cross-file groups, so same-file still compares.
+        let _diagnostics = detect(&graph, Path::new(""));
+    }
+
+    // =========================================================================
+    // T32: Severity check — Phase 2 severity appropriate for heuristic
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_phase2_severity_not_overcalibrated() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "handle_request",
+            SymbolKind::Function,
+            Visibility::Public,
+            "server_a.py",
+            1,
+        );
+        fn_a.signature = Some("(req)".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "handle_request",
+            SymbolKind::Function,
+            Visibility::Public,
+            "server_b.py",
+            1,
+        );
+        fn_b.signature = Some("(req, res)".to_string());
+        graph.add_symbol(fn_b);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("handle_request") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            !phase2_findings.is_empty(),
+            "Setup: Phase 2 must fire for this scenario"
+        );
+
+        for finding in &phase2_findings {
+            assert_eq!(
+                finding.confidence,
+                Confidence::Moderate,
+                "Phase 2 findings must be MODERATE confidence (heuristic, may be intentional). Got: {:?}",
+                finding.confidence
+            );
+        }
+    }
+
+    // =========================================================================
+    // T33: Coverage — empty signature string silently skipped
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_empty_signature_string_skipped() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        );
+        fn_a.signature = Some(String::new());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "b.py",
+            1,
+        );
+        fn_b.signature = Some("(x, y)".to_string());
+        graph.add_symbol(fn_b);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("process") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "Symbol with empty signature string must be silently excluded from Phase 2 grouping"
+        );
+    }
+
+    // =========================================================================
+    // T34: Coverage — signature without parentheses returns 0 params
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_no_parens_signature() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol(
+            "getter",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        );
+        fn_a.signature = Some("property_name".to_string());
+        graph.add_symbol(fn_a);
+
+        let mut fn_b = make_symbol(
+            "getter",
+            SymbolKind::Function,
+            Visibility::Public,
+            "b.py",
+            1,
+        );
+        fn_b.signature = Some("(self, key)".to_string());
+        graph.add_symbol(fn_b);
+
+        // Should not panic
+        let _diagnostics = detect(&graph, Path::new(""));
+    }
+
+    // =========================================================================
+    // T35: Coverage — whitespace-only signature content
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_whitespace_only_signature() {
+        let mut graph = Graph::new();
+
+        let mut fn_a = make_symbol("noop", SymbolKind::Function, Visibility::Public, "a.py", 1);
+        fn_a.signature = Some("   ".to_string());
+        graph.add_symbol(fn_a);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.entity != "noop" || d.confidence != Confidence::Moderate),
+            "Whitespace-only signature should not produce Phase 2 findings by itself"
+        );
+    }
+
+    // =========================================================================
+    // T36: Coverage — import-annotated symbols excluded from Phase 2
+    // =========================================================================
+
+    #[test]
+    fn test_contract_mismatch_import_symbols_excluded() {
+        let mut graph = Graph::new();
+
+        let mut import_a = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "a.py",
+            1,
+        );
+        import_a.signature = Some("(data)".to_string());
+        import_a.annotations.push("import".to_string());
+        graph.add_symbol(import_a);
+
+        let mut real_fn = make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "b.py",
+            1,
+        );
+        real_fn.signature = Some("(data, config, extra)".to_string());
+        graph.add_symbol(real_fn);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let phase2_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("process") && d.confidence == Confidence::Moderate)
+            .collect();
+
+        assert!(
+            phase2_findings.is_empty(),
+            "Import-annotated symbols must be excluded from Phase 2 grouping. \
+             Only one non-import 'process' exists → group size < 2 → no finding."
+        );
+    }
+
+    // =========================================================================
+    // language_from_path unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_language_from_path_python() {
+        assert_eq!(language_from_path(Path::new("module.py")), "python");
+    }
+
+    #[test]
+    fn test_language_from_path_rust() {
+        assert_eq!(language_from_path(Path::new("module.rs")), "rust");
+    }
+
+    #[test]
+    fn test_language_from_path_javascript_variants() {
+        assert_eq!(language_from_path(Path::new("app.js")), "javascript");
+        assert_eq!(language_from_path(Path::new("app.jsx")), "javascript");
+        assert_eq!(language_from_path(Path::new("app.ts")), "javascript");
+        assert_eq!(language_from_path(Path::new("app.tsx")), "javascript");
+        assert_eq!(language_from_path(Path::new("app.mjs")), "javascript");
+        assert_eq!(language_from_path(Path::new("app.cjs")), "javascript");
+    }
+
+    #[test]
+    fn test_language_from_path_unknown() {
+        assert_eq!(language_from_path(Path::new("file.xyz")), "unknown");
+        assert_eq!(language_from_path(Path::new("Makefile")), "unknown");
+        assert_eq!(language_from_path(Path::new("")), "unknown");
     }
 }

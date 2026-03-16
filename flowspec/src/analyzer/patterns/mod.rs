@@ -7,15 +7,25 @@
 //! severity/confidence/pattern-name filters for the `--checks`, `--severity`,
 //! and `--confidence` CLI flags.
 
+/// Cycles in the module dependency graph.
 pub mod circular_dependency;
+/// Interface says one thing, implementation says another (decorators, cross-file arity).
 pub mod contract_mismatch;
+/// Symbols defined but never consumed downstream.
 pub mod data_dead_end;
+/// Shared exclusion logic — path relativization and symbol filtering helpers.
 pub mod exclusion;
+/// Connected components with zero inbound external edges.
 pub mod isolated_cluster;
+/// Cross-module references violating user-defined layer rules.
 pub mod layer_violation;
+/// Public symbols not re-exported through parent module.
 pub mod missing_reexport;
+/// Trait impls with no dispatch points, public methods with zero callers.
 pub mod orphaned_implementation;
+/// Imports where zero imported symbols are referenced downstream.
 pub mod phantom_dependency;
+/// Imports resolving to re-exports, shims, or moved definitions.
 pub mod stale_reference;
 
 use std::path::Path;

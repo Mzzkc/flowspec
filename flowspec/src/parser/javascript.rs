@@ -301,17 +301,73 @@ fn visit_export_statement(
             }
             "export_clause" => {
                 // `export { foo, bar }` or `export { foo as bar }`
-                // Skip re-exports: `export { foo } from './module'` — has a string source
-                let has_source = {
-                    let mut src_cursor = node.walk();
-                    let result = node.children(&mut src_cursor).any(|c| c.kind() == "string");
-                    result
-                };
-                if !has_source {
+                // Check for re-exports: `export { foo } from './module'` — has a string source
+                let source_module = extract_source_module(content, node);
+                if let Some(ref source) = source_module {
+                    // Re-export: create import symbols for the re-exported names
+                    extract_reexport_clause(result, content, path, file_stem, child, source);
+                } else {
                     apply_export_clause_visibility(result, content, child);
                 }
             }
+            "*" => {
+                // `export * from './module'` — star re-export
+                // Extract source and create a star import symbol
+                let source_module = extract_source_module(content, node);
+                if let Some(ref source) = source_module {
+                    let star_name = format!("*:{}", source);
+                    add_import_symbol(
+                        result,
+                        file_stem,
+                        &star_name,
+                        None,
+                        Some(source),
+                        path,
+                        node,
+                    );
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+/// Extract re-exported names from `export { foo, bar } from './module'`.
+///
+/// Creates import symbols for each re-exported name with `"from:<module>"`
+/// annotations so that cross-file resolution can trace the chain.
+fn extract_reexport_clause(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    file_stem: &str,
+    clause_node: Node,
+    source_module: &str,
+) {
+    let mut cursor = clause_node.walk();
+    for child in clause_node.children(&mut cursor) {
+        if child.kind() == "export_specifier" {
+            let (sym_name, original_name) = extract_specifier_names(content, child);
+            if !sym_name.is_empty() {
+                // For re-exports, the "name" field is the source name and
+                // "alias" is the exported-as name. Use original_name for lookup.
+                add_import_symbol(
+                    result,
+                    file_stem,
+                    &sym_name,
+                    original_name.as_deref(),
+                    Some(source_module),
+                    path,
+                    child,
+                );
+                // Also mark as public since it's exported
+                for sym in result.symbols.iter_mut().rev() {
+                    if sym.name == sym_name && sym.annotations.contains(&"import".to_string()) {
+                        sym.visibility = Visibility::Public;
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -780,16 +836,41 @@ fn extract_method_definition(
     scope_stack.pop();
 }
 
+/// Extracts the source module path from an import/export statement's `string` child.
+///
+/// For `import { foo } from './bar'`, the tree-sitter AST contains a `string` child
+/// node with value `'./bar'`. This function finds it and strips the surrounding quotes.
+fn extract_source_module(content: &[u8], node: Node) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "string" {
+            let raw = node_text(content, child);
+            // Strip surrounding quotes (' or ")
+            let trimmed = raw
+                .trim_start_matches(['\'', '"'])
+                .trim_end_matches(['\'', '"']);
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
 /// Extract ES6 import statements.
 ///
 /// Creates both a `Reference` (for graph edges) and a `Symbol` (for pattern detection)
 /// for each imported name. The symbol uses `SymbolKind::Module` with an `"import"`
 /// annotation so that `phantom_dependency` can find and check import symbols.
+/// Also extracts the source module path as a `"from:<module>"` annotation for
+/// cross-file resolution.
 fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+
+    // Extract source module from the string child (e.g., './bar' from `import { x } from './bar'`)
+    let source_module = extract_source_module(content, node);
+    let source_ref = source_module.as_deref();
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -798,19 +879,19 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
             "identifier" => {
                 let name = node_text(content, child).to_string();
                 if !name.is_empty() && name != "import" && name != "from" {
-                    add_import_symbol(result, &file_stem, &name, path, node);
+                    add_import_symbol(result, &file_stem, &name, None, source_ref, path, node);
                 }
             }
             // `import { a, b } from 'y'` — named imports
             "import_clause" => {
-                extract_import_clause(result, content, path, &file_stem, child);
+                extract_import_clause(result, content, path, &file_stem, child, source_ref);
             }
             // `import * as x from 'y'` — namespace import
             "namespace_import" => {
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = node_text(content, name_node).to_string();
                     if !name.is_empty() {
-                        add_import_symbol(result, &file_stem, &name, path, node);
+                        add_import_symbol(result, &file_stem, &name, None, source_ref, path, node);
                     }
                 }
             }
@@ -819,13 +900,39 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
     }
 }
 
+/// Extracts the local name and original name from an `import_specifier`.
+///
+/// For `import { foo as bar }`, returns `("bar", Some("foo"))`.
+/// For `import { foo }`, returns `("foo", None)`.
+fn extract_specifier_names(content: &[u8], specifier: Node) -> (String, Option<String>) {
+    let alias_node = specifier.child_by_field_name("alias");
+    let name_node = specifier.child_by_field_name("name");
+
+    match (alias_node, name_node) {
+        (Some(alias), Some(name)) => {
+            let alias_text = node_text(content, alias).to_string();
+            let name_text = node_text(content, name).to_string();
+            (alias_text, Some(name_text))
+        }
+        (None, Some(name)) => {
+            let name_text = node_text(content, name).to_string();
+            (name_text, None)
+        }
+        _ => (String::new(), None),
+    }
+}
+
 /// Extract named imports from an import clause `{ a, b as c }`.
+///
+/// Passes the `source_module` from the parent `import_statement` to each
+/// `add_import_symbol` call, and extracts `original_name` for aliased imports.
 fn extract_import_clause(
     result: &mut ParseResult,
     content: &[u8],
     path: &Path,
     file_stem: &str,
     node: Node,
+    source_module: Option<&str>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -833,18 +940,21 @@ fn extract_import_clause(
             "identifier" => {
                 let name = node_text(content, child).to_string();
                 if !name.is_empty() && name != "import" && name != "from" {
-                    add_import_symbol(result, file_stem, &name, path, child);
+                    add_import_symbol(result, file_stem, &name, None, source_module, path, child);
                 }
             }
             "import_specifier" => {
-                // Use alias if present, otherwise the name
-                let sym_name = child
-                    .child_by_field_name("alias")
-                    .or_else(|| child.child_by_field_name("name"))
-                    .map(|n| node_text(content, n).to_string())
-                    .unwrap_or_default();
+                let (sym_name, original_name) = extract_specifier_names(content, child);
                 if !sym_name.is_empty() {
-                    add_import_symbol(result, file_stem, &sym_name, path, child);
+                    add_import_symbol(
+                        result,
+                        file_stem,
+                        &sym_name,
+                        original_name.as_deref(),
+                        source_module,
+                        path,
+                        child,
+                    );
                 }
             }
             "named_imports" => {
@@ -852,13 +962,18 @@ fn extract_import_clause(
                 let mut inner_cursor = child.walk();
                 for inner_child in child.children(&mut inner_cursor) {
                     if inner_child.kind() == "import_specifier" {
-                        let sym_name = inner_child
-                            .child_by_field_name("alias")
-                            .or_else(|| inner_child.child_by_field_name("name"))
-                            .map(|n| node_text(content, n).to_string())
-                            .unwrap_or_default();
+                        let (sym_name, original_name) =
+                            extract_specifier_names(content, inner_child);
                         if !sym_name.is_empty() {
-                            add_import_symbol(result, file_stem, &sym_name, path, inner_child);
+                            add_import_symbol(
+                                result,
+                                file_stem,
+                                &sym_name,
+                                original_name.as_deref(),
+                                source_module,
+                                path,
+                                inner_child,
+                            );
                         }
                     }
                 }
@@ -867,7 +982,15 @@ fn extract_import_clause(
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = node_text(content, name_node).to_string();
                     if !name.is_empty() {
-                        add_import_symbol(result, file_stem, &name, path, child);
+                        add_import_symbol(
+                            result,
+                            file_stem,
+                            &name,
+                            None,
+                            source_module,
+                            path,
+                            child,
+                        );
                     }
                 }
             }
@@ -877,10 +1000,18 @@ fn extract_import_clause(
 }
 
 /// Helper to add an import reference + symbol pair.
+///
+/// Creates both a `Reference` and a `Symbol` for each imported name. When
+/// `source_module` is provided, adds `"from:<module>"` annotation so that
+/// `resolve_cross_file_imports()` can match the import to its target file.
+/// When `original_name` differs from `name`, adds `"original_name:<name>"`
+/// so aliased imports resolve to the correct definition.
 fn add_import_symbol(
     result: &mut ParseResult,
     file_stem: &str,
     name: &str,
+    original_name: Option<&str>,
+    source_module: Option<&str>,
     path: &Path,
     node: Node,
 ) {
@@ -893,6 +1024,18 @@ fn add_import_symbol(
         resolution: ResolutionStatus::Partial("external".to_string()),
     });
 
+    let mut annotations = vec!["import".to_string()];
+    if let Some(src) = source_module {
+        if !src.is_empty() {
+            annotations.push(format!("from:{}", src));
+        }
+    }
+    if let Some(orig) = original_name {
+        if orig != name {
+            annotations.push(format!("original_name:{}", orig));
+        }
+    }
+
     result.symbols.push(Symbol {
         id: SymbolId::default(),
         kind: SymbolKind::Module,
@@ -903,7 +1046,7 @@ fn add_import_symbol(
         location: node_location(path, node),
         resolution: ResolutionStatus::Partial("import".to_string()),
         scope: ScopeId::default(),
-        annotations: vec!["import".to_string()],
+        annotations,
     });
 }
 
@@ -913,6 +1056,9 @@ fn add_import_symbol(
 /// node found. The callee name is stored in
 /// `resolution: ResolutionStatus::Partial("call:<name>")` for later resolution
 /// by `populate_graph`.
+///
+/// CJS `require()` calls with a string literal argument are intercepted and
+/// converted to import symbols instead of regular call references.
 fn extract_all_calls(
     result: &mut ParseResult,
     content: &[u8],
@@ -932,6 +1078,60 @@ fn extract_all_calls(
     if node.kind() == "call_expression" {
         if let Some(func_node) = node.child_by_field_name("function") {
             if let Some(name) = extract_callee_name(content, func_node) {
+                // Intercept require() calls with string literal argument
+                if name == "require" {
+                    if let Some(source) = extract_require_source(content, node) {
+                        let file_stem = path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        // Find the variable name this require is assigned to
+                        let var_name = extract_require_var_name(content, node);
+                        let import_name = var_name.as_deref().unwrap_or(&name);
+
+                        let mut annotations = vec![
+                            "import".to_string(),
+                            format!("from:{}", source),
+                            "cjs".to_string(),
+                        ];
+                        // If var_name is available, use it as the import name
+                        if var_name.is_none() {
+                            annotations.push("require".to_string());
+                        }
+
+                        result.references.push(Reference {
+                            id: ReferenceId::default(),
+                            from: SymbolId::default(),
+                            to: SymbolId::default(),
+                            kind: ReferenceKind::Import,
+                            location: node_location(path, node),
+                            resolution: ResolutionStatus::Partial("external".to_string()),
+                        });
+
+                        result.symbols.push(Symbol {
+                            id: SymbolId::default(),
+                            kind: SymbolKind::Module,
+                            name: import_name.to_string(),
+                            qualified_name: format!("{}::import::{}", file_stem, import_name),
+                            visibility: Visibility::Private,
+                            signature: None,
+                            location: node_location(path, node),
+                            resolution: ResolutionStatus::Partial("import".to_string()),
+                            scope: ScopeId::default(),
+                            annotations,
+                        });
+
+                        // Don't emit a regular call reference for require()
+                        // Still recurse into children
+                        let mut cursor = node.walk();
+                        for child in node.children(&mut cursor) {
+                            extract_all_calls(result, content, path, child, depth + 1);
+                        }
+                        return;
+                    }
+                }
+
                 result.references.push(Reference {
                     id: ReferenceId::default(),
                     from: SymbolId::default(),
@@ -949,6 +1149,42 @@ fn extract_all_calls(
     for child in node.children(&mut cursor) {
         extract_all_calls(result, content, path, child, depth + 1);
     }
+}
+
+/// Extracts the string literal argument from a `require()` call expression.
+///
+/// For `require('./bar')`, returns `Some("./bar")`. Returns `None` if the
+/// argument is not a string literal (e.g., `require(variable)`).
+fn extract_require_source(content: &[u8], call_node: Node) -> Option<String> {
+    let args = call_node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        if child.kind() == "string" {
+            let raw = node_text(content, child);
+            let trimmed = raw
+                .trim_start_matches(['\'', '"'])
+                .trim_end_matches(['\'', '"']);
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Extracts the variable name that a `require()` call is assigned to.
+///
+/// For `const mod = require('./bar')`, walks up from the call_expression to find
+/// the enclosing `variable_declarator` and extracts its `name` field.
+fn extract_require_var_name(content: &[u8], call_node: Node) -> Option<String> {
+    // Walk up to find the variable_declarator parent
+    let parent = call_node.parent()?;
+    if parent.kind() == "variable_declarator" {
+        let name_node = parent.child_by_field_name("name")?;
+        let name = node_text(content, name_node).to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Extracts the callee name from a call expression's `function` field.

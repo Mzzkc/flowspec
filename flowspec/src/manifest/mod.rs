@@ -5,10 +5,15 @@
 //! two sanctioned traits (per conventions.yaml) — one implementation per
 //! output format (YAML, JSON, SARIF, summary).
 
+/// JSON output formatter.
 pub mod json;
+/// SARIF v2.1.0 output formatter for CI integration.
 pub mod sarif;
+/// Human-readable summary output formatter (~2K tokens).
 pub mod summary;
+/// Manifest data types — `Manifest`, `EntityEntry`, `FlowEntry`, `DiagnosticEntry`, etc.
 pub mod types;
+/// YAML output formatter (default format).
 pub mod yaml;
 
 pub use json::JsonFormatter;
