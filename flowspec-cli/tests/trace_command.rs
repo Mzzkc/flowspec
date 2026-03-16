@@ -203,7 +203,7 @@ fn trace_format_json_produces_valid_json() {
     );
 }
 
-/// TEST 1.7: trace with --format summary gives clear error (not unreachable!() panic)
+/// TEST 1.7: trace with --format summary succeeds (not unreachable!() panic)
 #[test]
 fn trace_format_summary_no_unreachable_panic() {
     let project = create_single_file_fixture();
@@ -222,8 +222,8 @@ fn trace_format_summary_no_unreachable_panic() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "summary format must exit 1, not crash"
+        Some(0),
+        "summary format must succeed now that SummaryFormatter is implemented"
     );
     assert!(
         !stderr.contains("panicked"),

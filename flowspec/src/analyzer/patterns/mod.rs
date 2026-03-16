@@ -8,6 +8,7 @@
 //! and `--confidence` CLI flags.
 
 pub mod circular_dependency;
+pub mod contract_mismatch;
 pub mod data_dead_end;
 pub mod exclusion;
 pub mod isolated_cluster;
@@ -85,6 +86,10 @@ pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) 
         (
             DiagnosticPattern::StaleReference,
             stale_reference::detect(graph, project_root),
+        ),
+        (
+            DiagnosticPattern::ContractMismatch,
+            contract_mismatch::detect(graph, project_root),
         ),
         // Unimplemented patterns return empty Vec (registered but inactive)
     ];

@@ -21,6 +21,7 @@
 //! summary for humans).
 
 pub mod analyzer;
+pub mod commands;
 pub mod config;
 pub mod error;
 pub mod graph;
@@ -44,7 +45,10 @@ pub use config::Config;
 pub use error::{FlowspecError, ManifestError};
 pub use graph::Graph;
 pub use manifest::types::*;
-pub use manifest::{JsonFormatter, OutputFormatter, SarifFormatter, YamlFormatter};
+pub use manifest::{
+    validate_manifest_size, JsonFormatter, OutputFormatter, SarifFormatter, SummaryFormatter,
+    YamlFormatter,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -103,6 +107,10 @@ pub struct AnalysisResult {
     pub has_critical: bool,
     /// Whether any findings exist at or above the given thresholds.
     pub has_findings: bool,
+    /// The populated analysis graph, available for direct queries (e.g. `trace_flows_from()`).
+    pub graph: Graph,
+    /// Total bytes of source code read during analysis.
+    pub source_bytes: u64,
 }
 
 /// Run full analysis on a project path and produce a manifest.
@@ -174,6 +182,7 @@ pub fn analyze(
 
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
+    let mut source_bytes: u64 = 0;
 
     for file in &files {
         if let Some(adapter) = adapters.iter().find(|a| a.can_handle(file)) {
@@ -184,6 +193,7 @@ pub fn analyze(
                     continue;
                 }
             };
+            source_bytes += content.len() as u64;
             match adapter.parse_file(file, &content) {
                 Ok(result) => {
                     populate_graph(&mut graph, &result);
@@ -425,19 +435,29 @@ pub fn analyze(
         boundaries: Vec::new(),
         dependency_graph: extract_dependency_graph(&graph)
             .into_iter()
-            .map(|dep| DependencyEdge {
-                from: dep.from,
-                to: dep.to,
-                weight: dep.weight as u64,
-                direction: match dep.direction {
-                    analyzer::extraction::DependencyDirection::Unidirectional => {
-                        "unidirectional".to_string()
-                    }
-                    analyzer::extraction::DependencyDirection::Bidirectional => {
-                        "bidirectional".to_string()
-                    }
-                },
-                issues: dep.issues,
+            .map(|dep| {
+                let project_prefix = project_path.to_string_lossy();
+                let strip = |s: &str| -> String {
+                    s.strip_prefix(project_prefix.as_ref())
+                        .unwrap_or(s)
+                        .trim_start_matches('/')
+                        .trim_start_matches('\\')
+                        .to_string()
+                };
+                DependencyEdge {
+                    from: strip(&dep.from),
+                    to: strip(&dep.to),
+                    weight: dep.weight as u64,
+                    direction: match dep.direction {
+                        analyzer::extraction::DependencyDirection::Unidirectional => {
+                            "unidirectional".to_string()
+                        }
+                        analyzer::extraction::DependencyDirection::Bidirectional => {
+                            "bidirectional".to_string()
+                        }
+                    },
+                    issues: dep.issues,
+                }
             })
             .collect(),
         type_flows: Vec::new(),
@@ -447,6 +467,8 @@ pub fn analyze(
         manifest,
         has_critical,
         has_findings,
+        graph,
+        source_bytes,
     })
 }
 

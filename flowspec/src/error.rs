@@ -63,10 +63,12 @@ pub enum FlowspecError {
     },
 
     /// A requested command is not yet implemented.
-    #[error("{command} command is not yet implemented")]
+    #[error("{command} command is not yet implemented (fix: {suggestion})")]
     CommandNotImplemented {
         /// The command that was requested.
         command: String,
+        /// Actionable suggestion for what to do instead.
+        suggestion: String,
     },
 
     /// An unsupported language was requested.

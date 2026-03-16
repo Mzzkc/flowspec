@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
 
@@ -77,10 +78,10 @@ fn exit_1_on_nonexistent_path() {
 }
 
 #[test]
-fn exit_1_on_unimplemented_format() {
+fn exit_0_on_summary_format() {
     let project = create_clean_project();
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
-    // SARIF is now implemented; summary is still unimplemented
+    // Summary format is now implemented
     cmd.args([
         "analyze",
         project.path().to_str().unwrap(),
@@ -88,7 +89,7 @@ fn exit_1_on_unimplemented_format() {
         "summary",
     ])
     .assert()
-    .code(1);
+    .code(predicate::in_iter([0, 2]));
 }
 
 #[test]

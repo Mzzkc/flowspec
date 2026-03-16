@@ -763,26 +763,19 @@ fn trace_sarif_format_valid_structure() {
         .unwrap();
 
     let code = output.status.code().unwrap();
-    if code == 0 {
-        // If SARIF is supported, it must be valid
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&stdout)
-            .unwrap_or_else(|e| panic!("SARIF must be valid JSON: {}", e));
-        if let Some(obj) = parsed.as_object() {
-            assert!(
-                obj.contains_key("$schema")
-                    || obj.contains_key("version")
-                    || obj.contains_key("runs"),
-                "SARIF output must contain schema, version, or runs. Keys: {:?}",
-                obj.keys().collect::<Vec<_>>()
-            );
-        }
-    } else {
-        // If SARIF is not supported for trace, must give clear error (not crash)
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        code, 0,
+        "Trace SARIF format must exit 0 on valid fixture, got {}",
+        code
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("SARIF must be valid JSON: {}", e));
+    if let Some(obj) = parsed.as_object() {
         assert!(
-            !stderr.contains("panicked"),
-            "SARIF format must not cause panic"
+            obj.contains_key("$schema") || obj.contains_key("version") || obj.contains_key("runs"),
+            "SARIF output must contain schema, version, or runs. Keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
         );
     }
 }

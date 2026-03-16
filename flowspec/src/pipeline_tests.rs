@@ -2445,3 +2445,566 @@ fn test_no_import_prefix_in_flow_step_entities() {
         }
     }
 }
+
+// =========================================================================
+// Cycle 9 — QA-1 (QA-Foundation) Tests
+// Graph Exposure + Manifest Size Enforcement + dep_graph relative paths
+// =========================================================================
+
+// T1: AnalysisResult.graph field exists and is accessible (Hard Gate)
+#[test]
+fn test_pipeline_graph_exposed_in_analysis_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // This line fails to COMPILE if the field doesn't exist. Unconditional assertion.
+    let symbol_count = result.graph.all_symbols().count();
+    assert!(
+        symbol_count > 0,
+        "AnalysisResult.graph MUST be accessible and populated after analysis. \
+         Got 0 symbols. This field is required for trace_flows_from() direct calls \
+         and MCP integration."
+    );
+}
+
+// T2: Graph contains symbols after analysis
+#[test]
+fn test_pipeline_graph_symbols_populated_after_analysis() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let symbols: Vec<_> = result.graph.all_symbols().collect();
+    assert!(
+        symbols.len() >= 4,
+        "dead_code.py has at least 4 named functions. Graph returned {} symbols. \
+         The graph may not have been populated or was cleared before being moved \
+         into AnalysisResult.",
+        symbols.len()
+    );
+
+    let has_main_handler = symbols
+        .iter()
+        .any(|(_, sym)| sym.qualified_name.contains("main_handler") || sym.name == "main_handler");
+    assert!(
+        has_main_handler,
+        "Graph MUST contain the 'main_handler' symbol from dead_code.py. \
+         Found symbols: {:?}",
+        symbols.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+    );
+}
+
+// T3: Graph symbol count vs. entity count consistency
+#[test]
+fn test_pipeline_graph_symbol_count_consistent_with_entities() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let graph_non_module_count = result
+        .graph
+        .all_symbols()
+        .filter(|(_, sym)| sym.kind != crate::parser::ir::SymbolKind::Module)
+        .count();
+
+    let entity_count = result.manifest.entities.len();
+
+    let diff = (graph_non_module_count as i64 - entity_count as i64).unsigned_abs();
+    assert!(
+        diff <= graph_non_module_count as u64 / 2,
+        "Graph has {} non-Module symbols but manifest has {} entities. \
+         Difference of {} is too large — indicates graph population or entity \
+         extraction mismatch.",
+        graph_non_module_count,
+        entity_count,
+        diff
+    );
+}
+
+// T4: Manifest size validation — pathological input triggers SizeLimit
+#[test]
+fn test_pipeline_manifest_size_limit_enforced_on_pathological_input() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Generate pathological Python file: 200 functions with 100-char names.
+    let mut source = String::new();
+    for i in 0..200 {
+        let long_name = format!(
+            "very_long_function_name_that_inflates_manifest_output_significantly_{:04}",
+            i
+        );
+        source.push_str(&format!(
+            "def {}(param_a, param_b, param_c, param_d):\n    return param_a + param_b\n\n",
+            long_name
+        ));
+    }
+    std::fs::write(tmp.path().join("pathological.py"), &source).unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+
+    let result = analyze(tmp.path(), &config, &["python".to_string()]);
+
+    // Either analyze() returns SizeLimit or we check via serialization
+    match result {
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("exceeds") || err_msg.contains("size"),
+                "Error should be SizeLimit, got: {}",
+                err_msg
+            );
+        }
+        Ok(result) => {
+            // If analyze() succeeded, verify the ratio via serialization.
+            // The size check is enforced post-serialization by validate_manifest_size().
+            use crate::manifest::JsonFormatter;
+            use crate::manifest::OutputFormatter;
+            let formatter = JsonFormatter;
+            let serialized = formatter.format_manifest(&result.manifest);
+
+            if let Ok(ref output) = serialized {
+                let manifest_bytes = output.len() as u64;
+                let source_bytes = result.source_bytes;
+                if source_bytes >= 1024 {
+                    let ratio = manifest_bytes as f64 / source_bytes as f64;
+                    // Verify either ratio is within bounds OR
+                    // validate_manifest_size catches it
+                    let validation = crate::manifest::validate_manifest_size(output, source_bytes);
+                    if ratio > 10.0 {
+                        assert!(
+                            validation.is_err(),
+                            "Pathological input produced {:.1}x ratio but \
+                             validate_manifest_size() did NOT catch it.",
+                            ratio
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// T5: Normal analysis does NOT trigger size limit
+#[test]
+fn test_pipeline_normal_analysis_no_size_limit_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]);
+
+    assert!(
+        result.is_ok(),
+        "Normal analysis on dead_code.py fixture MUST NOT trigger size limit. \
+         Got error: {:?}",
+        result.err()
+    );
+
+    let result = result.unwrap();
+    use crate::manifest::OutputFormatter;
+    use crate::manifest::YamlFormatter;
+    let formatter = YamlFormatter;
+    let serialized = formatter.format_manifest(&result.manifest);
+    assert!(
+        serialized.is_ok(),
+        "YAML serialization of normal analysis MUST succeed. Error: {:?}",
+        serialized.err()
+    );
+}
+
+// T6: dep_graph paths are relative
+#[test]
+fn test_pipeline_dep_graph_uses_relative_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    std::fs::write(
+        tmp.path().join("mod_a.py"),
+        "from mod_b import helper\n\ndef main():\n    helper()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("mod_b.py"),
+        "def helper():\n    return 42\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let project_path_str = tmp.path().to_string_lossy().to_string();
+
+    for dep in &result.manifest.dependency_graph {
+        assert!(
+            !dep.from.starts_with('/') && !dep.from.starts_with(&project_path_str),
+            "dep_graph 'from' field contains absolute path: '{}'. \
+             Must be relative (e.g., 'mod_a.py', not '{}/mod_a.py').",
+            dep.from,
+            project_path_str
+        );
+        assert!(
+            !dep.to.starts_with('/') && !dep.to.starts_with(&project_path_str),
+            "dep_graph 'to' field contains absolute path: '{}'.",
+            dep.to
+        );
+    }
+
+    for dep in &result.manifest.dependency_graph {
+        assert!(
+            !dep.from.is_empty(),
+            "dep_graph 'from' is empty after path normalization"
+        );
+        assert!(
+            !dep.to.is_empty(),
+            "dep_graph 'to' is empty after path normalization"
+        );
+    }
+}
+
+// T7: Empty project with graph exposure
+#[test]
+fn test_pipeline_empty_project_graph_exists_but_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &[]).unwrap();
+
+    let symbol_count = result.graph.all_symbols().count();
+    assert_eq!(
+        symbol_count, 0,
+        "Empty project should have 0 symbols in graph, got {}",
+        symbol_count
+    );
+
+    let file_symbols = result
+        .graph
+        .symbols_in_file(std::path::Path::new("nonexistent.py"));
+    assert!(
+        file_symbols.is_empty(),
+        "symbols_in_file on empty graph should return empty Vec"
+    );
+}
+
+// T8: source_bytes field exists and is accurate
+#[test]
+fn test_pipeline_source_bytes_tracked_in_analysis_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source_content = include_str!("../../tests/fixtures/python/dead_code.py");
+    std::fs::write(tmp.path().join("dead_code.py"), source_content).unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let expected_bytes = source_content.len() as u64;
+    assert_eq!(
+        result.source_bytes,
+        expected_bytes,
+        "source_bytes should equal the total bytes of source files read. \
+         Expected {} (dead_code.py is {} bytes), got {}.",
+        expected_bytes,
+        source_content.len(),
+        result.source_bytes
+    );
+}
+
+// T9: Zero source bytes — no division by zero
+#[test]
+fn test_pipeline_zero_source_bytes_no_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &[]);
+
+    assert!(
+        result.is_ok(),
+        "Empty project analysis must not panic or error from size validation. \
+         Got: {:?}",
+        result.err()
+    );
+
+    let result = result.unwrap();
+    assert_eq!(
+        result.source_bytes, 0,
+        "Empty project should have 0 source_bytes"
+    );
+}
+
+// T10: Small fixture size ratio tolerance — no false positives
+#[test]
+fn test_pipeline_small_fixture_no_false_positive_size_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("tiny.py"), "def f():\n    pass\n").unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]);
+
+    assert!(
+        result.is_ok(),
+        "Tiny source files must not trigger SizeLimit. Metadata overhead \
+         for small projects naturally exceeds 10x. Got: {:?}",
+        result.err()
+    );
+}
+
+// T11: Graph is fully populated after move (has edges)
+#[test]
+fn test_pipeline_graph_has_edges_after_move() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/python/cross_file/simple_import");
+
+    for entry in std::fs::read_dir(&fixture_dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().map_or(false, |e| e == "py") {
+            std::fs::copy(entry.path(), tmp.path().join(entry.file_name())).unwrap();
+        }
+    }
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let has_edges = result.graph.all_symbols().any(|(id, _)| {
+        !result.graph.edges_from(id).is_empty() || !result.graph.edges_to(id).is_empty()
+    });
+
+    assert!(
+        has_edges,
+        "Graph in AnalysisResult should contain edges from cross-file imports. \
+         If no edges found, the graph may have been replaced with Graph::new() \
+         instead of moved from the populated instance."
+    );
+}
+
+// T12: diagnose() compatibility with new fields
+#[test]
+fn test_pipeline_diagnose_works_with_graph_exposure() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("dead_code.py"),
+        include_str!("../../tests/fixtures/python/dead_code.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+
+    let result = diagnose(
+        tmp.path(),
+        &config,
+        &["python".to_string()],
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        result.is_ok(),
+        "diagnose() must continue working after graph exposure. Got: {:?}",
+        result.err()
+    );
+
+    let (diagnostics, _has_critical) = result.unwrap();
+    assert!(
+        !diagnostics.is_empty(),
+        "diagnose() on dead_code.py should find diagnostics."
+    );
+}
+
+// R1: dep_graph type consistency (Cycle 8 fix regression guard)
+#[test]
+fn test_regression_dep_graph_type_consistency_cycle8() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("a.py"),
+        "from b import foo\ndef bar(): foo()\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("b.py"), "def foo(): pass\n").unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    for dep in &result.manifest.dependency_graph {
+        assert!(
+            dep.direction == "unidirectional" || dep.direction == "bidirectional",
+            "dep_graph direction must be 'unidirectional' or 'bidirectional', got: '{}'",
+            dep.direction
+        );
+        assert!(
+            dep.weight > 0,
+            "dep_graph weight must be > 0 for existing edges"
+        );
+    }
+}
+
+// R2: All AnalysisResult fields accessible (compilation gate)
+#[test]
+fn test_regression_analysis_result_all_fields_accessible() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("clean.py"),
+        "def greet(name):\n    return f'Hello {name}'\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // Every field must be directly accessible (pub)
+    let _manifest = &result.manifest;
+    let _critical = result.has_critical;
+    let _findings = result.has_findings;
+    let _graph = &result.graph;
+    let _bytes = result.source_bytes;
+}
+
+// =========================================================================
+// T16: stale_reference End-to-End Pipeline Integration
+// =========================================================================
+
+/// Definitive proof that stale_reference is wired into the full analysis pipeline.
+/// Parse → graph → resolve → detect → manifest. If any stage is broken, this fails.
+#[test]
+fn test_stale_reference_pipeline_integration() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Copy the stale_reference cross-file fixture
+    std::fs::write(
+        tmp.path().join("main.py"),
+        include_str!("../../tests/fixtures/python/cross_file/stale_reference/main.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("utils.py"),
+        include_str!("../../tests/fixtures/python/cross_file/stale_reference/utils.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("helpers.py"),
+        include_str!("../../tests/fixtures/python/cross_file/stale_reference/helpers.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    // Check manifest diagnostics for stale_reference findings
+    let stale_findings: Vec<_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "stale_reference")
+        .collect();
+
+    assert!(
+        !stale_findings.is_empty(),
+        "stale_reference must appear in manifest diagnostics when run on the \
+         stale_reference fixture. This is an end-to-end pipeline test: \
+         parse → graph → resolve → detect → manifest. \
+         Got {} total diagnostics with patterns: {:?}",
+        result.manifest.diagnostics.len(),
+        result
+            .manifest
+            .diagnostics
+            .iter()
+            .map(|d| &d.pattern)
+            .collect::<Vec<_>>()
+    );
+
+    // At least old_function should be flagged
+    let old_fn_finding = stale_findings
+        .iter()
+        .find(|d| d.entity.contains("old_function"));
+    assert!(
+        old_fn_finding.is_some(),
+        "old_function (imported from utils but renamed to new_function) must be \
+         detected as a stale reference in the pipeline. Stale findings: {:?}",
+        stale_findings
+            .iter()
+            .map(|d| &d.entity)
+            .collect::<Vec<_>>()
+    );
+}
+
+// =========================================================================
+// T17: stale_reference Pipeline Evidence Quality
+// =========================================================================
+
+/// Every stale_reference finding in the manifest must have non-empty evidence,
+/// suggestion, and location fields. Evidence quality is a core Flowspec value.
+#[test]
+fn test_stale_reference_pipeline_evidence_quality() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    std::fs::write(
+        tmp.path().join("main.py"),
+        include_str!("../../tests/fixtures/python/cross_file/stale_reference/main.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("utils.py"),
+        include_str!("../../tests/fixtures/python/cross_file/stale_reference/utils.py"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("helpers.py"),
+        include_str!("../../tests/fixtures/python/cross_file/stale_reference/helpers.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let stale_findings: Vec<_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "stale_reference")
+        .collect();
+
+    assert!(
+        !stale_findings.is_empty(),
+        "Prerequisite: stale_reference findings must exist for evidence quality check"
+    );
+
+    for finding in &stale_findings {
+        assert!(
+            !finding.evidence.is_empty(),
+            "stale_reference finding for '{}' must include evidence in manifest output",
+            finding.entity
+        );
+        assert!(
+            !finding.suggestion.is_empty(),
+            "stale_reference finding for '{}' must include suggestion in manifest output",
+            finding.entity
+        );
+        assert!(
+            !finding.loc.is_empty(),
+            "stale_reference finding for '{}' must include location in manifest output",
+            finding.entity
+        );
+    }
+}

@@ -188,15 +188,11 @@ fn language_flag_with_unsupported_language() {
 }
 
 #[test]
-fn unimplemented_format_gives_clear_error() {
+fn summary_format_is_accepted() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "summary"])
         .assert()
-        .code(1)
-        .stderr(
-            predicate::str::contains("not yet implemented")
-                .or(predicate::str::contains("not implemented")),
-        );
+        .code(predicate::in_iter([0, 2]));
 }
 
 #[test]
