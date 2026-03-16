@@ -614,14 +614,7 @@ fn extract_use_tree(
                     match item.kind() {
                         "identifier" => {
                             let name = node_text(content, item).to_string();
-                            add_import_symbol(
-                                result,
-                                &name,
-                                visibility,
-                                path,
-                                item,
-                                module_path,
-                            );
+                            add_import_symbol(result, &name, visibility, path, item, module_path);
                         }
                         "use_as_clause" => {
                             if let Some(alias_node) = item.child_by_field_name("alias") {
