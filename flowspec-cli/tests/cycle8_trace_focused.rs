@@ -484,7 +484,8 @@ fn trace_direction_forward_works() {
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("Must produce valid JSON: {}", e));
 }
 
-/// T12: --direction backward gives clear "not implemented" error
+/// T12: --direction backward is now implemented (C11 trace refactor).
+/// Updated from "not implemented" test to verify backward works.
 #[test]
 fn trace_direction_backward_clear_error() {
     let project = create_trace_fixture();
@@ -502,28 +503,14 @@ fn trace_direction_backward_clear_error() {
 
     let code = output.status.code().unwrap();
     assert_eq!(
-        code, 1,
-        "trace --direction backward must exit 1 (not implemented)"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // Must explain WHY it failed
-    assert!(
-        stderr.to_lowercase().contains("not")
-            && (stderr.to_lowercase().contains("implemented")
-                || stderr.to_lowercase().contains("supported")),
-        "Error must say backward tracing is not implemented/supported. Got: {}",
-        stderr
-    );
-    // Must suggest a fix
-    assert!(
-        stderr.contains("forward"),
-        "Error should suggest using --direction forward. Got: {}",
-        stderr
+        code, 0,
+        "trace --direction backward must succeed (exit 0). Got: {}",
+        code
     );
 }
 
-/// T13: --direction both gives clear error (requires backward tracing)
+/// T13: --direction both is now implemented (C11 trace refactor).
+/// Updated from "not implemented" test to verify both works.
 #[test]
 fn trace_direction_both_clear_error() {
     let project = create_trace_fixture();
@@ -541,22 +528,15 @@ fn trace_direction_both_clear_error() {
 
     let code = output.status.code().unwrap();
     assert_eq!(
-        code, 1,
-        "trace --direction both must exit 1 (not implemented)"
+        code, 0,
+        "trace --direction both must succeed (exit 0). Got: {}",
+        code
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("panicked"),
         "trace --direction both must not panic"
-    );
-    // Must communicate the limitation
-    assert!(
-        stderr.to_lowercase().contains("not")
-            && (stderr.to_lowercase().contains("implemented")
-                || stderr.to_lowercase().contains("supported")),
-        "Error must explain the limitation. Got: {}",
-        stderr
     );
 }
 

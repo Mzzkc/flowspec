@@ -65,6 +65,22 @@ enum Commands {
         /// Restrict analysis to specific language(s).
         #[arg(short, long)]
         language: Vec<String>,
+
+        /// Filter to specific diagnostic patterns (comma-separated).
+        /// Valid patterns: isolated_cluster, data_dead_end, phantom_dependency,
+        /// orphaned_impl, circular_dependency, missing_reexport, contract_mismatch,
+        /// stale_reference, layer_violation, duplication, partial_wiring,
+        /// asymmetric_handling, incomplete_migration.
+        #[arg(long, value_delimiter = ',')]
+        checks: Vec<String>,
+
+        /// Minimum severity to report (critical, warning, info).
+        #[arg(long)]
+        severity: Option<SeverityArg>,
+
+        /// Minimum confidence to report (high, moderate, low).
+        #[arg(long)]
+        confidence: Option<ConfidenceArg>,
     },
 
     /// Run diagnostics only — output structural issues found.
@@ -174,9 +190,9 @@ enum ConfidenceArg {
 enum TraceDirection {
     /// Trace callees (forward data flow).
     Forward,
-    /// Trace callers (backward data flow — not yet implemented).
+    /// Trace callers (backward data flow).
     Backward,
-    /// Trace both directions (not yet implemented).
+    /// Trace both directions (forward + backward union).
     Both,
 }
 
@@ -265,9 +281,23 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
     let config_path = cli.config.as_deref();
 
     let exit_code = match cli.command {
-        Commands::Analyze { path, language, .. } => {
-            commands::run_analyze(&path, &language, format, output_path, config_path)?
-        }
+        Commands::Analyze {
+            path,
+            language,
+            checks,
+            severity,
+            confidence,
+            ..
+        } => commands::run_analyze(
+            &path,
+            &language,
+            format,
+            output_path,
+            config_path,
+            &checks,
+            severity.map(|s| s.to_severity()),
+            confidence.map(|c| c.to_confidence()),
+        )?,
         Commands::Diagnose {
             path,
             checks,

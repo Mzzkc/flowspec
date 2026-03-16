@@ -62,8 +62,9 @@ fn t2_trace_forward_includes_downstream_callees() {
     let arr = parsed.as_array().unwrap();
 
     // FROM semantics: forward from process → should include format_output
+    let empty_vec = vec![];
     let has_format_output = arr.iter().any(|flow| {
-        let steps = flow["steps"].as_array().unwrap_or(&vec![]);
+        let steps = flow["steps"].as_array().unwrap_or(&empty_vec);
         steps
             .iter()
             .any(|s| s["entity"].as_str().unwrap_or("").contains("format_output"))
@@ -426,7 +427,9 @@ fn t15_trace_both_returns_forward_and_backward_union() {
         has_main && has_leaf,
         "Both-direction trace from 'process' must include 'main' (caller) and 'leaf' (callee). \
          main={}, leaf={}. Got:\n{}",
-        has_main, has_leaf, yaml_str
+        has_main,
+        has_leaf,
+        yaml_str
     );
 }
 

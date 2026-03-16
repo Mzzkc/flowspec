@@ -229,6 +229,118 @@ fn dfs_trace(
     visited.remove(&current);
 }
 
+/// Traces data flow paths backward (callers) to the given symbol through the graph.
+///
+/// Walks incoming `EdgeKind::Calls` edges from `target_symbol`, recording each
+/// step. Detects cycles via per-path visited sets and stops at root symbols
+/// (no incoming call edges). Returns all discovered backward flow paths.
+///
+/// `max_depth` limits the maximum path depth. Use `MAX_FLOW_DEPTH` for the
+/// default limit.
+///
+/// Returns an empty `Vec` if the target symbol has no incoming call edges.
+pub fn trace_flows_to(graph: &Graph, target_symbol: SymbolId, max_depth: usize) -> Vec<FlowPath> {
+    let mut paths = Vec::new();
+
+    let caller_ids = graph.callers(target_symbol);
+
+    if caller_ids.is_empty() {
+        return paths;
+    }
+
+    for caller in &caller_ids {
+        let mut visited = HashSet::new();
+        visited.insert(target_symbol);
+        let mut current_steps = Vec::new();
+
+        dfs_trace_backward(
+            graph,
+            *caller,
+            target_symbol,
+            &mut visited,
+            &mut current_steps,
+            &mut paths,
+            0,
+            max_depth,
+        );
+    }
+
+    paths
+}
+
+/// DFS recursive helper for backward flow tracing.
+///
+/// Explores the call graph in reverse from `current`, building up `current_steps`.
+/// When a root symbol (no callers) or cycle is detected, records the complete path.
+#[allow(clippy::too_many_arguments)]
+fn dfs_trace_backward(
+    graph: &Graph,
+    current: SymbolId,
+    target: SymbolId,
+    visited: &mut HashSet<SymbolId>,
+    current_steps: &mut Vec<FlowStep>,
+    paths: &mut Vec<FlowPath>,
+    depth: usize,
+    max_depth: usize,
+) {
+    if depth >= max_depth {
+        tracing::warn!("Backward trace depth limit ({}) reached", max_depth);
+        paths.push(FlowPath {
+            entry: target,
+            steps: current_steps.clone(),
+            is_cyclic: false,
+        });
+        return;
+    }
+
+    if visited.contains(&current) {
+        current_steps.push(FlowStep {
+            symbol: current,
+            edge_kind: EdgeKind::Calls,
+        });
+        paths.push(FlowPath {
+            entry: target,
+            steps: current_steps.clone(),
+            is_cyclic: true,
+        });
+        current_steps.pop();
+        return;
+    }
+
+    visited.insert(current);
+    current_steps.push(FlowStep {
+        symbol: current,
+        edge_kind: EdgeKind::Calls,
+    });
+
+    let caller_ids = graph.callers(current);
+
+    if caller_ids.is_empty() {
+        // Root node — no more callers, record the path
+        paths.push(FlowPath {
+            entry: target,
+            steps: current_steps.clone(),
+            is_cyclic: false,
+        });
+    } else {
+        for caller in &caller_ids {
+            dfs_trace_backward(
+                graph,
+                *caller,
+                target,
+                visited,
+                current_steps,
+                paths,
+                depth + 1,
+                max_depth,
+            );
+        }
+    }
+
+    current_steps.pop();
+    visited.remove(&current);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

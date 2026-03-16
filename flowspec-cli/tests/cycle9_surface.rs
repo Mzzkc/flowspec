@@ -75,21 +75,11 @@ fn backward_direction_error_uses_command_not_implemented() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap();
 
-    // UNCONDITIONAL: exit 1 (not 0, not 2)
-    assert_eq!(code, 1, "Backward direction must exit 1, got {}", code);
-
-    // UNCONDITIONAL: must NOT contain "symbol not found:" prefix
-    assert!(
-        !stderr.contains("symbol not found:"),
-        "Backward direction error must NOT use SymbolNotFound prefix.\nGot:\n{}",
-        stderr
-    );
-
-    // UNCONDITIONAL: must contain "not yet implemented"
-    assert!(
-        stderr.contains("not yet implemented"),
-        "Backward direction error must mention 'not yet implemented'.\nGot:\n{}",
-        stderr
+    // C11: backward tracing is now implemented — exit 0
+    assert_eq!(
+        code, 0,
+        "Backward direction must exit 0 (now implemented), got {}",
+        code
     );
 }
 
@@ -114,16 +104,11 @@ fn both_direction_error_uses_command_not_implemented() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap();
 
-    assert_eq!(code, 1);
-    assert!(
-        !stderr.contains("symbol not found:"),
-        "Both direction error must NOT use SymbolNotFound prefix.\nGot:\n{}",
-        stderr
-    );
-    assert!(
-        stderr.contains("not yet implemented"),
-        "Both direction error must mention 'not yet implemented'.\nGot:\n{}",
-        stderr
+    // C11: both tracing is now implemented — exit 0
+    assert_eq!(
+        code, 0,
+        "Both direction must exit 0 (now implemented), got {}",
+        code
     );
 }
 
@@ -163,10 +148,11 @@ fn command_not_implemented_includes_suggestion() {
 }
 
 // ==========================================================================
-// T4: Backward/Both direction errors include forward suggestion
+// T4: Backward/Both direction now work (C11 trace refactor)
 // ==========================================================================
 #[test]
 fn direction_errors_suggest_forward() {
+    // C11: backward and both tracing are now implemented. Verify they succeed.
     for direction in &["backward", "both"] {
         let project = create_trace_fixture();
         let output = flowspec()
@@ -181,14 +167,11 @@ fn direction_errors_suggest_forward() {
             .output()
             .unwrap();
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // UNCONDITIONAL: must suggest using --direction forward
-        assert!(
-            stderr.to_lowercase().contains("forward"),
-            "--direction {} error must suggest using forward direction.\nGot:\n{}",
-            direction,
-            stderr
+        let code = output.status.code().unwrap();
+        assert_eq!(
+            code, 0,
+            "--direction {} must succeed (exit 0). Got: {}",
+            direction, code
         );
     }
 }

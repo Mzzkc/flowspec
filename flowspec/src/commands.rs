@@ -7,31 +7,56 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::analyzer::flow::{trace_flows_from, trace_flows_to, FlowPath};
 use crate::error::{FlowspecError, ManifestError};
 use crate::manifest::types::FlowEntry;
 use crate::manifest::{validate_manifest_size, OutputFormatter};
+use crate::parser::ir::SymbolId;
 use crate::{Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter, YamlFormatter};
+
+/// Valid diagnostic pattern names for `--checks` validation.
+const VALID_PATTERNS: &[&str] = &[
+    "isolated_cluster",
+    "data_dead_end",
+    "phantom_dependency",
+    "orphaned_impl",
+    "circular_dependency",
+    "missing_reexport",
+    "contract_mismatch",
+    "stale_reference",
+    "layer_violation",
+    "duplication",
+    "partial_wiring",
+    "asymmetric_handling",
+    "incomplete_migration",
+];
 
 /// Trace direction for flow tracing commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceDirection {
     /// Trace callees (forward data flow).
     Forward,
-    /// Trace callers (backward data flow — not yet implemented).
+    /// Trace callers (backward data flow).
     Backward,
-    /// Trace both directions (not yet implemented).
+    /// Trace both directions.
     Both,
 }
 
 /// Run the `analyze` command: parse, build graph, produce manifest.
 ///
-/// Returns `(output_string, exit_code)` on success.
+/// Returns the exit code on success (0 = clean, 2 = critical diagnostics found).
+/// Optional filter parameters control which diagnostics appear in output,
+/// but exit code is always based on UNFILTERED diagnostics (CI gate contract).
+#[allow(clippy::too_many_arguments)]
 pub fn run_analyze(
     path: &Path,
     languages: &[String],
     format: OutputFormat,
     output_path: Option<&Path>,
     config_path: Option<&Path>,
+    checks: &[String],
+    severity: Option<crate::Severity>,
+    confidence: Option<crate::Confidence>,
 ) -> Result<u8, FlowspecError> {
     if !matches!(
         format,
@@ -46,6 +71,9 @@ pub fn run_analyze(
         return Err(FlowspecError::EmptyPath);
     }
 
+    // Validate check patterns before doing any work
+    validate_check_patterns(checks)?;
+
     let canonical = resolve_path(path)?;
     let config = Config::load(&canonical, config_path)?;
 
@@ -57,7 +85,18 @@ pub fn run_analyze(
 
     tracing::info!("Analyzing project at {}", canonical.display());
 
-    let result = crate::analyze(&canonical, &config, &normalized)?;
+    let mut result = crate::analyze(&canonical, &config, &normalized)?;
+
+    // Exit code is based on UNFILTERED diagnostics — CI gate contract
+    let has_critical = result.has_critical;
+
+    // Apply diagnostic filters to output only
+    apply_diagnostic_filters(
+        &mut result.manifest.diagnostics,
+        checks,
+        severity,
+        confidence,
+    );
 
     let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
 
@@ -65,7 +104,7 @@ pub fn run_analyze(
 
     write_output(&output, output_path)?;
 
-    if result.has_critical {
+    if has_critical {
         Ok(2)
     } else {
         Ok(0)
@@ -138,6 +177,11 @@ pub fn run_diagnose(
 
 /// Run the `trace` command: trace a single symbol's flow through the codebase.
 ///
+/// Uses graph-direct tracing via `trace_flows_from()` (forward) and
+/// `trace_flows_to()` (backward), bypassing the manifest.flows pre-computed
+/// entry-point-based flows. This fixes the 3-cycle carry bug where symbols
+/// with known call edges but no reachable `main()` returned empty results.
+///
 /// Returns the exit code on success.
 #[allow(clippy::too_many_arguments)]
 pub fn run_trace(
@@ -150,7 +194,7 @@ pub fn run_trace(
     output_path: Option<&Path>,
     config_path: Option<&Path>,
 ) -> Result<u8, FlowspecError> {
-    // Guard unsupported formats (summary handled below per-format)
+    // Guard unsupported formats
     if !matches!(
         format,
         OutputFormat::Yaml | OutputFormat::Json | OutputFormat::Sarif | OutputFormat::Summary
@@ -158,27 +202,6 @@ pub fn run_trace(
         return Err(FlowspecError::FormatNotImplemented {
             format: format_name(format).to_string(),
         });
-    }
-
-    // Guard unsupported directions
-    match direction {
-        TraceDirection::Forward => {}
-        TraceDirection::Backward => {
-            return Err(FlowspecError::CommandNotImplemented {
-                command: "--direction backward".to_string(),
-                suggestion:
-                    "use --direction forward; backward tracing is planned for a future release"
-                        .to_string(),
-            });
-        }
-        TraceDirection::Both => {
-            return Err(FlowspecError::CommandNotImplemented {
-                command: "--direction both".to_string(),
-                suggestion:
-                    "use --direction forward; bidirectional tracing is planned for a future release"
-                        .to_string(),
-            });
-        }
     }
 
     if path.as_os_str().is_empty() {
@@ -200,19 +223,25 @@ pub fn run_trace(
     // Symbol matching: exact qualified name → name part → substring
     let matched_entity = find_matching_symbol(symbol, &result.manifest.entities)?;
 
-    // Filter flows to only those relevant to the matched symbol
-    let mut flow_entries: Vec<FlowEntry> = result
-        .manifest
-        .flows
-        .into_iter()
-        .filter(|flow| {
-            flow.entry == matched_entity
-                || flow.exit == matched_entity
-                || flow.steps.iter().any(|s| s.entity == matched_entity)
-        })
-        .collect();
+    // Look up the matched symbol's SymbolId in the graph
+    let matched_sym_id = find_symbol_id_in_graph(&result.graph, &matched_entity)?;
 
-    // Apply depth truncation
+    // Graph-direct tracing — FROM semantics (forward) / TO semantics (backward)
+    let flow_paths = match direction {
+        TraceDirection::Forward => trace_flows_from(&result.graph, matched_sym_id, depth),
+        TraceDirection::Backward => trace_flows_to(&result.graph, matched_sym_id, depth),
+        TraceDirection::Both => {
+            let mut forward = trace_flows_from(&result.graph, matched_sym_id, depth);
+            let backward = trace_flows_to(&result.graph, matched_sym_id, depth);
+            forward.extend(backward);
+            forward
+        }
+    };
+
+    // Convert FlowPath (graph-level) → FlowEntry (manifest-level)
+    let mut flow_entries = flow_paths_to_entries(&result.graph, &flow_paths, &matched_entity);
+
+    // Apply depth truncation to steps
     for flow in &mut flow_entries {
         if flow.steps.len() > depth {
             flow.steps.truncate(depth);
@@ -233,7 +262,6 @@ pub fn run_trace(
         }
         OutputFormat::Sarif => format_trace_sarif(&flow_entries)?,
         OutputFormat::Summary => {
-            // Summary for trace: render a compact text representation of matching flows
             let mut lines = Vec::new();
             lines.push(format!(
                 "Trace: {} ({} flow(s) matched)",
@@ -254,6 +282,129 @@ pub fn run_trace(
     write_output(&output, output_path)?;
 
     Ok(0)
+}
+
+/// Find a SymbolId in the graph by matching qualified_name.
+///
+/// Iterates all symbols in the graph and returns the first match on qualified_name.
+/// Returns SymbolNotFound if no symbol with the given qualified name exists.
+pub fn find_symbol_id_in_graph(
+    graph: &crate::Graph,
+    qualified_name: &str,
+) -> Result<SymbolId, FlowspecError> {
+    for (sym_id, sym) in graph.all_symbols() {
+        if sym.qualified_name == qualified_name {
+            return Ok(sym_id);
+        }
+    }
+    Err(FlowspecError::SymbolNotFound(format!(
+        "Symbol '{}' not found in graph. Run `flowspec analyze` to see available entities.",
+        qualified_name
+    )))
+}
+
+/// Convert graph-level FlowPaths to manifest-level FlowEntries.
+///
+/// Maps SymbolIds to qualified names via graph lookup, matching the conversion
+/// logic in lib.rs for consistency.
+pub fn flow_paths_to_entries(
+    graph: &crate::Graph,
+    paths: &[FlowPath],
+    matched_entity: &str,
+) -> Vec<FlowEntry> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let entry_name = graph
+                .get_symbol(path.entry)
+                .map(|s| s.qualified_name.clone())
+                .unwrap_or_else(|| matched_entity.to_string());
+
+            let last_step = path.steps.last();
+            let exit_name = last_step
+                .and_then(|step| graph.get_symbol(step.symbol))
+                .map(|s| s.qualified_name.clone())
+                .unwrap_or_else(|| entry_name.clone());
+
+            let steps: Vec<crate::manifest::types::FlowStep> = path
+                .steps
+                .iter()
+                .map(|step| {
+                    let entity = graph
+                        .get_symbol(step.symbol)
+                        .map(|s| s.qualified_name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    crate::manifest::types::FlowStep {
+                        entity,
+                        action: "call".to_string(),
+                        in_type: "unknown".to_string(),
+                        out_type: "unknown".to_string(),
+                    }
+                })
+                .collect();
+
+            let description = if path.is_cyclic {
+                format!("Cyclic flow from {}", entry_name)
+            } else {
+                format!("Flow from {} to {}", entry_name, exit_name)
+            };
+
+            FlowEntry {
+                id: format!("F{:03}", i + 1),
+                description,
+                entry: entry_name,
+                exit: exit_name,
+                steps,
+                issues: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+/// Validate that all `--checks` pattern names are valid.
+///
+/// Returns an error listing valid pattern names if any invalid name is found.
+pub fn validate_check_patterns(checks: &[String]) -> Result<(), FlowspecError> {
+    for pattern in checks {
+        if !pattern.is_empty() && !VALID_PATTERNS.contains(&pattern.as_str()) {
+            return Err(FlowspecError::UnknownPattern {
+                pattern: pattern.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Apply diagnostic filters to a diagnostics list in-place.
+///
+/// Filters by severity (>=), confidence (>=), and pattern name.
+fn apply_diagnostic_filters(
+    diagnostics: &mut Vec<crate::manifest::types::DiagnosticEntry>,
+    checks: &[String],
+    severity: Option<crate::Severity>,
+    confidence: Option<crate::Confidence>,
+) {
+    if let Some(min_severity) = severity {
+        diagnostics.retain(|d| {
+            let sev =
+                crate::Severity::from_str_checked(&d.severity).unwrap_or(crate::Severity::Info);
+            sev >= min_severity
+        });
+    }
+
+    if let Some(min_confidence) = confidence {
+        diagnostics.retain(|d| {
+            let conf = crate::Confidence::from_str_checked(&d.confidence)
+                .unwrap_or(crate::Confidence::Low);
+            conf >= min_confidence
+        });
+    }
+
+    let non_empty_checks: Vec<&String> = checks.iter().filter(|c| !c.is_empty()).collect();
+    if !non_empty_checks.is_empty() {
+        diagnostics.retain(|d| non_empty_checks.iter().any(|c| d.pattern == c.as_str()));
+    }
 }
 
 /// Find a matching symbol in the entity list using cascading match strategy.
@@ -652,5 +803,21 @@ mod tests {
         write_output("hello world", Some(&file)).unwrap();
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    // validate_check_patterns
+    #[test]
+    fn validate_check_patterns_accepts_valid() {
+        assert!(validate_check_patterns(&["data_dead_end".to_string()]).is_ok());
+        assert!(validate_check_patterns(&["phantom_dependency".to_string()]).is_ok());
+        assert!(validate_check_patterns(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_check_patterns_rejects_invalid() {
+        let result = validate_check_patterns(&["nonexistent_pattern".to_string()]);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("nonexistent_pattern"));
     }
 }

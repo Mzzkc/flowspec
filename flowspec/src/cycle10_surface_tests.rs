@@ -21,8 +21,16 @@ fn t1_size_validation_wired_pathological_input_rejected() {
     }
     std::fs::write(tmp.path().join("pathological.py"), &source).unwrap();
 
-    let result =
-        crate::commands::run_analyze(tmp.path(), &[], crate::OutputFormat::Yaml, None, None);
+    let result = crate::commands::run_analyze(
+        tmp.path(),
+        &[],
+        crate::OutputFormat::Yaml,
+        None,
+        None,
+        &[],
+        None,
+        None,
+    );
 
     // The size check MUST fire. If run_analyze succeeds, the check isn't wired.
     assert!(
@@ -50,8 +58,16 @@ fn t2_normal_input_passes_size_validation() {
     )
     .unwrap();
 
-    let result =
-        crate::commands::run_analyze(tmp.path(), &[], crate::OutputFormat::Yaml, None, None);
+    let result = crate::commands::run_analyze(
+        tmp.path(),
+        &[],
+        crate::OutputFormat::Yaml,
+        None,
+        None,
+        &[],
+        None,
+        None,
+    );
 
     assert!(
         result.is_ok(),
@@ -79,6 +95,9 @@ fn t3_size_check_before_write_output() {
         crate::OutputFormat::Yaml,
         Some(output_file.as_path()),
         None,
+        &[],
+        None,
+        None,
     );
 
     assert!(result.is_err(), "Must reject pathological input");
@@ -102,8 +121,16 @@ fn t4_small_source_below_threshold_skips_size_check() {
     )
     .unwrap();
 
-    let result =
-        crate::commands::run_analyze(tmp.path(), &[], crate::OutputFormat::Yaml, None, None);
+    let result = crate::commands::run_analyze(
+        tmp.path(),
+        &[],
+        crate::OutputFormat::Yaml,
+        None,
+        None,
+        &[],
+        None,
+        None,
+    );
 
     assert!(
         result.is_ok(),
@@ -145,8 +172,16 @@ fn t5_size_check_uses_real_source_bytes() {
 
     std::fs::write(tmp.path().join("above_threshold.py"), &source).unwrap();
 
-    let result =
-        crate::commands::run_analyze(tmp.path(), &[], crate::OutputFormat::Yaml, None, None);
+    let result = crate::commands::run_analyze(
+        tmp.path(),
+        &[],
+        crate::OutputFormat::Yaml,
+        None,
+        None,
+        &[],
+        None,
+        None,
+    );
 
     assert!(
         result.is_ok(),
@@ -246,9 +281,10 @@ fn t8_trace_depth_zero_truncates() {
     );
 }
 
-/// T9: Trace backward direction returns CommandNotImplemented with suggestion.
+/// T9: Trace backward direction is now implemented (was CommandNotImplemented in C10).
+/// Updated in C11 after backward tracing was implemented.
 #[test]
-fn t9_trace_backward_returns_not_implemented_with_suggestion() {
+fn t9_trace_backward_is_implemented() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("test.py"), "def f(): pass\n").unwrap();
 
@@ -263,12 +299,11 @@ fn t9_trace_backward_returns_not_implemented_with_suggestion() {
         None,
     );
 
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
+    // Backward trace on a leaf function with no callers should succeed with exit code 0
     assert!(
-        err.contains("--direction forward"),
-        "Backward error MUST suggest --direction forward. Got: {}",
-        err
+        result.is_ok(),
+        "Backward trace must be implemented. Got: {:?}",
+        result.err()
     );
 }
 
@@ -560,6 +595,9 @@ fn t20_run_analyze_rejects_empty_path() {
         std::path::Path::new(""),
         &[],
         crate::OutputFormat::Yaml,
+        None,
+        None,
+        &[],
         None,
         None,
     );
