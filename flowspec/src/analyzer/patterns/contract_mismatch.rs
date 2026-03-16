@@ -12,12 +12,17 @@
 //!
 //! **Phase 2 (MODERATE confidence): Cross-file same-name signature inconsistency.**
 //! Functions with the same name defined in different files but with different
-//! parameter counts. Heuristic — may be intentional overloading. Excludes
-//! dunder methods, test functions, and variadic signatures (`*args`, `**kwargs`).
+//! parameter counts. Heuristic — may be intentional overloading. Groups by
+//! `(language, name)` to prevent cross-language false positives. Excludes:
+//! - Dunder methods, test functions, variadic signatures (`*args`, `**kwargs`)
+//! - Import symbols (re-exported names are not implementations)
+//! - Rust cross-file comparisons (different `.rs` files = different modules;
+//!   same-name functions across Rust modules are normal architecture)
+//! - Unknown-language files (no heuristic comparison for unrecognized extensions)
 //!
 //! Does NOT use `is_excluded_symbol()` as a blanket pre-filter for Phase 1
 //! because decorator contract violations apply regardless of test context.
-//! Phase 2 uses targeted exclusions (dunders, test functions, imports).
+//! Phase 2 uses the targeted exclusions listed above.
 //!
 //! Serde annotation mismatch, call-site arity, and type annotation validation
 //! are deferred — they require parser-level changes not yet available.

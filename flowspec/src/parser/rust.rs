@@ -569,16 +569,21 @@ fn extract_use_declaration(result: &mut ParseResult, content: &[u8], path: &Path
     let visibility = extract_visibility(content, node);
 
     // Walk all descendant nodes to find import targets
-    extract_use_tree(result, content, path, node, visibility);
+    extract_use_tree(result, content, path, node, visibility, None);
 }
 
 /// Recursively extract import symbols from a use declaration's tree.
+///
+/// The `module_path` parameter accumulates the module prefix as we descend
+/// into scoped use lists. For `use crate::parser::{rust, python}`, the
+/// recursive call for the `use_list` receives `Some("crate::parser")`.
 fn extract_use_tree(
     result: &mut ParseResult,
     content: &[u8],
     path: &Path,
     node: Node,
     visibility: Visibility,
+    module_path: Option<&str>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -587,7 +592,19 @@ fn extract_use_tree(
                 // `use X as Y;` — extract the alias name
                 if let Some(alias_node) = child.child_by_field_name("alias") {
                     let alias_name = node_text(content, alias_node).to_string();
-                    add_import_symbol(result, &alias_name, visibility, path, child);
+                    // Extract module path from the use_as_clause's path field
+                    let as_module_path = child
+                        .child_by_field_name("path")
+                        .and_then(|p| extract_module_path(content, p))
+                        .or_else(|| module_path.map(|s| s.to_string()));
+                    add_import_symbol(
+                        result,
+                        &alias_name,
+                        visibility,
+                        path,
+                        child,
+                        as_module_path.as_deref(),
+                    );
                 }
             }
             "use_list" => {
@@ -597,12 +614,26 @@ fn extract_use_tree(
                     match item.kind() {
                         "identifier" => {
                             let name = node_text(content, item).to_string();
-                            add_import_symbol(result, &name, visibility, path, item);
+                            add_import_symbol(
+                                result,
+                                &name,
+                                visibility,
+                                path,
+                                item,
+                                module_path,
+                            );
                         }
                         "use_as_clause" => {
                             if let Some(alias_node) = item.child_by_field_name("alias") {
                                 let alias_name = node_text(content, alias_node).to_string();
-                                add_import_symbol(result, &alias_name, visibility, path, item);
+                                add_import_symbol(
+                                    result,
+                                    &alias_name,
+                                    visibility,
+                                    path,
+                                    item,
+                                    module_path,
+                                );
                             }
                         }
                         "self" => {
@@ -610,13 +641,37 @@ fn extract_use_tree(
                             // Extract the parent module name from the path
                             if let Some(parent_name) = extract_use_path_last_segment(content, node)
                             {
-                                add_import_symbol(result, &parent_name, visibility, path, item);
+                                add_import_symbol(
+                                    result,
+                                    &parent_name,
+                                    visibility,
+                                    path,
+                                    item,
+                                    module_path,
+                                );
                             }
                         }
                         "scoped_identifier" => {
-                            // Nested path inside use list
+                            // Nested path inside use list: `use crate::foo::{bar::Baz}`
+                            // Extend module_path with the scoped prefix
                             if let Some(name) = last_identifier_segment(content, item) {
-                                add_import_symbol(result, &name, visibility, path, item);
+                                let extended_path = if let Some(mp) = module_path {
+                                    item.child_by_field_name("path")
+                                        .map(|p| {
+                                            format!("{}::{}", mp, build_scoped_path(content, p))
+                                        })
+                                        .unwrap_or_else(|| mp.to_string())
+                                } else {
+                                    item.child_by_field_name("path")
+                                        .map(|p| build_scoped_path(content, p))
+                                        .unwrap_or_default()
+                                };
+                                let mp = if extended_path.is_empty() {
+                                    None
+                                } else {
+                                    Some(extended_path.as_str())
+                                };
+                                add_import_symbol(result, &name, visibility, path, item, mp);
                             }
                         }
                         _ => {}
@@ -640,11 +695,30 @@ fn extract_use_tree(
                 if child.kind() == "scoped_identifier" && !has_use_list_descendant(child) {
                     // Final scoped identifier — extract last segment as import name
                     if let Some(name) = last_identifier_segment(content, child) {
-                        add_import_symbol(result, &name, visibility, path, child);
+                        // Compute module path from the scoped_identifier's path field
+                        let child_module_path = extract_module_path(content, child);
+                        add_import_symbol(
+                            result,
+                            &name,
+                            visibility,
+                            path,
+                            child,
+                            child_module_path.as_deref(),
+                        );
                     }
                 } else {
-                    // Has nested children — recurse
-                    extract_use_tree(result, content, path, child, visibility);
+                    // Has nested children (scoped_use_list) — recurse with computed module path
+                    let nested_module_path = child
+                        .child_by_field_name("path")
+                        .map(|p| build_scoped_path(content, p));
+                    extract_use_tree(
+                        result,
+                        content,
+                        path,
+                        child,
+                        visibility,
+                        nested_module_path.as_deref(),
+                    );
                 }
             }
             "identifier" => {
@@ -652,7 +726,7 @@ fn extract_use_tree(
                 // But only if this is a direct child of use_declaration, not a path segment
                 if node.kind() == "use_declaration" {
                     let name = node_text(content, child).to_string();
-                    add_import_symbol(result, &name, visibility, path, child);
+                    add_import_symbol(result, &name, visibility, path, child, module_path);
                 }
             }
             _ => {}
@@ -704,18 +778,78 @@ fn extract_use_path_last_segment(content: &[u8], use_node: Node) -> Option<Strin
     None
 }
 
-/// Add an import symbol to the result.
+/// Recursively build the full `::` path from a scoped_identifier node.
+///
+/// For the tree-sitter node representing `crate::parser::rust`, returns
+/// `"crate::parser::rust"`. For a simple `identifier` node, returns
+/// that identifier text. Handles `crate`, `self`, `super` keywords.
+fn build_scoped_path(content: &[u8], node: Node) -> String {
+    match node.kind() {
+        "identifier" | "type_identifier" => node_text(content, node).to_string(),
+        "crate" => "crate".to_string(),
+        "self" => "self".to_string(),
+        "super" => "super".to_string(),
+        "scoped_identifier" => {
+            let path_part = node
+                .child_by_field_name("path")
+                .map(|n| build_scoped_path(content, n))
+                .unwrap_or_default();
+            let name_part = node
+                .child_by_field_name("name")
+                .map(|n| node_text(content, n).to_string())
+                .unwrap_or_default();
+            if path_part.is_empty() {
+                name_part
+            } else if name_part.is_empty() {
+                path_part
+            } else {
+                format!("{}::{}", path_part, name_part)
+            }
+        }
+        _ => node_text(content, node).to_string(),
+    }
+}
+
+/// Extract the module path (everything except the last segment) from a
+/// scoped_identifier node.
+///
+/// For `crate::parser::rust::RustAdapter`, the module path is
+/// `"crate::parser::rust"` (the `path` field of the outer scoped_identifier).
+/// Returns `None` for simple identifiers with no path prefix.
+fn extract_module_path(content: &[u8], node: Node) -> Option<String> {
+    if node.kind() == "scoped_identifier" {
+        node.child_by_field_name("path")
+            .map(|p| build_scoped_path(content, p))
+    } else {
+        None
+    }
+}
+
+/// Add an import symbol to the result with optional module path annotation.
+///
+/// When `module_path` is provided, adds a `"from:<module>"` annotation
+/// that enables `resolve_cross_file_imports()` to match this import to
+/// its definition file via the module map. Matches the pattern used by
+/// the Python and JavaScript adapters.
 fn add_import_symbol(
     result: &mut ParseResult,
     name: &str,
     visibility: Visibility,
     path: &Path,
     node: Node,
+    module_path: Option<&str>,
 ) {
     let file_stem = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+
+    let mut annotations = vec!["import".to_string()];
+    if let Some(mp) = module_path {
+        if !mp.is_empty() {
+            annotations.push(format!("from:{}", mp));
+        }
+    }
 
     result.symbols.push(Symbol {
         id: SymbolId::default(),
@@ -727,7 +861,7 @@ fn add_import_symbol(
         location: node_location(path, node),
         resolution: ResolutionStatus::Unresolved,
         scope: ScopeId::default(),
-        annotations: vec!["import".to_string()],
+        annotations,
     });
 
     // Also create an import reference

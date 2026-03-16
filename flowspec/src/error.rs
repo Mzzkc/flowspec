@@ -81,7 +81,7 @@ pub enum FlowspecError {
     },
 
     /// An unknown diagnostic pattern was specified in --checks.
-    #[error("unknown diagnostic pattern: {pattern} (fix: run flowspec diagnose --help for valid pattern names)")]
+    #[error("unknown diagnostic pattern: {pattern} (fix: valid patterns are isolated_cluster, data_dead_end, phantom_dependency, orphaned_impl, circular_dependency, missing_reexport, contract_mismatch, stale_reference, layer_violation, duplication, partial_wiring, asymmetric_handling, incomplete_migration)")]
     UnknownPattern {
         /// The pattern name that was not recognized.
         pattern: String,

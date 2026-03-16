@@ -46,16 +46,27 @@ new_key_type! {
 /// Maps to the categories in `architecture.yaml:161`. Exactly 11 variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
 pub enum SymbolKind {
+    /// A standalone function (`def foo()`, `function foo()`, `fn foo()`).
     Function,
+    /// A method bound to a class or impl block (`def method(self)`, `fn method(&self)`).
     Method,
+    /// A class definition (`class Foo`, `class Foo {}`).
     Class,
+    /// A struct definition (Rust `struct Foo {}`).
     Struct,
+    /// A trait definition (Rust `trait Foo {}`).
     Trait,
+    /// An interface or abstract class acting as a contract.
     Interface,
+    /// A module or namespace (`mod foo`, Python file-level module).
     Module,
+    /// A variable binding (`let x`, `x = 1`, `const x`).
     Variable,
+    /// An immutable constant (`const X: u32 = 1`, `UPPER_CASE = ...`).
     Constant,
+    /// A macro definition (Rust `macro_rules!`, decorators in other languages).
     Macro,
+    /// An enum definition (Rust `enum Foo {}`).
     Enum,
 }
 

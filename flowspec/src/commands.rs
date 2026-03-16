@@ -98,6 +98,13 @@ pub fn run_analyze(
         confidence,
     );
 
+    // Update metadata and summary counts to reflect filtered diagnostics (#16)
+    result.manifest.metadata.diagnostic_count = result.manifest.diagnostics.len() as u64;
+    recompute_diagnostic_summary(
+        &result.manifest.diagnostics,
+        &mut result.manifest.summary.diagnostic_summary,
+    );
+
     let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
 
     validate_manifest_size(&output, result.source_bytes)?;
@@ -376,10 +383,34 @@ pub fn validate_check_patterns(checks: &[String]) -> Result<(), FlowspecError> {
     Ok(())
 }
 
+/// Recompute diagnostic summary counts from the actual diagnostics list.
+///
+/// After filtering, the pre-computed `DiagnosticSummary` (critical/warning/info)
+/// becomes stale. This function recalculates from the filtered diagnostics.
+pub fn recompute_diagnostic_summary(
+    diagnostics: &[crate::manifest::types::DiagnosticEntry],
+    summary: &mut crate::manifest::types::DiagnosticSummary,
+) {
+    summary.critical = diagnostics
+        .iter()
+        .filter(|d| d.severity == "critical")
+        .count() as u64;
+    summary.warning = diagnostics
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count() as u64;
+    summary.info = diagnostics.iter().filter(|d| d.severity == "info").count() as u64;
+    summary.top_issues = diagnostics
+        .iter()
+        .take(5)
+        .map(|d| format!("{}: {}", d.pattern, d.message))
+        .collect();
+}
+
 /// Apply diagnostic filters to a diagnostics list in-place.
 ///
 /// Filters by severity (>=), confidence (>=), and pattern name.
-fn apply_diagnostic_filters(
+pub fn apply_diagnostic_filters(
     diagnostics: &mut Vec<crate::manifest::types::DiagnosticEntry>,
     checks: &[String],
     severity: Option<crate::Severity>,

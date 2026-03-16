@@ -56,6 +56,9 @@ mod cycle11_rust_call_tests;
 #[cfg(test)]
 mod cycle11_surface_tests;
 
+#[cfg(test)]
+mod cycle12_surface_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{
@@ -120,15 +123,20 @@ const VALID_PATTERNS: &[&str] = &[
     "incomplete_migration",
 ];
 
-/// Result of running `flowspec analyze` on a project.
+/// Result of running [`analyze()`] on a project.
+///
+/// Contains both the serializable [`Manifest`] and the live [`Graph`], so
+/// callers can run additional queries (e.g. [`trace_flows_from()`]) after
+/// analysis without re-parsing.
 pub struct AnalysisResult {
-    /// The generated manifest.
+    /// The generated manifest — ready for formatting via [`OutputFormatter`].
     pub manifest: Manifest,
-    /// Whether any critical diagnostics were found.
+    /// Whether any critical-severity diagnostics were found (drives exit code 2).
     pub has_critical: bool,
     /// Whether any findings exist at or above the given thresholds.
     pub has_findings: bool,
-    /// The populated analysis graph, available for direct queries (e.g. `trace_flows_from()`).
+    /// The populated analysis graph, available for direct queries
+    /// (e.g. [`trace_flows_from()`], [`Graph::callees()`]).
     pub graph: Graph,
     /// Total bytes of source code read during analysis.
     pub source_bytes: u64,
@@ -136,8 +144,41 @@ pub struct AnalysisResult {
 
 /// Run full analysis on a project path and produce a manifest.
 ///
-/// This is the main entry point for the library. It orchestrates:
-/// parse → graph → analyze → manifest generation.
+/// This is the main entry point for the library. It orchestrates the full
+/// pipeline: parse → graph → cross-file resolution → analyze → manifest.
+///
+/// # Parameters
+///
+/// - `project_path` — root directory (or single file) to analyze. Must exist.
+/// - `_config` — project configuration (reserved for future use).
+/// - `languages` — restrict analysis to these languages (e.g. `["python"]`).
+///   Pass an empty slice to auto-detect from file extensions.
+///
+/// # Returns
+///
+/// An [`AnalysisResult`] containing the generated [`Manifest`], the populated
+/// [`Graph`] (available for direct queries like [`trace_flows_from()`]), total
+/// source bytes read, and flags indicating whether critical or any diagnostics
+/// were found.
+///
+/// # Errors
+///
+/// - [`FlowspecError::EmptyPath`] — `project_path` is empty.
+/// - [`FlowspecError::TargetNotFound`] — `project_path` does not exist.
+/// - [`FlowspecError::UnsupportedLanguage`] — a requested language is not in
+///   the supported set (`python`, `javascript`, `typescript`, `rust`).
+///
+/// # Pipeline stages
+///
+/// 1. **Discover** source files, skipping generated directories
+///    (`target/`, `node_modules/`, `__pycache__/`, etc.).
+/// 2. **Parse** each file with the appropriate [`LanguageAdapter`] (Python, JS,
+///    Rust) via tree-sitter, producing IR and populating the [`Graph`].
+/// 3. **Resolve** cross-file imports by building a module map and linking
+///    import symbols to definitions in other files.
+/// 4. **Analyze** — run all registered diagnostic patterns on the graph.
+/// 5. **Assemble** the [`Manifest`] with entities, flows, diagnostics,
+///    modules, and dependency edges.
 pub fn analyze(
     project_path: &Path,
     _config: &Config,
@@ -493,7 +534,23 @@ pub fn analyze(
     })
 }
 
-/// Run diagnostics on a project, returning only filtered diagnostic entries.
+/// Run diagnostics on a project, returning filtered diagnostic entries.
+///
+/// Runs the full [`analyze()`] pipeline internally, then filters the
+/// resulting diagnostics by severity, confidence, and/or pattern name.
+///
+/// # Parameters
+///
+/// - `severity_filter` — minimum severity to include (e.g. `Some(Severity::Warning)`
+///   drops info-level findings).
+/// - `confidence_filter` — minimum confidence to include.
+/// - `checks_filter` — restrict to specific pattern names. Returns
+///   [`FlowspecError::UnknownPattern`] for invalid names.
+///
+/// # Returns
+///
+/// A tuple of `(filtered_diagnostics, has_findings)`. The boolean indicates
+/// whether any diagnostics survived filtering.
 pub fn diagnose(
     project_path: &Path,
     config: &Config,

@@ -22,11 +22,33 @@ use slotmap::SlotMap;
 
 use crate::parser::ir::*;
 
-/// The core analysis graph.
+/// The core analysis graph — the source of truth for all Flowspec analysis.
 ///
-/// Stores all IR nodes in flat tables with bidirectional adjacency lists.
-/// Supports CRUD operations, graph algorithms (connected components, cycle
-/// detection), and file-based queries for incremental updates.
+/// Stores symbols, scopes, boundaries, and references in flat slotmap arenas
+/// for O(1) lookup and cache-friendly iteration. Bidirectional adjacency
+/// lists (`outgoing`/`incoming`) enable efficient edge traversal in both
+/// directions. File-to-symbol mappings support incremental updates.
+///
+/// # Design
+///
+/// ECS-inspired data-oriented design: symbols are IDs, properties are data
+/// alongside, and the graph is a passive data store that analyzers query.
+/// The graph does not contain analysis logic — diagnostic patterns and flow
+/// tracers operate on it externally.
+///
+/// # Key query methods
+///
+/// | Method | Returns |
+/// |---|---|
+/// | [`all_symbols()`](Self::all_symbols) | Iterator over all `(SymbolId, &Symbol)` pairs |
+/// | [`callees()`](Self::callees) | Symbols called by a given symbol (`EdgeKind::Calls`) |
+/// | [`callers()`](Self::callers) | Symbols that call a given symbol |
+/// | [`importers()`](Self::importers) | Symbols that import a given symbol (cross-file) |
+/// | [`edges_from()`](Self::edges_from) | All outgoing edges (any kind) |
+/// | [`edges_to()`](Self::edges_to) | All incoming edges (any kind) |
+/// | [`symbols_in_file()`](Self::symbols_in_file) | All symbols defined in a file |
+/// | [`connected_components()`](Self::connected_components) | Undirected connected components |
+/// | [`detect_cycles()`](Self::detect_cycles) | Directed cycle detection via DFS coloring |
 #[derive(Debug, Clone, Default)]
 pub struct Graph {
     symbols: SlotMap<SymbolId, Symbol>,

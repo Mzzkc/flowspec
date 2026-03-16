@@ -65,13 +65,27 @@ pub fn validate_manifest_size(serialized: &str, source_bytes: u64) -> Result<(),
 
 /// Trait for formatting analysis output. One implementation per output format.
 ///
-/// Implementations must produce valid, parseable output in their format.
-/// The manifest is the full analysis output; diagnostics is the filtered
-/// output used by the `diagnose` command.
+/// This is one of two sanctioned traits in Flowspec (per `conventions.yaml`).
+/// Each output format — YAML, JSON, SARIF, summary — has exactly one
+/// implementation. To add a new output format, implement this trait and
+/// register the formatter in `commands.rs`.
+///
+/// # Implementors
+///
+/// - [`YamlFormatter`] — default format, full manifest (agents).
+/// - [`JsonFormatter`] — full manifest for tooling consumers.
+/// - [`SarifFormatter`] — SARIF v2.1.0 for CI integration (GitHub Code Scanning).
+/// - [`SummaryFormatter`] — compact plain-text (~2K tokens, humans).
+///
+/// # Contract
+///
+/// - `format_manifest` must produce valid, parseable output in the target format.
+/// - `format_diagnostics` formats the filtered subset used by the `diagnose` command.
+/// - Implementations must not alter the ordering of manifest sections.
 pub trait OutputFormatter {
-    /// Format a complete manifest (for the `analyze` command).
+    /// Format a complete [`Manifest`] into a string (for the `analyze` command).
     fn format_manifest(&self, manifest: &Manifest) -> Result<String, ManifestError>;
 
-    /// Format only diagnostics (for the `diagnose` command).
+    /// Format only diagnostics into a string (for the `diagnose` command).
     fn format_diagnostics(&self, diagnostics: &[DiagnosticEntry]) -> Result<String, ManifestError>;
 }

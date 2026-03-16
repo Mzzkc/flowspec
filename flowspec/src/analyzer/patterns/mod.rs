@@ -25,6 +25,8 @@ pub mod layer_violation;
 pub mod missing_reexport;
 /// Trait impls with no dispatch points, public methods with zero callers.
 pub mod orphaned_implementation;
+/// Functions imported by many modules but called from only a subset.
+pub mod partial_wiring;
 /// Imports where zero imported symbols are referenced downstream.
 pub mod phantom_dependency;
 /// Imports resolving to re-exports, shims, or moved definitions.
@@ -107,6 +109,10 @@ pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) 
             DiagnosticPattern::IncompleteMigration,
             incomplete_migration::detect(graph, project_root),
         ),
+        (
+            DiagnosticPattern::PartialWiring,
+            partial_wiring::detect(graph, project_root),
+        ),
         // Unimplemented patterns return empty Vec (registered but inactive)
     ];
 
@@ -177,12 +183,18 @@ mod tests {
     fn test_unimplemented_patterns_return_empty() {
         let graph = build_all_fixtures_graph();
         let diagnostics = run_all_patterns(&graph, Path::new(""));
-        // partial_wiring is not implemented — should never appear
+        // Duplication and AsymmetricHandling are not implemented — should never appear
         assert!(
             !diagnostics
                 .iter()
-                .any(|d| d.pattern == DiagnosticPattern::PartialWiring),
-            "Unimplemented patterns should not produce diagnostics"
+                .any(|d| d.pattern == DiagnosticPattern::Duplication),
+            "Unimplemented pattern Duplication should not produce diagnostics"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.pattern == DiagnosticPattern::AsymmetricHandling),
+            "Unimplemented pattern AsymmetricHandling should not produce diagnostics"
         );
     }
 
