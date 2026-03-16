@@ -592,6 +592,50 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     components.iter().collect()
 }
 
+/// Resolves a Rust module path (`crate::`, `super::`, `self::`) to a file.
+fn resolve_rust_module_path(
+    module_name: &str,
+    importing_file: &std::path::Path,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if module_name.starts_with("crate::") {
+        module_map.get(module_name).cloned()
+    } else if module_name.starts_with("super::") || module_name.starts_with("self::") {
+        let importing_module_key = find_module_key_for_file(importing_file, module_map)?;
+        let resolved = resolve_relative_rust_path(module_name, &importing_module_key);
+        module_map.get(&resolved).cloned()
+    } else {
+        None
+    }
+}
+
+/// Finds the module map key for a given file path (reverse lookup).
+fn find_module_key_for_file(
+    file: &std::path::Path,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> Option<String> {
+    module_map
+        .iter()
+        .find(|(_, v)| v.as_path() == file)
+        .map(|(k, _)| k.clone())
+}
+
+/// Resolves `super::` and `self::` to absolute `crate::` paths.
+fn resolve_relative_rust_path(module_name: &str, importing_module_key: &str) -> String {
+    if let Some(rest) = module_name.strip_prefix("self::") {
+        format!("{}::{}", importing_module_key, rest)
+    } else if let Some(rest) = module_name.strip_prefix("super::") {
+        if let Some(parent_end) = importing_module_key.rfind("::") {
+            let parent = &importing_module_key[..parent_end];
+            format!("{}::{}", parent, rest)
+        } else {
+            format!("crate::{}", rest)
+        }
+    } else {
+        module_name.to_string()
+    }
+}
+
 /// Resolves cross-file import references by matching import symbols to definitions
 /// in other files via a module-to-file mapping.
 ///
@@ -683,12 +727,28 @@ pub fn resolve_cross_file_imports(
     let mut resolution_updates: Vec<(SymbolId, ResolutionStatus)> = Vec::new();
 
     for (import_id, module_name, lookup_name, importing_file) in &imports_to_resolve {
-        // For JS relative imports (./foo, ../bar), resolve relative to the importing file
+        // Route to language-specific resolution based on module path format
         let target_file = if module_name.starts_with("./") || module_name.starts_with("../") {
             resolve_js_relative_import(module_name, importing_file, module_map)
+        } else if module_name.starts_with("crate::")
+            || module_name.starts_with("super::")
+            || module_name.starts_with("self::")
+        {
+            resolve_rust_module_path(module_name, importing_file, module_map)
         } else {
-            // Python dotted modules or non-relative JS imports
-            module_map.get(module_name.as_str()).cloned()
+            let direct = module_map.get(module_name.as_str()).cloned();
+            if direct.is_some() {
+                direct
+            } else if importing_file.extension().and_then(|e| e.to_str()) == Some("rs") {
+                // Rust bare paths — try self:: relative fallback
+                resolve_rust_module_path(
+                    &format!("self::{}", module_name),
+                    importing_file,
+                    module_map,
+                )
+            } else {
+                None
+            }
         };
         let target_file = target_file.as_ref();
 
@@ -808,10 +868,14 @@ pub fn resolve_cross_file_imports(
         // Find callers of this import symbol (intra-file call resolution)
         let callers_of_import = graph.callers(id);
         for caller_id in callers_of_import {
+            // Skip if transitive edge already exists (idempotency)
+            let existing_callees = graph.callees(caller_id);
             if let Some(caller_sym) = graph.get_symbol(caller_id) {
                 let loc = caller_sym.location.clone();
                 for &target_id in &import_targets {
-                    transitive_calls.push((caller_id, target_id, loc.clone()));
+                    if !existing_callees.contains(&target_id) {
+                        transitive_calls.push((caller_id, target_id, loc.clone()));
+                    }
                 }
             }
         }

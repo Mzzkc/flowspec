@@ -57,6 +57,9 @@ mod cycle11_rust_call_tests;
 mod cycle11_surface_tests;
 
 #[cfg(test)]
+mod cycle12_rust_cross_file_tests;
+
+#[cfg(test)]
 mod cycle12_surface_tests;
 
 // Re-export key public types
@@ -759,7 +762,97 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
         }
     }
 
+    // Phase 3: Rust files (crate-path keys)
+    let rs_files: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| f.extension().map(|e| e == "rs").unwrap_or(false))
+        .collect();
+
+    if !rs_files.is_empty() {
+        let crate_roots = find_rust_crate_roots(&rs_files);
+        if crate_roots.is_empty() {
+            // No crate root found — use common prefix as fallback
+            let common = find_js_common_prefix(&rs_files);
+            for file in &rs_files {
+                if let Ok(rel) = file.strip_prefix(&common) {
+                    let key = rust_path_to_module_key(rel);
+                    if !key.is_empty() {
+                        map.insert(key, (*file).clone());
+                    }
+                }
+            }
+        } else {
+            for file in &rs_files {
+                if let Some(root_dir) = closest_rust_crate_root(file, &crate_roots) {
+                    if let Ok(rel) = file.strip_prefix(root_dir) {
+                        let key = rust_path_to_module_key(rel);
+                        if !key.is_empty() {
+                            map.insert(key, (*file).clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     map
+}
+
+/// Finds directories containing Rust crate roots (`lib.rs` or `main.rs`).
+fn find_rust_crate_roots(rs_files: &[&PathBuf]) -> Vec<PathBuf> {
+    rs_files
+        .iter()
+        .filter(|f| {
+            f.file_name()
+                .map(|n| n == "lib.rs" || n == "main.rs")
+                .unwrap_or(false)
+        })
+        .filter_map(|f| f.parent().map(|p| p.to_path_buf()))
+        .collect()
+}
+
+/// Finds the closest crate root directory that is an ancestor of the given file.
+fn closest_rust_crate_root<'a>(file: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    roots
+        .iter()
+        .filter(|root| file.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
+/// Converts a relative Rust file path to a `crate::` prefixed module key.
+///
+/// - `lib.rs` → `"crate"`, `main.rs` → `"crate"`
+/// - `utils.rs` → `"crate::utils"`
+/// - `parser/mod.rs` → `"crate::parser"`
+/// - `parser/rust.rs` → `"crate::parser::rust"`
+fn rust_path_to_module_key(rel_path: &Path) -> String {
+    let stem = rel_path.with_extension("");
+    let parts: Vec<&str> = stem
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    if parts.len() == 1 && (parts[0] == "lib" || parts[0] == "main") {
+        return "crate".to_string();
+    }
+
+    let mut module_parts: Vec<&str> = parts;
+    if module_parts.last() == Some(&"mod") {
+        module_parts.pop();
+    }
+
+    if module_parts.is_empty() {
+        return "crate".to_string();
+    }
+
+    format!("crate::{}", module_parts.join("::"))
 }
 
 /// Finds the common directory prefix for JS/TS files.
