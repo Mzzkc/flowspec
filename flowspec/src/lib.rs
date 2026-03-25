@@ -62,6 +62,12 @@ mod cycle12_rust_cross_file_tests;
 #[cfg(test)]
 mod cycle12_surface_tests;
 
+#[cfg(test)]
+mod cycle13_cjs_and_use_path_tests;
+
+#[cfg(test)]
+mod cycle13_surface_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{
@@ -296,18 +302,53 @@ pub fn analyze(
     let diagnostics = to_manifest_entries(&raw_diagnostics);
 
     // Stage 3: Build entity list from graph symbols
+    //
+    // Two-pass approach for disambiguation: first collect qualified names
+    // to detect collisions, then build entities with directory-prefixed IDs
+    // where needed (e.g., parser/utils::helper vs core/utils::helper).
+
+    // Pass 1: Detect ambiguous qualified names
+    let mut name_counts: HashMap<String, u32> = HashMap::new();
+    let mut sym_parent_dirs: HashMap<String, String> = HashMap::new();
+    for (_sym_id, symbol) in graph.all_symbols() {
+        if symbol.kind == SymbolKind::Module {
+            continue;
+        }
+        *name_counts
+            .entry(symbol.qualified_name.clone())
+            .or_insert(0) += 1;
+        let parent_dir = symbol
+            .location
+            .file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let file_key = format!(
+            "{}|{}",
+            symbol.qualified_name,
+            symbol.location.file.display()
+        );
+        sym_parent_dirs.insert(file_key, parent_dir);
+    }
+    let ambiguous_names: HashSet<String> = name_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect();
+
+    // Pass 2: Build entities with disambiguated IDs
     let mut entities = Vec::new();
     for (sym_id, symbol) in graph.all_symbols() {
         if symbol.kind == SymbolKind::Module {
-            continue; // Skip file-scope module symbols
+            continue;
         }
         let rel_path = symbol
             .location
             .file
             .strip_prefix(project_path)
             .unwrap_or(&symbol.location.file);
-        // When analyzing a single file, strip_prefix removes the entire path,
-        // producing an empty string. Fall back to the filename component.
         let rel_path = if rel_path.as_os_str().is_empty() {
             symbol
                 .location
@@ -318,8 +359,27 @@ pub fn analyze(
         } else {
             rel_path
         };
-        // Combine callers (EdgeKind::Calls) and importers (EdgeKind::References)
-        // to surface cross-file dependents in the called_by field.
+
+        // Disambiguate entity ID when qualified_name collides
+        let entity_id = if ambiguous_names.contains(&symbol.qualified_name) {
+            let file_key = format!(
+                "{}|{}",
+                symbol.qualified_name,
+                symbol.location.file.display()
+            );
+            let parent_dir = sym_parent_dirs
+                .get(&file_key)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            if parent_dir.is_empty() {
+                symbol.qualified_name.clone()
+            } else {
+                format!("{}/{}", parent_dir, symbol.qualified_name)
+            }
+        } else {
+            symbol.qualified_name.clone()
+        };
+
         let mut called_by = extract_called_by(&graph, sym_id);
         for importer_id in graph.importers(sym_id) {
             if importer_id != parser::ir::SymbolId::default() {
@@ -333,7 +393,7 @@ pub fn analyze(
         }
 
         entities.push(EntityEntry {
-            id: symbol.qualified_name.clone(),
+            id: entity_id,
             kind: format_symbol_kind(symbol.kind),
             vis: extract_visibility(symbol),
             sig: symbol.signature.clone().unwrap_or_default(),

@@ -4,6 +4,7 @@
 //! `main.rs`. By living in the library crate, they can be unit-tested directly,
 //! improving coverage and catching regressions without integration test overhead.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -248,6 +249,11 @@ pub fn run_trace(
     // Convert FlowPath (graph-level) → FlowEntry (manifest-level)
     let mut flow_entries = flow_paths_to_entries(&result.graph, &flow_paths, &matched_entity);
 
+    // Deduplicate flows for --direction both (forward + backward may overlap)
+    if direction == TraceDirection::Both {
+        flow_entries = deduplicate_flows(flow_entries);
+    }
+
     // Apply depth truncation to steps
     for flow in &mut flow_entries {
         if flow.steps.len() > depth {
@@ -369,6 +375,37 @@ pub fn flow_paths_to_entries(
         .collect()
 }
 
+/// Deduplicate flow entries, preserving first occurrence and re-numbering IDs.
+///
+/// Two flows are considered duplicates if they share the same entry, exit,
+/// and step entity sequence. The dedup key includes steps (not just entry/exit)
+/// to preserve flows with the same endpoints but different intermediate paths.
+pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
+    let mut seen = HashSet::new();
+    let mut unique: Vec<FlowEntry> = Vec::with_capacity(flows.len());
+
+    for flow in flows {
+        let step_entities: String = flow
+            .steps
+            .iter()
+            .map(|s| s.entity.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = format!("{}|{}|{}", flow.entry, flow.exit, step_entities);
+
+        if seen.insert(key) {
+            unique.push(flow);
+        }
+    }
+
+    // Re-number IDs sequentially after dedup
+    for (i, flow) in unique.iter_mut().enumerate() {
+        flow.id = format!("F{:03}", i + 1);
+    }
+
+    unique
+}
+
 /// Validate that all `--checks` pattern names are valid.
 ///
 /// Returns an error listing valid pattern names if any invalid name is found.
@@ -467,7 +504,10 @@ pub fn find_matching_symbol(
         return Ok(name_matches[0].id.clone());
     }
     if name_matches.len() > 1 {
-        let options: Vec<&str> = name_matches.iter().map(|e| e.id.as_str()).collect();
+        let options: Vec<String> = name_matches
+            .iter()
+            .map(|e| format!("{} ({})", e.id, e.loc))
+            .collect();
         return Err(FlowspecError::SymbolNotFound(format!(
             "Symbol '{}' matches multiple entities: {}. Use a qualified name to disambiguate.",
             symbol,
@@ -482,7 +522,10 @@ pub fn find_matching_symbol(
         return Ok(substring_matches[0].id.clone());
     }
     if substring_matches.len() > 1 {
-        let options: Vec<&str> = substring_matches.iter().map(|e| e.id.as_str()).collect();
+        let options: Vec<String> = substring_matches
+            .iter()
+            .map(|e| format!("{} ({})", e.id, e.loc))
+            .collect();
         return Err(FlowspecError::SymbolNotFound(format!(
             "Symbol '{}' matches multiple entities: {}. Use a qualified name to disambiguate.",
             symbol,
