@@ -738,6 +738,20 @@ fn has_use_list_descendant(node: Node) -> bool {
     false
 }
 
+/// Extracts the first (prefix) segment of a `scoped_identifier`.
+///
+/// For `fs::read_to_string`, returns `"fs"`. For `collections::HashMap::new`,
+/// returns `"collections"` (outermost prefix). Used to emit a usage reference
+/// for the module prefix in qualified calls like `fs::read_to_string()`.
+fn extract_scoped_prefix(content: &[u8], node: Node) -> Option<String> {
+    let path_node = node.child_by_field_name("path")?;
+    match path_node.kind() {
+        "identifier" | "type_identifier" => Some(node_text(content, path_node).to_string()),
+        "scoped_identifier" => extract_scoped_prefix(content, path_node),
+        _ => None,
+    }
+}
+
 /// Extract the last identifier segment from a scoped_identifier or scoped_use_list path.
 fn last_identifier_segment(content: &[u8], node: Node) -> Option<String> {
     // For scoped_identifier, the "name" field is the last segment
@@ -905,7 +919,23 @@ fn extract_call(result: &mut ParseResult, content: &[u8], path: &Path, node: Nod
         match func_node.kind() {
             "identifier" => Some(node_text(content, func_node).to_string()),
             "scoped_identifier" => {
-                // Module::function() — take last segment
+                // Module::function() — take last segment for the call.
+                // Also emit a usage reference for the prefix so that
+                // `use std::fs; fs::read_to_string()` creates an edge
+                // to the `fs` import, preventing phantom_dependency FPs.
+                if let Some(prefix) = extract_scoped_prefix(content, func_node) {
+                    result.references.push(Reference {
+                        id: ReferenceId::default(),
+                        from: SymbolId::default(),
+                        to: SymbolId::default(),
+                        kind: ReferenceKind::Read,
+                        location: node_location(path, node),
+                        resolution: ResolutionStatus::Partial(format!(
+                            "attribute_access:{}",
+                            prefix
+                        )),
+                    });
+                }
                 last_identifier_segment(content, func_node)
             }
             "field_expression" => {

@@ -1086,41 +1086,83 @@ fn extract_all_calls(
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_else(|| "unknown".to_string());
 
-                        // Find the variable name this require is assigned to
-                        let var_name = extract_require_var_name(content, node);
-                        let import_name = var_name.as_deref().unwrap_or(&name);
+                        // Check for destructured require: const { x, y } = require(...)
+                        let destructured_bindings =
+                            extract_destructured_require_bindings(content, node);
 
-                        let mut annotations = vec![
-                            "import".to_string(),
-                            format!("from:{}", source),
-                            "cjs".to_string(),
-                        ];
-                        // If var_name is available, use it as the import name
-                        if var_name.is_none() {
-                            annotations.push("require".to_string());
+                        if !destructured_bindings.is_empty() {
+                            // Create individual import symbols per binding
+                            for (local_name, original_name) in &destructured_bindings {
+                                let mut annotations = vec![
+                                    "import".to_string(),
+                                    format!("from:{}", source),
+                                    "cjs".to_string(),
+                                ];
+                                if let Some(orig) = original_name {
+                                    annotations.push(format!("original_name:{}", orig));
+                                }
+
+                                result.references.push(Reference {
+                                    id: ReferenceId::default(),
+                                    from: SymbolId::default(),
+                                    to: SymbolId::default(),
+                                    kind: ReferenceKind::Import,
+                                    location: node_location(path, node),
+                                    resolution: ResolutionStatus::Partial("external".to_string()),
+                                });
+
+                                result.symbols.push(Symbol {
+                                    id: SymbolId::default(),
+                                    kind: SymbolKind::Variable,
+                                    name: local_name.clone(),
+                                    qualified_name: format!(
+                                        "{}::import::{}",
+                                        file_stem, local_name
+                                    ),
+                                    visibility: Visibility::Private,
+                                    signature: None,
+                                    location: node_location(path, node),
+                                    resolution: ResolutionStatus::Partial("import".to_string()),
+                                    scope: ScopeId::default(),
+                                    annotations,
+                                });
+                            }
+                        } else {
+                            // Whole-module require: existing behavior
+                            let var_name = extract_require_var_name(content, node);
+                            let import_name = var_name.as_deref().unwrap_or(&name);
+
+                            let mut annotations = vec![
+                                "import".to_string(),
+                                format!("from:{}", source),
+                                "cjs".to_string(),
+                            ];
+                            if var_name.is_none() {
+                                annotations.push("require".to_string());
+                            }
+
+                            result.references.push(Reference {
+                                id: ReferenceId::default(),
+                                from: SymbolId::default(),
+                                to: SymbolId::default(),
+                                kind: ReferenceKind::Import,
+                                location: node_location(path, node),
+                                resolution: ResolutionStatus::Partial("external".to_string()),
+                            });
+
+                            result.symbols.push(Symbol {
+                                id: SymbolId::default(),
+                                kind: SymbolKind::Module,
+                                name: import_name.to_string(),
+                                qualified_name: format!("{}::import::{}", file_stem, import_name),
+                                visibility: Visibility::Private,
+                                signature: None,
+                                location: node_location(path, node),
+                                resolution: ResolutionStatus::Partial("import".to_string()),
+                                scope: ScopeId::default(),
+                                annotations,
+                            });
                         }
-
-                        result.references.push(Reference {
-                            id: ReferenceId::default(),
-                            from: SymbolId::default(),
-                            to: SymbolId::default(),
-                            kind: ReferenceKind::Import,
-                            location: node_location(path, node),
-                            resolution: ResolutionStatus::Partial("external".to_string()),
-                        });
-
-                        result.symbols.push(Symbol {
-                            id: SymbolId::default(),
-                            kind: SymbolKind::Module,
-                            name: import_name.to_string(),
-                            qualified_name: format!("{}::import::{}", file_stem, import_name),
-                            visibility: Visibility::Private,
-                            signature: None,
-                            location: node_location(path, node),
-                            resolution: ResolutionStatus::Partial("import".to_string()),
-                            scope: ScopeId::default(),
-                            annotations,
-                        });
 
                         // Don't emit a regular call reference for require()
                         // Still recurse into children
@@ -1179,12 +1221,64 @@ fn extract_require_var_name(content: &[u8], call_node: Node) -> Option<String> {
     let parent = call_node.parent()?;
     if parent.kind() == "variable_declarator" {
         let name_node = parent.child_by_field_name("name")?;
+        // Skip object_pattern (destructured requires) and array_pattern
+        if name_node.kind() == "object_pattern" || name_node.kind() == "array_pattern" {
+            return None;
+        }
         let name = node_text(content, name_node).to_string();
         if !name.is_empty() {
             return Some(name);
         }
     }
     None
+}
+
+/// Extracts individual bindings from a destructured `require()` call.
+///
+/// For `const { x, y: alias } = require('./utils')`, returns
+/// `[("x", None), ("alias", Some("y"))]`. Returns an empty vec if the
+/// require is not destructured (e.g., `const mod = require('./utils')`).
+fn extract_destructured_require_bindings(
+    content: &[u8],
+    call_node: Node,
+) -> Vec<(String, Option<String>)> {
+    let parent = match call_node.parent() {
+        Some(p) if p.kind() == "variable_declarator" => p,
+        _ => return Vec::new(),
+    };
+
+    let name_node = match parent.child_by_field_name("name") {
+        Some(n) if n.kind() == "object_pattern" => n,
+        _ => return Vec::new(),
+    };
+
+    let mut bindings = Vec::new();
+    let mut cursor = name_node.walk();
+    for child in name_node.children(&mut cursor) {
+        match child.kind() {
+            "shorthand_property_identifier_pattern" => {
+                let binding_name = node_text(content, child).to_string();
+                if !binding_name.is_empty() {
+                    bindings.push((binding_name, None));
+                }
+            }
+            "pair_pattern" => {
+                let key = child
+                    .child_by_field_name("key")
+                    .map(|k| node_text(content, k).to_string());
+                let value = child
+                    .child_by_field_name("value")
+                    .map(|v| node_text(content, v).to_string());
+                if let Some(alias) = value {
+                    if !alias.is_empty() {
+                        bindings.push((alias, key));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    bindings
 }
 
 /// Extracts the callee name from a call expression's `function` field.
