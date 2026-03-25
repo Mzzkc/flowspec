@@ -125,3 +125,32 @@ fn kind_label(kind: SymbolKind) -> &'static str {
         SymbolKind::Enum => "enum",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    // =========================================================================
+    // QA-2 C13 Section 3: Cross-pattern domain overlap — CJS import exclusion
+    // =========================================================================
+
+    // T12: CJS-imported symbols must be excluded from data_dead_end
+    #[test]
+    fn test_data_dead_end_does_not_fire_on_cjs_import_symbol() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol({
+            let mut sym = make_import("parse", "app.js", 1);
+            sym.annotations.push("from:./utils".to_string());
+            sym.annotations.push("cjs".to_string());
+            sym
+        });
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity.contains("parse")),
+            "CJS import symbol must be excluded from data_dead_end via is_excluded_symbol()"
+        );
+    }
+}

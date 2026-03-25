@@ -678,4 +678,135 @@ mod tests {
 
         graph
     }
+
+    // =========================================================================
+    // QA-2 C13 Section 2: stale_reference + CJS destructured imports
+    // =========================================================================
+
+    // T7: Valid CJS destructured import — true negative
+    #[test]
+    fn test_stale_reference_does_not_fire_on_resolved_cjs_destructured_import() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol(make_symbol(
+            "parse",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.js",
+            1,
+        ));
+
+        let mut import_sym = make_import("parse", "app.js", 1);
+        import_sym.annotations.push("from:./utils".to_string());
+        import_sym.annotations.push("cjs".to_string());
+        import_sym.resolution = ResolutionStatus::Resolved;
+        graph.add_symbol(import_sym);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "parse"),
+            "Resolved CJS destructured import must NOT be flagged as stale"
+        );
+    }
+
+    // T8: CJS destructured import with alias — true negative
+    #[test]
+    fn test_stale_reference_silent_on_resolved_aliased_cjs_import() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol(make_symbol(
+            "formatDate",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.js",
+            1,
+        ));
+
+        let mut import_sym = make_import("fmt", "app.js", 1);
+        import_sym.annotations.push("from:./utils".to_string());
+        import_sym.annotations.push("cjs".to_string());
+        import_sym
+            .annotations
+            .push("original_name:formatDate".to_string());
+        import_sym.resolution = ResolutionStatus::Resolved;
+        graph.add_symbol(import_sym);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "fmt"),
+            "Resolved aliased CJS import must NOT be flagged as stale"
+        );
+    }
+
+    // T9: CJS import that fails resolution — true positive preserved
+    #[test]
+    fn test_stale_reference_fires_on_unresolved_cjs_destructured_import() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol(make_symbol(
+            "existingFn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.js",
+            1,
+        ));
+
+        let mut import_sym = make_import("removedFn", "app.js", 1);
+        import_sym.annotations.push("from:./utils".to_string());
+        import_sym.annotations.push("cjs".to_string());
+        import_sym.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import_sym);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "removedFn"),
+            "CJS import to removed symbol MUST be flagged as stale reference"
+        );
+        let diag = diagnostics
+            .iter()
+            .find(|d| d.entity == "removedFn")
+            .unwrap();
+        assert_eq!(
+            diag.confidence,
+            Confidence::High,
+            "Module-resolved-symbol-not-found must be HIGH confidence"
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C13 Section 5: Confidence calibration for CJS
+    // =========================================================================
+
+    // T16: CJS annotation does not downgrade confidence
+    #[test]
+    fn test_stale_reference_confidence_high_for_cjs_module_resolved_symbol_missing() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol(make_symbol(
+            "existing",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.js",
+            1,
+        ));
+
+        let mut import_sym = make_import("deleted", "app.js", 1);
+        import_sym.annotations.push("from:utils".to_string());
+        import_sym.annotations.push("cjs".to_string());
+        import_sym.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import_sym);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let diag = diagnostics
+            .iter()
+            .find(|d| d.entity == "deleted")
+            .expect("Must detect stale CJS import");
+        assert_eq!(
+            diag.confidence,
+            Confidence::High,
+            "CJS annotation must not downgrade confidence from HIGH for Signal 1"
+        );
+    }
 }

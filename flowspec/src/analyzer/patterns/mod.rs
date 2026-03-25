@@ -3252,4 +3252,238 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // QA-2 C13 Section 4: Dogfood triage — partial_wiring borderline findings
+    // =========================================================================
+
+    // T13: Re-export pattern — function imported but only re-exported, not called
+    #[test]
+    fn test_partial_wiring_fires_on_function_imported_but_only_reexported() {
+        use crate::parser::ir::*;
+        let mut graph = Graph::new();
+
+        // api.py: function "format_output" (the target)
+        let target_id = graph.add_symbol(make_symbol(
+            "format_output",
+            SymbolKind::Function,
+            Visibility::Public,
+            "api.py",
+            1,
+        ));
+
+        // lib.py: imports format_output (re-export, no call)
+        let lib_import = graph.add_symbol({
+            let mut sym = make_import("format_output", "lib.py", 1);
+            sym.annotations.push("from:api".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            lib_import,
+            target_id,
+            ReferenceKind::Import,
+            "lib.py",
+        );
+
+        // client_a.py: imports + calls format_output
+        let client_a_import = graph.add_symbol({
+            let mut sym = make_import("format_output", "client_a.py", 1);
+            sym.annotations.push("from:lib".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            client_a_import,
+            target_id,
+            ReferenceKind::Import,
+            "client_a.py",
+        );
+        let caller_a = graph.add_symbol(make_symbol(
+            "render_a",
+            SymbolKind::Function,
+            Visibility::Public,
+            "client_a.py",
+            5,
+        ));
+        add_ref(
+            &mut graph,
+            caller_a,
+            target_id,
+            ReferenceKind::Call,
+            "client_a.py",
+        );
+
+        // client_b.py: imports but does NOT call format_output
+        let client_b_import = graph.add_symbol({
+            let mut sym = make_import("format_output", "client_b.py", 1);
+            sym.annotations.push("from:lib".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            client_b_import,
+            target_id,
+            ReferenceKind::Import,
+            "client_b.py",
+        );
+
+        // client_c.py: imports but does NOT call format_output
+        let client_c_import = graph.add_symbol({
+            let mut sym = make_import("format_output", "client_c.py", 1);
+            sym.annotations.push("from:lib".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            client_c_import,
+            target_id,
+            ReferenceKind::Import,
+            "client_c.py",
+        );
+
+        let diagnostics = partial_wiring::detect(&graph, Path::new(""));
+        let pw_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("format_output"))
+            .collect();
+
+        // 4 importers (lib, client_a, client_b, client_c), 1 caller (client_a)
+        // Wiring ratio = 1/4 = 25% < 80% → should fire
+        // With ≥3 importers and ≥1 caller, partial_wiring triggers
+        assert!(
+            !pw_findings.is_empty(),
+            "Re-export-only pattern should trigger partial_wiring. \
+             4 importers, 1 caller = 25% wired. Got diagnostics: {:?}",
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+    }
+
+    // T14: All imports actually called — no finding
+    #[test]
+    fn test_partial_wiring_silent_when_import_has_same_file_callers() {
+        use crate::parser::ir::*;
+        let mut graph = Graph::new();
+
+        // utils.py: function "helper"
+        let target_id = graph.add_symbol(make_symbol(
+            "helper",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.py",
+            1,
+        ));
+
+        // app.py: imports + calls helper
+        let app_import = graph.add_symbol({
+            let mut sym = make_import("helper", "app.py", 1);
+            sym.annotations.push("from:utils".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            app_import,
+            target_id,
+            ReferenceKind::Import,
+            "app.py",
+        );
+        let app_caller = graph.add_symbol(make_symbol(
+            "app_main",
+            SymbolKind::Function,
+            Visibility::Public,
+            "app.py",
+            5,
+        ));
+        add_ref(
+            &mut graph,
+            app_caller,
+            target_id,
+            ReferenceKind::Call,
+            "app.py",
+        );
+
+        // server.py: imports + calls helper
+        let srv_import = graph.add_symbol({
+            let mut sym = make_import("helper", "server.py", 1);
+            sym.annotations.push("from:utils".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            srv_import,
+            target_id,
+            ReferenceKind::Import,
+            "server.py",
+        );
+        let srv_caller = graph.add_symbol(make_symbol(
+            "handle",
+            SymbolKind::Function,
+            Visibility::Public,
+            "server.py",
+            5,
+        ));
+        add_ref(
+            &mut graph,
+            srv_caller,
+            target_id,
+            ReferenceKind::Call,
+            "server.py",
+        );
+
+        // cli.py: imports + calls helper
+        let cli_import = graph.add_symbol({
+            let mut sym = make_import("helper", "cli.py", 1);
+            sym.annotations.push("from:utils".to_string());
+            sym.resolution = ResolutionStatus::Resolved;
+            sym
+        });
+        add_ref(
+            &mut graph,
+            cli_import,
+            target_id,
+            ReferenceKind::Import,
+            "cli.py",
+        );
+        let cli_caller = graph.add_symbol(make_symbol(
+            "run_cli",
+            SymbolKind::Function,
+            Visibility::Public,
+            "cli.py",
+            5,
+        ));
+        add_ref(
+            &mut graph,
+            cli_caller,
+            target_id,
+            ReferenceKind::Call,
+            "cli.py",
+        );
+
+        let diagnostics = partial_wiring::detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity.contains("helper")),
+            "All 3 importers call the function (100% ratio) — no partial_wiring finding"
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C13 Section 6: Empty graph — no panics for all three patterns
+    // =========================================================================
+
+    // T19: Empty graph safety check for affected patterns
+    #[test]
+    fn test_all_affected_patterns_handle_empty_graph() {
+        let graph = Graph::new();
+        let root = Path::new("");
+
+        assert!(phantom_dependency::detect(&graph, root).is_empty());
+        assert!(stale_reference::detect(&graph, root).is_empty());
+        assert!(partial_wiring::detect(&graph, root).is_empty());
+    }
 }
