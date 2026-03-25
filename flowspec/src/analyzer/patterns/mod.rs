@@ -3486,4 +3486,52 @@ mod tests {
         assert!(stale_reference::detect(&graph, root).is_empty());
         assert!(partial_wiring::detect(&graph, root).is_empty());
     }
+
+    // =========================================================================
+    // QA-2 C14 Section 3: Cross-Pattern Regression — coexistence
+    // =========================================================================
+
+    // T17: phantom_dependency + stale_reference can coexist on same import
+    #[test]
+    fn test_c14_phantom_and_stale_can_coexist_on_same_import_symbol() {
+        use crate::parser::ir::*;
+
+        let mut graph = Graph::new();
+
+        // Path-segment import: both phantom (no usage) AND stale (can't resolve)
+        let mut import = make_import("commands", "test.rs", 7);
+        import.annotations.push("from:crate::commands".to_string());
+        import.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import);
+
+        let root = Path::new("");
+
+        let phantom_diags = phantom_dependency::detect(&graph, root);
+        let stale_diags = stale_reference::detect(&graph, root);
+
+        // phantom_dependency fires (0 same-file edges to this import)
+        assert!(
+            phantom_diags.iter().any(|d| d.entity == "commands"),
+            "phantom_dependency must fire on path-segment import with no usage. Got: {:?}",
+            phantom_diags.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+
+        // stale_reference fires (Partial resolution)
+        assert!(
+            stale_diags.iter().any(|d| d.entity == "commands"),
+            "stale_reference must fire on path-segment import with Partial resolution. Got: {:?}",
+            stale_diags.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+
+        // Both diagnostics reference the same entity
+        let phantom_entity = phantom_diags
+            .iter()
+            .find(|d| d.entity == "commands")
+            .unwrap();
+        let stale_entity = stale_diags.iter().find(|d| d.entity == "commands").unwrap();
+        assert_eq!(phantom_entity.entity, stale_entity.entity);
+        assert_eq!(phantom_entity.pattern, DiagnosticPattern::PhantomDependency);
+        assert_eq!(stale_entity.pattern, DiagnosticPattern::StaleReference);
+    }
 }

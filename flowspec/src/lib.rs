@@ -68,6 +68,12 @@ mod cycle13_cjs_and_use_path_tests;
 #[cfg(test)]
 mod cycle13_surface_tests;
 
+#[cfg(test)]
+mod cycle14_type_reference_tests;
+
+#[cfg(test)]
+mod cycle14_diagnostic_interaction_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{

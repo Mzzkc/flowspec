@@ -129,7 +129,52 @@ fn kind_label(kind: SymbolKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ir::ReferenceKind;
     use crate::test_utils::*;
+
+    // =========================================================================
+    // QA-2 C13 Section 3: Cross-pattern domain overlap — CJS import exclusion
+    // =========================================================================
+
+    // =========================================================================
+    // QA-2 C14 Section 3: Cross-Pattern Regression — data_dead_end
+    // =========================================================================
+
+    // T18: Import-annotated symbols still excluded after type reference fix
+    #[test]
+    fn test_c14_data_dead_end_excludes_import_symbols_after_type_reference_fix() {
+        let mut graph = Graph::new();
+
+        let import_id = graph.add_symbol({
+            let mut sym = make_import("Config", "lib.rs", 1);
+            sym.annotations.push("from:crate::config".to_string());
+            sym
+        });
+
+        let func_id = graph.add_symbol(make_symbol(
+            "load",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+
+        // Type reference edge from Worker 1's fix
+        add_ref(
+            &mut graph,
+            func_id,
+            import_id,
+            ReferenceKind::Read,
+            "lib.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity.contains("Config")),
+            "Import symbol 'Config' must be excluded from data_dead_end via \
+             is_excluded_symbol() annotation check, regardless of edge count"
+        );
+    }
 
     // =========================================================================
     // QA-2 C13 Section 3: Cross-pattern domain overlap — CJS import exclusion

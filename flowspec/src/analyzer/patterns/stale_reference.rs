@@ -778,6 +778,399 @@ mod tests {
     // QA-2 C13 Section 5: Confidence calibration for CJS
     // =========================================================================
 
+    // =========================================================================
+    // QA-2 C14 Section 1: stale_reference — Path-Segment Import FP Surface
+    // =========================================================================
+
+    // T1: Path-segment import triggers stale_reference — confirms FP mechanism
+    #[test]
+    fn test_c14_stale_reference_fires_on_rust_path_segment_import() {
+        let mut graph = Graph::new();
+
+        // Target file commands.rs has function symbols but NO symbol named "commands"
+        graph.add_symbol(make_symbol(
+            "deduplicate_flows",
+            SymbolKind::Function,
+            Visibility::Public,
+            "commands.rs",
+            383,
+        ));
+        graph.add_symbol(make_symbol(
+            "find_matching_symbol",
+            SymbolKind::Function,
+            Visibility::Public,
+            "commands.rs",
+            100,
+        ));
+
+        // Path-segment import: entity="commands", from:"crate::commands"
+        // Resolution is Partial because the file has no symbol named "commands"
+        let mut import_sym = make_import("commands", "test.rs", 7);
+        import_sym
+            .annotations
+            .push("from:crate::commands".to_string());
+        import_sym.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import_sym);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "commands"),
+            "stale_reference MUST fire on path-segment import 'commands' with \
+             Partial resolution. This confirms the FP mechanism documented in \
+             investigation-2.md. Got entities: {:?}",
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+        let diag = diagnostics.iter().find(|d| d.entity == "commands").unwrap();
+        assert_eq!(diag.confidence, Confidence::High);
+    }
+
+    // T2: Leaf import in same use-list resolves correctly — true negative
+    #[test]
+    fn test_c14_stale_reference_silent_on_resolved_leaf_import_from_same_use_list() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol(make_symbol(
+            "deduplicate_flows",
+            SymbolKind::Function,
+            Visibility::Public,
+            "commands.rs",
+            383,
+        ));
+
+        // Resolved leaf import (the actual function)
+        let mut leaf_import = make_import("deduplicate_flows", "test.rs", 7);
+        leaf_import
+            .annotations
+            .push("from:crate::commands".to_string());
+        leaf_import.resolution = ResolutionStatus::Resolved;
+        graph.add_symbol(leaf_import);
+
+        // Unresolved path-segment import (the module name)
+        let mut path_import = make_import("commands", "test.rs", 7);
+        path_import
+            .annotations
+            .push("from:crate::commands".to_string());
+        path_import.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(path_import);
+
+        let diagnostics = detect(&graph, Path::new(""));
+
+        // Leaf import must NOT fire
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "deduplicate_flows"),
+            "Resolved leaf import must NOT fire stale_reference"
+        );
+        // Path-segment import DOES fire
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "commands"),
+            "Path-segment import must fire stale_reference"
+        );
+    }
+
+    // T3: Nested module path creates multiple path-segment imports — adversarial
+    #[test]
+    fn test_c14_stale_reference_fires_on_all_intermediate_path_segments() {
+        let mut graph = Graph::new();
+
+        // Deeply nested: use crate::analyzer::patterns::phantom_dependency::detect
+        for (name, from) in [
+            ("analyzer", "crate::analyzer"),
+            ("patterns", "crate::analyzer::patterns"),
+            (
+                "phantom_dependency",
+                "crate::analyzer::patterns::phantom_dependency",
+            ),
+        ] {
+            let mut import = make_import(name, "test.rs", 1);
+            import.annotations.push(format!("from:{}", from));
+            import.resolution =
+                ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+            graph.add_symbol(import);
+        }
+
+        // Resolved leaf
+        let mut leaf = make_import("detect", "test.rs", 1);
+        leaf.annotations
+            .push("from:crate::analyzer::patterns::phantom_dependency".to_string());
+        leaf.resolution = ResolutionStatus::Resolved;
+        graph.add_symbol(leaf);
+
+        let diagnostics = detect(&graph, Path::new(""));
+
+        // All 3 path segments fire
+        for name in ["analyzer", "patterns", "phantom_dependency"] {
+            assert!(
+                diagnostics.iter().any(|d| d.entity == name),
+                "Intermediate path segment '{}' must fire stale_reference. Got: {:?}",
+                name,
+                diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+            );
+        }
+        // Leaf does NOT fire
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "detect"),
+            "Resolved leaf 'detect' must NOT fire stale_reference"
+        );
+    }
+
+    // T4: Function-body use statement — same mechanism as module-level
+    #[test]
+    fn test_c14_stale_reference_fires_on_function_body_use_path_segment() {
+        let mut graph = Graph::new();
+
+        // Path-segment import from inside a function body (like C13 surface_tests line 686)
+        let mut import = make_import("flow", "test_file.rs", 686);
+        import
+            .annotations
+            .push("from:crate::analyzer::flow".to_string());
+        import.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "flow"),
+            "Function-body use path-segment must fire stale_reference identically \
+             to module-level uses. Got: {:?}",
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+        let diag = diagnostics.iter().find(|d| d.entity == "flow").unwrap();
+        assert_eq!(
+            diag.confidence,
+            Confidence::High,
+            "Function-body path-segment must have same HIGH confidence as module-level"
+        );
+    }
+
+    // T5: Adversarial — import entity name happens to match a function name in target file
+    #[test]
+    fn test_c14_stale_reference_path_segment_matching_function_name_resolves() {
+        let mut graph = Graph::new();
+
+        // Target file has a symbol named "test_utils" (same as module name)
+        graph.add_symbol(make_symbol(
+            "test_utils",
+            SymbolKind::Function,
+            Visibility::Public,
+            "test_utils.rs",
+            1,
+        ));
+
+        // Import resolves because the entity name matches a symbol in the target file
+        let mut import = make_import("test_utils", "lib.rs", 10);
+        import
+            .annotations
+            .push("from:crate::test_utils".to_string());
+        import.resolution = ResolutionStatus::Resolved;
+        graph.add_symbol(import);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "test_utils"),
+            "Resolved path-segment import must NOT fire stale_reference"
+        );
+    }
+
+    // T6: Star import through Rust use — already handled, regression guard
+    #[test]
+    fn test_c14_stale_reference_skips_rust_star_import() {
+        let mut graph = Graph::new();
+
+        let mut import = make_import("*:collections", "lib.rs", 1);
+        import.annotations.push("from:std::collections".to_string());
+        import.resolution = ResolutionStatus::Partial("star import - module resolved".to_string());
+        graph.add_symbol(import);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.is_empty(),
+            "Rust star imports must be skipped by stale_reference. Got: {:?}",
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+    }
+
+    // T7: Third-party crate module path — should NOT fire
+    #[test]
+    fn test_c14_stale_reference_silent_on_third_party_crate_path_segment() {
+        let mut graph = Graph::new();
+
+        let mut import = make_import("serde", "lib.rs", 1);
+        import.annotations.push("from:serde".to_string());
+        import.resolution = ResolutionStatus::Unresolved;
+        graph.add_symbol(import);
+        // No symbols from any file named "serde.rs" in the graph
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "serde"),
+            "Third-party crate path must NOT trigger stale_reference. \
+             No local module 'serde' exists. Got: {:?}",
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C14 Section 3 (partial): Cross-Pattern Regression — stale_reference
+    // =========================================================================
+
+    // T16: stale_reference count does not change after type reference emission
+    #[test]
+    fn test_c14_stale_reference_count_unchanged_by_type_reference_edges() {
+        let mut graph = Graph::new();
+
+        // 5 path-segment imports all with Partial resolution
+        let path_segments = [
+            ("graph", "crate::graph"),
+            ("ir", "crate::parser::ir"),
+            ("commands", "crate::commands"),
+            ("types", "crate::manifest::types"),
+            ("flow", "crate::analyzer::flow"),
+        ];
+        let mut import_ids = Vec::new();
+        for (name, from) in &path_segments {
+            let mut import = make_import(name, "test.rs", 1);
+            import.annotations.push(format!("from:{}", from));
+            import.resolution =
+                ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+            import_ids.push(graph.add_symbol(import));
+        }
+
+        // Add functions that reference these imports via References edges
+        let func_id = graph.add_symbol(make_symbol(
+            "analyze",
+            SymbolKind::Function,
+            Visibility::Public,
+            "test.rs",
+            10,
+        ));
+        for &import_id in &import_ids {
+            add_ref(
+                &mut graph,
+                func_id,
+                import_id,
+                ReferenceKind::Read,
+                "test.rs",
+            );
+        }
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert_eq!(
+            diagnostics.len(),
+            5,
+            "All 5 path-segment imports must STILL fire stale_reference even with \
+             References edges. stale_reference checks resolution status, not edges. \
+             Got {} findings: {:?}",
+            diagnostics.len(),
+            diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C14 Section 4: Confidence Calibration — stale_reference
+    // =========================================================================
+
+    // T21: stale_reference HIGH confidence on path-segment imports
+    #[test]
+    fn test_c14_stale_reference_high_confidence_on_path_segment_import() {
+        let mut graph = Graph::new();
+
+        let mut import = make_import("ir", "test.rs", 14);
+        import
+            .annotations
+            .push("from:crate::parser::ir".to_string());
+        import.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(!diagnostics.is_empty());
+        assert_eq!(
+            diagnostics[0].confidence,
+            Confidence::High,
+            "Path-segment imports fire via Signal 1 — must be HIGH confidence. \
+             The fix should be at the parser level, not the confidence level."
+        );
+    }
+
+    // T23: Zero false positive rate for HIGH confidence on truly stale imports
+    #[test]
+    fn test_c14_stale_reference_high_confidence_zero_fp_on_truly_stale() {
+        let mut graph = Graph::new();
+
+        // Target module has symbols but NOT "deleted_fn" — genuinely removed
+        graph.add_symbol(make_symbol(
+            "other_fn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.rs",
+            1,
+        ));
+
+        let mut import = make_import("deleted_fn", "consumer.rs", 5);
+        import.annotations.push("from:utils".to_string());
+        import.resolution =
+            ResolutionStatus::Partial("module resolved, symbol not found".to_string());
+        graph.add_symbol(import);
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let diag = diagnostics
+            .iter()
+            .find(|d| d.entity == "deleted_fn")
+            .expect("Must detect truly stale import 'deleted_fn'");
+
+        assert_eq!(
+            diag.confidence,
+            Confidence::High,
+            "Truly stale import must have HIGH confidence"
+        );
+        assert!(
+            diag.evidence
+                .iter()
+                .any(|e| e.observation.contains("deleted_fn")),
+            "Evidence must mention the specific missing symbol 'deleted_fn'"
+        );
+    }
+
+    // T24: MODERATE confidence for heuristic stale_reference — preserved after changes
+    #[test]
+    fn test_c14_stale_reference_moderate_confidence_preserved_for_heuristic_signal() {
+        let mut graph = Graph::new();
+
+        // Unresolved import to a local-looking module
+        let mut import = make_import("some_fn", "consumer.py", 1);
+        import.annotations.push("from:.local_utils".to_string());
+        import.resolution = ResolutionStatus::Unresolved;
+        graph.add_symbol(import);
+
+        // A symbol in local_utils.py makes the module look local
+        graph.add_symbol(make_symbol(
+            "other",
+            SymbolKind::Function,
+            Visibility::Public,
+            "local_utils.py",
+            1,
+        ));
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let diag = diagnostics
+            .iter()
+            .find(|d| d.entity == "some_fn")
+            .expect("Heuristic stale_reference must fire on local-looking unresolved import");
+
+        assert_eq!(
+            diag.confidence,
+            Confidence::Moderate,
+            "Signal 2 heuristic must remain MODERATE confidence. Got: {:?}",
+            diag.confidence
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C13 Section 5: Confidence calibration for CJS (pre-existing)
+    // =========================================================================
+
     // T16: CJS annotation does not downgrade confidence
     #[test]
     fn test_stale_reference_confidence_high_for_cjs_module_resolved_symbol_missing() {

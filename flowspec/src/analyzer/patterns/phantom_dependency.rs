@@ -541,7 +541,412 @@ mod tests {
         );
     }
 
-    // T22: Entry point + import annotation interaction clarification
+    // =========================================================================
+    // QA-2 C14 Section 2: Parser-Change → Diagnostic Interaction
+    // =========================================================================
+
+    // T8: Type reference creates edge that suppresses phantom_dependency
+    #[test]
+    fn test_c14_type_reference_edge_suppresses_phantom_dependency_on_type_import() {
+        let mut graph = Graph::new();
+
+        let import_id = graph.add_symbol({
+            let mut sym = make_import("Graph", "lib.rs", 1);
+            sym.annotations.push("from:crate::graph".to_string());
+            sym
+        });
+
+        let func_id = graph.add_symbol(make_symbol(
+            "analyze",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+
+        // Type annotation reference: fn analyze(g: &Graph)
+        add_ref(
+            &mut graph,
+            func_id,
+            import_id,
+            ReferenceKind::Read,
+            "lib.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "Graph"),
+            "Type reference edge must suppress phantom_dependency on 'Graph'. \
+             This is THE core test for Worker 1's extract_all_type_references() fix."
+        );
+    }
+
+    // T10: Multiple type references from different functions — edge accumulation
+    #[test]
+    fn test_c14_multiple_type_references_from_different_callers_suppress_phantom() {
+        let mut graph = Graph::new();
+
+        let import_id = graph.add_symbol({
+            let mut sym = make_import("SymbolKind", "patterns.rs", 1);
+            sym.annotations.push("from:crate::parser::ir".to_string());
+            sym
+        });
+
+        let detect_phantom = graph.add_symbol(make_symbol(
+            "detect_phantom",
+            SymbolKind::Function,
+            Visibility::Public,
+            "patterns.rs",
+            10,
+        ));
+        let detect_stale = graph.add_symbol(make_symbol(
+            "detect_stale",
+            SymbolKind::Function,
+            Visibility::Public,
+            "patterns.rs",
+            50,
+        ));
+
+        // Two different functions reference the same import
+        add_ref(
+            &mut graph,
+            detect_phantom,
+            import_id,
+            ReferenceKind::Read,
+            "patterns.rs",
+        );
+        add_ref(
+            &mut graph,
+            detect_stale,
+            import_id,
+            ReferenceKind::Read,
+            "patterns.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "SymbolKind"),
+            "SymbolKind with 2 same-file type references must NOT be phantom"
+        );
+    }
+
+    // T11: Scoped type identifier — both prefix and type emitted
+    #[test]
+    fn test_c14_scoped_type_identifier_emits_reference_for_both_prefix_and_type() {
+        let mut graph = Graph::new();
+
+        let io_import = graph.add_symbol({
+            let mut sym = make_import("io", "lib.rs", 1);
+            sym.annotations.push("from:std".to_string());
+            sym
+        });
+        let error_import = graph.add_symbol({
+            let mut sym = make_import("Error", "lib.rs", 1);
+            sym.annotations.push("from:std::io".to_string());
+            sym
+        });
+
+        let handler = graph.add_symbol(make_symbol(
+            "handle",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+
+        // Scoped type: io::Error — references both prefix and type
+        add_ref(
+            &mut graph,
+            handler,
+            io_import,
+            ReferenceKind::Read,
+            "lib.rs",
+        );
+        add_ref(
+            &mut graph,
+            handler,
+            error_import,
+            ReferenceKind::Read,
+            "lib.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "io"),
+            "Scoped type prefix 'io' must NOT be phantom when referenced"
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "Error"),
+            "Scoped type name 'Error' must NOT be phantom when referenced"
+        );
+    }
+
+    // T12: Generic type parameters — type inside angle brackets
+    #[test]
+    fn test_c14_generic_type_parameter_reference_suppresses_phantom() {
+        let mut graph = Graph::new();
+
+        let import_id = graph.add_symbol({
+            let mut sym = make_import("SymbolId", "lib.rs", 1);
+            sym.annotations.push("from:crate::parser::ir".to_string());
+            sym
+        });
+
+        let func_id = graph.add_symbol(make_symbol(
+            "get_ids",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+
+        // Type parameter reference: Vec<SymbolId>
+        add_ref(
+            &mut graph,
+            func_id,
+            import_id,
+            ReferenceKind::Read,
+            "lib.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "SymbolId"),
+            "Generic type parameter SymbolId in Vec<SymbolId> must NOT be phantom"
+        );
+    }
+
+    // T13: Trait bound reference — where clause / impl block
+    #[test]
+    fn test_c14_trait_bound_reference_suppresses_phantom() {
+        let mut graph = Graph::new();
+
+        let import_id = graph.add_symbol({
+            let mut sym = make_import("LanguageAdapter", "main.rs", 1);
+            sym.annotations.push("from:crate::parser".to_string());
+            sym
+        });
+
+        let func_id = graph.add_symbol(make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "main.rs",
+            10,
+        ));
+
+        // Trait bound: fn process<T: LanguageAdapter>(t: T)
+        add_ref(
+            &mut graph,
+            func_id,
+            import_id,
+            ReferenceKind::Read,
+            "main.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "LanguageAdapter"),
+            "Trait bound reference must suppress phantom_dependency on LanguageAdapter"
+        );
+    }
+
+    // T14: Primitive types and Self must NOT emit references — adversarial
+    #[test]
+    fn test_c14_primitive_types_and_self_do_not_create_spurious_edges() {
+        let mut graph = Graph::new();
+
+        // Genuine import that is NOT used by the function
+        graph.add_symbol({
+            let mut sym = make_import("u32_wrapper", "lib.rs", 1);
+            sym.annotations.push("from:crate::types".to_string());
+            sym
+        });
+
+        // Function exists but uses `u32` not the import
+        graph.add_symbol(make_symbol(
+            "compute",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+        // NO edge from compute to u32_wrapper
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "u32_wrapper"),
+            "u32_wrapper has no same-file reference — MUST be phantom. \
+             Primitive type usage must not create false edges."
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C14 Section 3: Cross-Pattern Regression Guards
+    // =========================================================================
+
+    // T15: Issue #15 type-name fix does not suppress genuinely unused type imports
+    #[test]
+    fn test_c14_phantom_dependency_still_fires_on_genuinely_unused_type_import() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol({
+            let mut sym = make_import("HashMap", "lib.rs", 1);
+            sym.annotations.push("from:std::collections".to_string());
+            sym
+        });
+
+        graph.add_symbol(make_symbol(
+            "process",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+        // process does NOT reference HashMap — no edges
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "HashMap"),
+            "Genuinely unused type import 'HashMap' MUST still be phantom. \
+             The type reference fix must only suppress phantom for types that ARE used."
+        );
+    }
+
+    // T19: Python/JS diagnostics completely unaffected by Rust parser changes
+    #[test]
+    fn test_c14_python_phantom_dependency_unaffected_by_rust_type_fix() {
+        let mut graph = Graph::new();
+
+        graph.add_symbol({
+            let mut sym = make_import("os", "script.py", 1);
+            sym.annotations.push("from:os".to_string());
+            sym
+        });
+
+        graph.add_symbol(make_symbol(
+            "main",
+            SymbolKind::Function,
+            Visibility::Public,
+            "script.py",
+            5,
+        ));
+        // main does NOT reference os
+
+        let diagnostics = detect(&graph, Path::new(""));
+        assert!(
+            diagnostics.iter().any(|d| d.entity == "os"),
+            "Python phantom_dependency must be completely unaffected by Rust parser changes"
+        );
+    }
+
+    // T20: JS ESM + CJS imports — diagnostic behavior preserved
+    #[test]
+    fn test_c14_js_import_diagnostics_preserved_after_rust_parser_changes() {
+        let mut graph = Graph::new();
+
+        // Unused ESM import
+        graph.add_symbol({
+            let mut sym = make_import("lodash", "app.js", 1);
+            sym.annotations.push("from:lodash".to_string());
+            sym
+        });
+
+        // Used CJS import
+        let parse_id = graph.add_symbol({
+            let mut sym = make_import("parse", "utils.js", 1);
+            sym.annotations.push("from:./helpers".to_string());
+            sym.annotations.push("cjs".to_string());
+            sym
+        });
+
+        let caller_id = graph.add_symbol(make_symbol(
+            "processData",
+            SymbolKind::Function,
+            Visibility::Public,
+            "utils.js",
+            5,
+        ));
+        add_ref(
+            &mut graph,
+            caller_id,
+            parse_id,
+            ReferenceKind::Call,
+            "utils.js",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+        let entities: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
+
+        assert!(
+            entities.contains(&"lodash"),
+            "Unused ESM import must still fire phantom_dependency after Rust changes"
+        );
+        assert!(
+            !entities.contains(&"parse"),
+            "Used CJS import must NOT fire phantom_dependency"
+        );
+    }
+
+    // =========================================================================
+    // QA-2 C14 Section 4: Confidence Calibration — phantom_dependency
+    // =========================================================================
+
+    // T22: phantom_dependency HIGH confidence stays per-finding, not graph-wide
+    #[test]
+    fn test_c14_phantom_dependency_confidence_stays_high_when_suppressed_by_type_ref() {
+        let mut graph = Graph::new();
+
+        // Genuinely unused import
+        graph.add_symbol({
+            let mut sym = make_import("unused_trait", "lib.rs", 1);
+            sym.annotations.push("from:crate::traits".to_string());
+            sym
+        });
+
+        // Used import (has type reference)
+        let used_import = graph.add_symbol({
+            let mut sym = make_import("Graph", "lib.rs", 2);
+            sym.annotations.push("from:crate::graph".to_string());
+            sym
+        });
+
+        let func_id = graph.add_symbol(make_symbol(
+            "analyze",
+            SymbolKind::Function,
+            Visibility::Public,
+            "lib.rs",
+            10,
+        ));
+        add_ref(
+            &mut graph,
+            func_id,
+            used_import,
+            ReferenceKind::Read,
+            "lib.rs",
+        );
+
+        let diagnostics = detect(&graph, Path::new(""));
+
+        // Graph import must NOT be phantom (has reference)
+        assert!(
+            !diagnostics.iter().any(|d| d.entity == "Graph"),
+            "Used import 'Graph' must NOT be phantom"
+        );
+
+        // unused_trait must be phantom with HIGH confidence
+        let diag = diagnostics
+            .iter()
+            .find(|d| d.entity == "unused_trait")
+            .expect("unused_trait must be phantom");
+        assert_eq!(
+            diag.confidence,
+            Confidence::High,
+            "Confidence must be per-finding HIGH, not influenced by graph-wide edge density"
+        );
+    }
+
+    // T22 (from C13): Entry point + import annotation interaction clarification
     #[test]
     fn test_phantom_dependency_checks_import_regardless_of_entry_point() {
         let mut graph = Graph::new();
