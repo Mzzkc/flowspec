@@ -34,6 +34,13 @@ const SIZE_CHECK_MIN_SOURCE_BYTES: u64 = 1024;
 /// Maximum allowed ratio of manifest bytes to source bytes.
 const SIZE_CHECK_MAX_RATIO: f64 = 10.0;
 
+/// Minimum manifest size (in bytes) that is always allowed regardless of ratio.
+///
+/// Manifests under 20KB are small enough that they pose no risk of overwhelming
+/// AI agent consumers, even if their ratio to source code exceeds 10x. This
+/// protects small projects with high metadata overhead from spurious rejections.
+const MIN_MANIFEST_ALLOW_BYTES: u64 = 20_480;
+
 /// Validates that a serialized manifest does not exceed the 10x source size limit.
 ///
 /// The spec constraint (`constraints.yaml:36,48`) mandates that manifests must not
@@ -41,15 +48,20 @@ const SIZE_CHECK_MAX_RATIO: f64 = 10.0;
 /// AI agent consumers.
 ///
 /// Returns `Ok(())` if the size is acceptable, or `Err(ManifestError::SizeLimit)` if
-/// the manifest exceeds the limit. Skips the check when `source_bytes` is below
-/// [`SIZE_CHECK_MIN_SOURCE_BYTES`] (small projects have high metadata overhead)
-/// or when `source_bytes` is zero (empty projects).
+/// the manifest exceeds the limit. Skips the check when:
+/// - `source_bytes` is below [`SIZE_CHECK_MIN_SOURCE_BYTES`] (tiny projects)
+/// - manifest size is below [`MIN_MANIFEST_ALLOW_BYTES`] (small manifests always allowed)
 pub fn validate_manifest_size(serialized: &str, source_bytes: u64) -> Result<(), ManifestError> {
     if source_bytes < SIZE_CHECK_MIN_SOURCE_BYTES {
         return Ok(());
     }
 
     let manifest_bytes = serialized.len() as u64;
+
+    if manifest_bytes < MIN_MANIFEST_ALLOW_BYTES {
+        return Ok(());
+    }
+
     let ratio = manifest_bytes as f64 / source_bytes as f64;
 
     if ratio > SIZE_CHECK_MAX_RATIO {

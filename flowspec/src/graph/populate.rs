@@ -490,7 +490,7 @@ fn resolve_callee(
 ///
 /// Searches the symbol list for an import symbol (annotated with `"import"`) whose
 /// name matches the given root identifier. Returns `SymbolId::default()` if no match.
-fn resolve_import_by_name(
+pub(crate) fn resolve_import_by_name(
     root_name: &str,
     symbol_id_map: &[(usize, SymbolId)],
     symbols: &[Symbol],

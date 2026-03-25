@@ -14,6 +14,9 @@ mod populate;
 
 pub use populate::populate_graph;
 pub use populate::resolve_cross_file_imports;
+#[allow(unused_imports)]
+// Used by cycle14_surface_tests via crate::graph::resolve_import_by_name
+pub(crate) use populate::resolve_import_by_name;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
