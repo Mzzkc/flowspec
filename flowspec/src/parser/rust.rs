@@ -106,6 +106,10 @@ impl LanguageAdapter for RustAdapter {
         // Extract all function/method calls from the AST
         extract_all_calls(&mut result, content_bytes, path, root, 0);
 
+        // Extract type-position references (type annotations, trait bounds, enum variant prefixes)
+        // so that imports used only in type positions don't appear as phantom dependencies.
+        extract_all_type_references(&mut result, content_bytes, path, root, 0);
+
         Ok(result)
     }
 }
@@ -982,6 +986,100 @@ fn extract_call(result: &mut ParseResult, content: &[u8], path: &Path, node: Nod
             location: node_location(path, node),
             resolution: ResolutionStatus::Partial(format!("call:{}", name)),
         });
+    }
+}
+
+/// Rust primitive type names and keywords that should NOT emit type references.
+const RUST_PRIMITIVES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32",
+    "f64", "bool", "char", "str", "Self", "self",
+];
+
+/// Walk the AST for type-position identifiers and emit `attribute_access:<name>`
+/// references. This allows imports used only in type annotations, trait bounds,
+/// generic parameters, where clauses, match patterns with enum variants, and
+/// impl trait names to create graph edges — preventing phantom_dependency FPs.
+fn extract_all_type_references(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        return;
+    }
+
+    match node.kind() {
+        // Direct type identifiers in type positions:
+        // fn foo(x: HashMap<...>), struct F { x: PathBuf }, let x: HashSet<...>
+        "type_identifier" => {
+            let name = node_text(content, node);
+            if !name.is_empty() && !RUST_PRIMITIVES.contains(&name) {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
+                });
+            }
+        }
+        // Scoped type identifiers: io::Result, fmt::Formatter
+        // Emit prefix reference so `use std::io;` + `io::Result` resolves.
+        "scoped_type_identifier" => {
+            if let Some(prefix) = extract_scoped_prefix(content, node) {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("attribute_access:{}", prefix)),
+                });
+            }
+        }
+        // Scoped identifiers NOT inside call_expression:
+        // SymbolKind::Function in match arms, let bindings, etc.
+        // The call_expression case is already handled by extract_all_calls.
+        "scoped_identifier" => {
+            // Only emit if parent is NOT a call_expression (those are handled
+            // by extract_call's scoped_identifier branch already).
+            let dominated_by_call = {
+                let mut p = node.parent();
+                let mut found = false;
+                while let Some(parent) = p {
+                    if parent.kind() == "call_expression" {
+                        found = true;
+                        break;
+                    }
+                    p = parent.parent();
+                }
+                found
+            };
+            if !dominated_by_call {
+                if let Some(prefix) = extract_scoped_prefix(content, node) {
+                    result.references.push(Reference {
+                        id: ReferenceId::default(),
+                        from: SymbolId::default(),
+                        to: SymbolId::default(),
+                        kind: ReferenceKind::Read,
+                        location: node_location(path, node),
+                        resolution: ResolutionStatus::Partial(format!(
+                            "attribute_access:{}",
+                            prefix
+                        )),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        extract_all_type_references(result, content, path, child, depth + 1);
     }
 }
 
