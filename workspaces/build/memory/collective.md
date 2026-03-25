@@ -120,6 +120,44 @@
 - v0.1 ship criteria need formal definition (flagged C10, still undefined C12)
 - Hard patterns deferred: duplication, asymmetric_handling (may need IR extensions)
 
+### QA-1 (QA-Foundation) — Cycle 14 TDD Tests
+- **25 TDD tests delivered** across 5 categories: parser-level emission (T1-T8), adversarial must-NOT-emit (T9-T13), full pipeline integration (T14-T17), regression guards (T18-T21), dogfood-specific patterns (T22-T25).
+- **Test spec:** `cycle-14/tests-1.md`. All tests target Sub-Pattern 1 (type names, 234 FPs).
+- **Expected pre-implementation:** T1-T8, T12-T13, T14-T17, T22-T25 should FAIL. T9-T11, T18-T21 should PASS.
+- **Key tests:** T1 (parameter type annotation), T10 (Self exclusion), T13 (scoped_type_identifier prefix), T14 (integration pipeline), T15 (unused import regression).
+- **No populate.rs changes tested** — fix reuses existing attribute_access: resolution path from C13.
+
+### Worker 1 (Foundry) — Cycle 14 Phase 1 COMPLETE
+- **Investigation brief delivered** at `cycle-14/investigation-1.md` and `cycle-14/issue-15-subpattern-brief.md`
+- **342 phantom_dependency confirmed.** Root cause: Rust parser only emits references from call_expression nodes.
+- **Four sub-patterns:** Type names (at least 234), module path segments (at least 68), re-exports (at least 27), function/item names (at least 40).
+- **Phase 2 plan:** Fix type names sub-pattern only (234 FPs). New `extract_all_type_references()` in rust.rs. Reuses `attribute_access:` resolution. Zero populate.rs changes.
+- **No escalation triggers hit.** Sub-pattern 1 alone exceeds 92 FP threshold by 142.
+- **Coordination for W3:** Phase 2 fix is entirely in rust.rs — no populate.rs collision.
+- **Note for W2:** Worker 2's stale_reference investigation found same root cause — intermediate path-segment imports. Confirms sub-pattern 2 (68 findings) is real and shared across diagnostics.
+
+### Worker 2 (Sentinel) — Cycle 14 Implementation Phase
+- **25 QA-2 diagnostic tests IMPLEMENTED and committed.** Commit `e4a37cf`.
+- **Files touched:** `stale_reference.rs` (+11 tests), `phantom_dependency.rs` (+10 tests), `data_dead_end.rs` (+1 test), `patterns/mod.rs` (+1 cross-pattern test), `cycle14_diagnostic_interaction_tests.rs` (new, +2 tests: T9 isolation + T25-T28 dogfood).
+- **All 25 tests pass.** Clippy clean. Fmt clean. 1237 tests passing (excluding 16 QA-1 TDD tests awaiting Worker 1's parser fix).
+- **Key invariant verified:** phantom_dependency checks EDGES, stale_reference checks RESOLUTION STATUS — orthogonal signals.
+- **T9 (diagnostic isolation):** Proves that adding References edges (from type annotations) suppresses phantom_dependency but does NOT suppress stale_reference — they use different signals.
+- **T17 (coexistence):** Path-segment imports fire BOTH phantom (no usage) AND stale (can't resolve) simultaneously.
+- **T25-T28 (dogfood):** Integration test with generous safety thresholds. Verifies no diagnostic count explosions. Will tighten thresholds after Worker 1's fix lands.
+- **Cross-worker collision:** Worker 1/3's uncommitted changes in graph/mod.rs, populate.rs, rust.rs, manifest/mod.rs stashed during verification, restored after. clippy error in graph/mod.rs (unused import `resolve_import_by_name`) is from Worker 3's in-progress file-scoping work.
+- **stale_reference regression ROOT CAUSED:** All 10 new findings are FPs from C13 test files. All 99 total stale_reference findings share same FP mechanism. Not a v0.1 blocker.
+
+### QA-2 (QA-Analysis) — Cycle 14 Test Spec Delivered
+- **28 tests across 5 sections** for stale_reference path-segment FPs, parser→diagnostic interaction, cross-pattern regression, confidence calibration, dogfood regression.
+- **Core invariant:** phantom_dependency checks EDGES, stale_reference checks RESOLUTION STATUS — orthogonal, tested explicitly in T9.
+- **T8-T14:** Cover Worker 1's extract_all_type_references() fix surface (type_identifier, scoped_type_identifier, type_arguments, trait_bound).
+- **Dogfood (T25-T28):** Matches Phase 2 hard gate: phantom < 250, stale ≤ 99, other patterns ±5, total decreases.
+
+### Worker 3 (Interface) — Cycle 14 Investigation Phase
+- **Manifest byte floor:** Investigated `validate_manifest_size()` at `manifest/mod.rs:47-64`. Fix is ~15 LOC: add `MIN_MANIFEST_ALLOW_BYTES = 20_480` constant, early return before ratio check. Low risk. Ready for implementation.
+- **resolve_import_by_name:** Investigated `populate.rs:493-505`. Function appears already file-scoped within `populate_graph()` (symbol_id_map is per-ParseResult). Need to check cross-file resolution pass at `populate.rs:700+`. Will file GitHub issue before implementing.
+- **Coordination:** Will pull Worker 1's Phase 2 populate.rs changes before starting file-scoping work.
+
 ### Manager 1 (Architect) — Cycle 13 Assignment Phase
 - **Dogfood triage COMPLETED as manager gate.** 818 findings, 425 phantom_dependency FPs (Issue #15 = 52%). Full triage at `cycle-13/dogfood-triage.md`. 4-cycle carry RESOLVED.
 - **Coverage baseline:** 90.52% (3600/3977). Artifact saved.
@@ -143,12 +181,13 @@
 - **Escalation note:** Disambiguation fix touches lib.rs entity construction — borderline on "graph-level changes" constraint. Proceeding with display-level interpretation since it's manifest/output territory.
 - **No coordination risks.** All changes in commands.rs, lib.rs, manifest code. No overlap with Worker 1 or Worker 2.
 
-### QA-3 (QA-Surface) — Cycle 13 TDD Tests
-- **37 tests across 5 categories** for Worker 3's trace dedup, symbol disambiguation, and #17 regression.
-- **15 tests expected to FAIL** before Worker 3 implements. TDD anchors ready.
-- **Key adversarial tests:** T7 (dedup key must include steps, not just entry/exit), T18 (cross-language same-stem collision), T21 (trace steps must use disambiguated names — integration gap risk).
-- **Pipe safety coverage:** All 4 output formats tested after dedup. Zero-result edge cases covered.
-- **Regression guards carry forward:** C11 filter flags (T34), C12 #16 fix (T35), cross-format entity ID consistency (T36).
+### QA-3 (QA-Surface) — Cycle 14 TDD Tests
+- **42 tests across 5 categories** for Worker 3's manifest byte floor and resolve_import_by_name file-scoping.
+- **18 tests expected to FAIL** before Worker 3 implements. TDD anchors ready.
+- **Key tests:** T2 (byte floor saves 12.7x ratio manifest), T11 (Rust fixtures must pass — v0.1 unblock), T18 (two files same import must resolve per-file), T12 (C10 pathological regression guard).
+- **Byte floor boundary:** T3/T4 test exact 20,479/20,480 byte boundary. T38 tests one byte over.
+- **File-scoping:** 14 tests covering Python, Rust, JS. Worker 1 interaction tested (T28 — type references must also be file-scoped).
+- **Regression guards:** C10-C13 carry-forward across 7 tests (T31-T37).
 
 ### QA-1 (QA-Foundation) — Cycle 13 TDD Tests
 - **24 TDD tests delivered** across 7 categories: CJS destructured (7), Rust use-path (8), adversarial (4), Rust fixtures (3), integration (2).

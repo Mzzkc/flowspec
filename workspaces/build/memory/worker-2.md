@@ -3,41 +3,57 @@
 ## Identity
 Analysis engineer. 13 diagnostic patterns, flow tracing, boundary detection, confidence scoring, evidence generation. I implement `src/analyzer/` — if my analyzers don't work, Flowspec is just a fancy AST printer.
 
-## Hot (Cycle 13)
+## Hot (Cycle 14)
 
-### QA-2 Diagnostic Tests IMPLEMENTED — 21 tests, commit `e9eca08`
+### QA-2 Diagnostic Tests — 25 Tests Implemented
 
-**Task:** Implement 22-test QA-2 spec for diagnostic-layer implications of Worker 1's P1 fixes.
+**Commit:** `e4a37cf` — all 25 pass, clippy/fmt clean.
 
-**Delivered:** 21 tests across 4 files. Tests construct post-fix graph state and verify diagnostics behave correctly on new parser output. All pass on current code — they validate that when Worker 1's edges exist, existing diagnostic logic handles them correctly.
+**Test breakdown:**
+- T1-T7 (stale_reference.rs): Path-segment import FP mechanism. T1 confirms the FP, T2 proves leaf vs path-segment granularity, T3 tests deeply nested paths (3 intermediates), T4 covers function-body `use` statements, T5 adversarial name collision, T6-T7 star import and third-party regression guards.
+- T8-T14 (phantom_dependency.rs): Parser→diagnostic interaction surface. T8 core type reference suppression, T10 multiple callers, T11 scoped type (io::Error), T12 generic types (Vec<SymbolId>), T13 trait bounds, T14 primitive type adversarial, T15 unused type import regression.
+- T16, T21, T23-T24 (stale_reference.rs): T16 proves References edges don't change stale behavior (5 imports all still fire), T21/T23/T24 confidence calibration.
+- T17 (mod.rs): Cross-pattern coexistence — phantom AND stale both fire on same path-segment import.
+- T18 (data_dead_end.rs): Import annotation exclusion preserved after type reference fix.
+- T19-T20 (phantom_dependency.rs): Language isolation — Python and JS behavior unchanged.
+- T22 (phantom_dependency.rs): Per-finding confidence independence.
+- T9 (cycle14_diagnostic_interaction_tests.rs): THE diagnostic isolation test — References edge suppresses phantom but NOT stale.
+- T25-T28 (cycle14_diagnostic_interaction_tests.rs): Dogfood integration with safety thresholds.
 
-**Test distribution:**
-- phantom_dependency.rs: 13 tests (new #[cfg(test)] module)
-- stale_reference.rs: 4 tests (appended to existing module)
-- data_dead_end.rs: 1 test (new #[cfg(test)] module)
-- patterns/mod.rs: 3 cross-pattern tests (appended to existing module)
+**Key design decisions:**
+1. T9 is the most important test — proves orthogonality of phantom (edges) vs stale (resolution status) signals.
+2. T25-T28 uses generous thresholds (not exact baselines) because code changes between cycles shift counts. Will tighten post-fix.
+3. All unit tests construct mock graphs, not fixture files — matches established pattern.
 
-**Key insights:** T18 (import-to-import edge) revealed that `ReferenceKind::Import` maps to `EdgeKind::References`, so an import-to-import edge in the same file DOES satisfy phantom_dependency's check. This is technically correct but could be a source of confusion. T22 confirmed phantom_dependency does NOT use is_excluded_symbol(), so entry_point+import combos are still checked.
+### stale_reference Regression Investigation — ROOT CAUSE CONFIRMED
 
-**Cross-worker collision:** Worker 1's in-progress parser changes broke compilation. Stashed, verified clean, restored. Same pattern as C12. My code was correct — environmental only.
+**Finding:** All 10 new stale_reference findings are FPs from two C13 test files:
+- `cycle13_cjs_and_use_path_tests.rs` (3 findings): `graph`, `ir`, `SymbolId` — module path segment imports
+- `cycle13_surface_tests.rs` (7 findings): `commands`, `types`, `test_utils`, `flow`, `ir` — same mechanism
+
+**Mechanism:** Rust `use crate::module::{item}` creates import symbols for BOTH the intermediate path segment (`module`) AND the leaf item (`item`). The path-segment symbol can never resolve because `file_symbols_cache` contains functions/structs, not module names. Cross-file resolution marks it `Partial("module resolved, symbol not found")` → stale_reference Signal 1 fires at HIGH confidence.
+
+**All 99 stale_reference findings share this mechanism.** The +10 is simply proportional to new `use` statements added in C13. Not a behavioral regression — just more input data triggering the same pre-existing FP class.
+
+**Fix options:** (A) Analyzer-side filter (~15 LOC, my domain) or (B) Parser-side fix to stop emitting path-segment imports (correct, Worker 1's domain). Recommended: defer since not v0.1 blocker.
 
 ### Experiential
-Second investigation+implementation hybrid cycle. The QA-2 test spec was a precise roadmap — converted directly to code with minimal design decisions. The key value-add was T18 where I discovered the import-to-import edge behavior that the spec didn't fully anticipate. Also confirmed T13 (partial_wiring re-export borderline) works exactly as documented from C12 — the algorithm is correct, it's a design question whether re-exports should be excluded.
+Clean investigation cycle. The root cause was obvious once I grouped findings by source file — exact 10 match to C13 test files. Satisfying when the evidence is unambiguous. The broader insight is that ALL 99 stale_reference dogfood findings share one mechanism, which means a single fix could eliminate the entire class. But that fix is parser-side, not analyzer-side.
 
-Workspace collisions continue. Worker 1's mid-work changes broke everything. The stash-verify-restore pattern works but adds friction.
+Feeling good about the diagnostic expertise. Understanding the full resolution pipeline (adapter → module map → cross-file resolution → stale_reference) across component boundaries is exactly what Sentinel should do. The C13 synthesis was right that "nobody analyzed WHY" — now we know.
 
-**Retry lesson:** First validation attempt failed because I didn't add the `## Worker 2 (Sentinel) — Cycle 13 Status` section to collective memory. The code was correct, tests passed — it was a process miss (not updating the coordination artifact). Always complete ALL validation requirements, not just the code ones. The pre-existing Rust fixture test (`test_rust_multi_file_fixture_known_properties`) is now passing — QA-1's fixtures landed.
+### Experiential (C14 Implementation)
+Smooth cycle. Investigation brief was already done, test spec was comprehensive, implementation was mechanical. 25 tests written, all passed first run. The stash/restore pattern for cross-worker collisions is now second nature — did it once without stress. The key insight this cycle: T9 (diagnostic isolation) is the kind of test that prevents subtle regressions nobody would think to check manually. When two patterns query the same symbol with different signal types, proving they remain independent is non-obvious. This is where QA-Analysis adds real value.
 
-### M4/M14 Investigation Briefs DELIVERED — Breaking 13-cycle 0%
+Feeling a bit underloaded this cycle — the stale_reference investigation was done in preprocessing, the fix is parser-side (Worker 1's domain), and the QA-2 tests are well-scoped but not architecturally challenging. Would prefer more pattern implementation work (duplication, asymmetric_handling) but those are blocked on IR extensions. The v0.1 convergence is real though — 2 items left.
 
-**M4 (Caching):** ~970 LOC, 3-cycle estimate. Key insight: SlotMap serde support + bincode 2.x serde-compat layer avoids custom serialization. Escalation needed for sha2 dependency. Phases: round-trip → hash invalidation → incremental update. Equivalence invariant (incremental == full) is the hardest test.
+## Warm (Cycle 13)
 
-**M14 (Boundaries):** ~1490 LOC, 3-cycle estimate. Critical finding: NO parser currently produces boundaries despite IR types existing. BoundaryKind (5 variants) and Boundary struct are defined but never instantiated by any adapter. Module boundaries from cross-file imports are the easy win. Network/serialization boundaries are heuristic with FP risk. Likely needs IR extension (BoundaryCrossing struct). Escalation: IR changes needed.
-
-**Recommendation:** M4 first (no IR changes, no parser mods, immediate value). M14 second (touches all 3 adapters, needs IR work).
-
-### Experiential
-First investigation-only cycle in 13 cycles. Different energy — exploratory rather than constructive. Found that reading spec files against actual implementation reveals the gap more precisely than any planning doc. The boundary detection gap (IR exists, nothing produces it) is a classic ghost wiring pattern — the types exist as if boundaries are handled, but the actual production pipeline is entirely absent. Satisfying to finally scope these properly. Also noticed the manifest `boundaries: Vec::new()` hardcoding — that's exactly the kind of thing dogfood should catch but can't because the pattern fires on *missing* data, not *wrong* data.
+### QA-2 Diagnostic Tests + M4/M14 Investigation Briefs
+- 21 QA-2 tests across 4 files (commit `e9eca08`)
+- T18: `ReferenceKind::Import` maps to `EdgeKind::References` — import-to-import edges satisfy phantom_dependency
+- M4 (Caching): ~970 LOC, 3 cycles. M14 (Boundaries): ~1490 LOC, 3 cycles. M4 first recommended.
+- Cross-worker collision pattern continues (stash/restore)
 
 ## Warm (Cycle 12, prev Hot)
 
