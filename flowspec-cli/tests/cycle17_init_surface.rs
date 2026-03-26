@@ -424,13 +424,11 @@ fn t19_init_stdout_pipe_safe() {
 // Category 6: Regression Guards (T20–T23)
 // ==========================================================================
 
-/// T20: diff and watch still return CommandNotImplemented
+/// T20: watch still returns CommandNotImplemented (diff implemented in C18)
 #[test]
 fn t20_diff_watch_still_unimplemented() {
-    for (cmd, args) in &[
-        ("diff", vec!["diff", "/tmp/a", "/tmp/b"]),
-        ("watch", vec!["watch"]),
-    ] {
+    // diff is implemented as of C18 — only watch remains deferred
+    for (cmd, args) in &[("watch", vec!["watch"])] {
         let output = flowspec().args(args).output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(

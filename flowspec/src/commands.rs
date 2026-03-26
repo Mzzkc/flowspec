@@ -8,9 +8,11 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::analyzer::flow::{trace_flows_from, trace_flows_to, FlowPath};
 use crate::error::{FlowspecError, ManifestError};
-use crate::manifest::types::FlowEntry;
+use crate::manifest::types::{DiagnosticEntry, FlowEntry, Manifest};
 use crate::manifest::{validate_manifest_size, OutputFormatter};
 use crate::parser::ir::SymbolId;
 use crate::{Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter, YamlFormatter};
@@ -404,6 +406,421 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
     }
 
     unique
+}
+
+/// Valid manifest section names for `--section` validation in `diff`.
+const VALID_SECTIONS: &[&str] = &[
+    "metadata",
+    "summary",
+    "diagnostics",
+    "entities",
+    "flows",
+    "boundaries",
+    "dependency_graph",
+    "type_flows",
+];
+
+/// Result of comparing two manifests.
+///
+/// Captures structural differences across entities, diagnostics, and metadata.
+/// Serializable for output in any supported format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffResult {
+    /// Entity IDs present in new but not old.
+    pub entities_added: Vec<String>,
+    /// Entity IDs present in old but not new.
+    pub entities_removed: Vec<String>,
+    /// Entity IDs present in both but with field changes.
+    pub entities_changed: Vec<EntityChange>,
+    /// Diagnostics in new but not old (matched by pattern+entity+loc).
+    pub diagnostics_new: Vec<DiagnosticIdentity>,
+    /// Diagnostics in old but not new (matched by pattern+entity+loc).
+    pub diagnostics_resolved: Vec<DiagnosticIdentity>,
+    /// Whether new critical diagnostics were introduced (drives exit code 2).
+    pub has_regressions: bool,
+    /// Human-readable summary of changes.
+    pub summary: Vec<String>,
+}
+
+/// A changed entity with before/after field values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityChange {
+    /// Entity ID.
+    pub id: String,
+    /// List of changed fields with old and new values.
+    pub changes: Vec<FieldChange>,
+}
+
+/// A single field-level change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldChange {
+    /// Field name.
+    pub field: String,
+    /// Old value.
+    pub old: String,
+    /// New value.
+    pub new: String,
+}
+
+/// Semantic identity of a diagnostic — stable across runs unlike sequential IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DiagnosticIdentity {
+    /// Failure pattern category.
+    pub pattern: String,
+    /// Primary entity involved.
+    pub entity: String,
+    /// Source location.
+    pub loc: String,
+}
+
+impl DiagnosticIdentity {
+    /// Create a diagnostic identity from a diagnostic entry.
+    fn from_entry(entry: &DiagnosticEntry) -> Self {
+        Self {
+            pattern: entry.pattern.clone(),
+            entity: entry.entity.clone(),
+            loc: entry.loc.clone(),
+        }
+    }
+}
+
+/// Run the `diff` command: compare two manifests and show structural changes.
+///
+/// Loads two manifest files (YAML or JSON), computes structural differences
+/// across entities and diagnostics, and outputs the result. Exit code 2 means
+/// new critical diagnostics were found (CI gate use case).
+///
+/// Returns the exit code: 0=no regressions, 2=new critical diagnostics.
+pub fn run_diff(
+    old_path: &Path,
+    new_path: &Path,
+    sections: &[String],
+    format: OutputFormat,
+    output_path: Option<&Path>,
+) -> Result<u8, FlowspecError> {
+    // Validate section names
+    validate_sections(sections)?;
+
+    // Load both manifests
+    let old_manifest = load_manifest(old_path)?;
+    let new_manifest = load_manifest(new_path)?;
+
+    // Compute diff
+    let mut diff = compute_diff(&old_manifest, &new_manifest);
+
+    // Apply section filter
+    if !sections.is_empty() {
+        apply_section_filter(&mut diff, sections);
+    }
+
+    let has_regressions = diff.has_regressions;
+
+    // Format output
+    let output = format_diff_result(&diff, format)?;
+
+    write_output(&output, output_path)?;
+
+    if has_regressions {
+        Ok(2)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Load a manifest from a file, detecting format by extension with fallback parsing.
+///
+/// Tries YAML first for `.yaml`/`.yml` extensions, JSON for `.json`.
+/// Falls back to YAML-then-JSON parsing if extension is unrecognized.
+pub fn load_manifest(path: &Path) -> Result<Manifest, FlowspecError> {
+    if !path.exists() {
+        return Err(FlowspecError::TargetNotFound {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|e| FlowspecError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    if content.trim().is_empty() {
+        return Err(FlowspecError::Manifest {
+            reason: format!(
+                "could not parse manifest at {}: file is empty",
+                path.display()
+            ),
+        });
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "json" => {
+            parse_json_manifest(&content, path).or_else(|_| parse_yaml_manifest(&content, path))
+        }
+        "yaml" | "yml" => {
+            parse_yaml_manifest(&content, path).or_else(|_| parse_json_manifest(&content, path))
+        }
+        _ => parse_yaml_manifest(&content, path).or_else(|_| parse_json_manifest(&content, path)),
+    }
+}
+
+/// Parse manifest content as YAML.
+fn parse_yaml_manifest(content: &str, path: &Path) -> Result<Manifest, FlowspecError> {
+    serde_yaml::from_str(content).map_err(|e| FlowspecError::Manifest {
+        reason: format!("could not parse manifest at {}: {}", path.display(), e),
+    })
+}
+
+/// Parse manifest content as JSON.
+fn parse_json_manifest(content: &str, path: &Path) -> Result<Manifest, FlowspecError> {
+    serde_json::from_str(content).map_err(|e| FlowspecError::Manifest {
+        reason: format!("could not parse manifest at {}: {}", path.display(), e),
+    })
+}
+
+/// Compute structural differences between two manifests.
+pub fn compute_diff(old: &Manifest, new: &Manifest) -> DiffResult {
+    // Entity diffing by ID
+    let old_ids: HashSet<&str> = old.entities.iter().map(|e| e.id.as_str()).collect();
+    let new_ids: HashSet<&str> = new.entities.iter().map(|e| e.id.as_str()).collect();
+
+    let entities_added: Vec<String> = new_ids
+        .difference(&old_ids)
+        .map(|id| id.to_string())
+        .collect();
+    let entities_removed: Vec<String> = old_ids
+        .difference(&new_ids)
+        .map(|id| id.to_string())
+        .collect();
+
+    // Entity field-level changes for shared entities
+    let old_entity_map: std::collections::HashMap<&str, &crate::manifest::types::EntityEntry> =
+        old.entities.iter().map(|e| (e.id.as_str(), e)).collect();
+    let new_entity_map: std::collections::HashMap<&str, &crate::manifest::types::EntityEntry> =
+        new.entities.iter().map(|e| (e.id.as_str(), e)).collect();
+
+    let mut entities_changed = Vec::new();
+    for id in old_ids.intersection(&new_ids) {
+        if let (Some(old_e), Some(new_e)) = (old_entity_map.get(id), new_entity_map.get(id)) {
+            let mut changes = Vec::new();
+            if old_e.kind != new_e.kind {
+                changes.push(FieldChange {
+                    field: "kind".to_string(),
+                    old: old_e.kind.clone(),
+                    new: new_e.kind.clone(),
+                });
+            }
+            if old_e.vis != new_e.vis {
+                changes.push(FieldChange {
+                    field: "vis".to_string(),
+                    old: old_e.vis.clone(),
+                    new: new_e.vis.clone(),
+                });
+            }
+            if old_e.sig != new_e.sig {
+                changes.push(FieldChange {
+                    field: "sig".to_string(),
+                    old: old_e.sig.clone(),
+                    new: new_e.sig.clone(),
+                });
+            }
+            if old_e.loc != new_e.loc {
+                changes.push(FieldChange {
+                    field: "loc".to_string(),
+                    old: old_e.loc.clone(),
+                    new: new_e.loc.clone(),
+                });
+            }
+            if !changes.is_empty() {
+                entities_changed.push(EntityChange {
+                    id: id.to_string(),
+                    changes,
+                });
+            }
+        }
+    }
+
+    // Diagnostic diffing by semantic identity (pattern + entity + loc)
+    let old_diag_ids: HashSet<DiagnosticIdentity> = old
+        .diagnostics
+        .iter()
+        .map(DiagnosticIdentity::from_entry)
+        .collect();
+    let new_diag_ids: HashSet<DiagnosticIdentity> = new
+        .diagnostics
+        .iter()
+        .map(DiagnosticIdentity::from_entry)
+        .collect();
+
+    let diagnostics_new: Vec<DiagnosticIdentity> =
+        new_diag_ids.difference(&old_diag_ids).cloned().collect();
+    let diagnostics_resolved: Vec<DiagnosticIdentity> =
+        old_diag_ids.difference(&new_diag_ids).cloned().collect();
+
+    // Check for regressions: new diagnostics with critical severity
+    let new_diag_set: HashSet<DiagnosticIdentity> = diagnostics_new.iter().cloned().collect();
+    let has_regressions = new.diagnostics.iter().any(|d| {
+        d.severity == "critical" && new_diag_set.contains(&DiagnosticIdentity::from_entry(d))
+    });
+
+    // Build summary
+    let mut summary = Vec::new();
+    if !entities_added.is_empty() {
+        summary.push(format!("{} entities added", entities_added.len()));
+    }
+    if !entities_removed.is_empty() {
+        summary.push(format!("{} entities removed", entities_removed.len()));
+    }
+    if !entities_changed.is_empty() {
+        summary.push(format!("{} entities changed", entities_changed.len()));
+    }
+    if !diagnostics_new.is_empty() {
+        summary.push(format!("{} new diagnostics", diagnostics_new.len()));
+    }
+    if !diagnostics_resolved.is_empty() {
+        summary.push(format!(
+            "{} diagnostics resolved",
+            diagnostics_resolved.len()
+        ));
+    }
+    if summary.is_empty() {
+        summary.push("no changes".to_string());
+    }
+
+    DiffResult {
+        entities_added,
+        entities_removed,
+        entities_changed,
+        diagnostics_new,
+        diagnostics_resolved,
+        has_regressions,
+        summary,
+    }
+}
+
+/// Apply section filter to a DiffResult, clearing sections not in the filter.
+fn apply_section_filter(diff: &mut DiffResult, sections: &[String]) {
+    let section_set: HashSet<&str> = sections.iter().map(|s| s.as_str()).collect();
+
+    if !section_set.contains("entities") {
+        diff.entities_added.clear();
+        diff.entities_removed.clear();
+        diff.entities_changed.clear();
+    }
+    if !section_set.contains("diagnostics") {
+        diff.diagnostics_new.clear();
+        diff.diagnostics_resolved.clear();
+        // Regressions only come from diagnostics section
+        if !section_set.contains("diagnostics") {
+            diff.has_regressions = false;
+        }
+    }
+
+    // Rebuild summary after filtering
+    let mut summary = Vec::new();
+    if !diff.entities_added.is_empty() {
+        summary.push(format!("{} entities added", diff.entities_added.len()));
+    }
+    if !diff.entities_removed.is_empty() {
+        summary.push(format!("{} entities removed", diff.entities_removed.len()));
+    }
+    if !diff.entities_changed.is_empty() {
+        summary.push(format!("{} entities changed", diff.entities_changed.len()));
+    }
+    if !diff.diagnostics_new.is_empty() {
+        summary.push(format!("{} new diagnostics", diff.diagnostics_new.len()));
+    }
+    if !diff.diagnostics_resolved.is_empty() {
+        summary.push(format!(
+            "{} diagnostics resolved",
+            diff.diagnostics_resolved.len()
+        ));
+    }
+    if summary.is_empty() {
+        summary.push("no changes".to_string());
+    }
+    diff.summary = summary;
+}
+
+/// Format a DiffResult for output.
+fn format_diff_result(diff: &DiffResult, format: OutputFormat) -> Result<String, FlowspecError> {
+    match format {
+        OutputFormat::Yaml => serde_yaml::to_string(diff).map_err(|e| FlowspecError::Manifest {
+            reason: format!("YAML serialization failed: {}", e),
+        }),
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(diff).map_err(|e| FlowspecError::Manifest {
+                reason: format!("JSON serialization failed: {}", e),
+            })
+        }
+        OutputFormat::Summary => {
+            let mut lines = Vec::new();
+            lines.push("Diff Summary:".to_string());
+            for s in &diff.summary {
+                lines.push(format!("  {}", s));
+            }
+            if !diff.entities_added.is_empty() {
+                lines.push(String::new());
+                lines.push("Entities added:".to_string());
+                for id in &diff.entities_added {
+                    lines.push(format!("  + {}", id));
+                }
+            }
+            if !diff.entities_removed.is_empty() {
+                lines.push(String::new());
+                lines.push("Entities removed:".to_string());
+                for id in &diff.entities_removed {
+                    lines.push(format!("  - {}", id));
+                }
+            }
+            if !diff.entities_changed.is_empty() {
+                lines.push(String::new());
+                lines.push("Entities changed:".to_string());
+                for change in &diff.entities_changed {
+                    lines.push(format!("  ~ {}", change.id));
+                    for fc in &change.changes {
+                        lines.push(format!("    {}: {} -> {}", fc.field, fc.old, fc.new));
+                    }
+                }
+            }
+            if !diff.diagnostics_new.is_empty() {
+                lines.push(String::new());
+                lines.push("New diagnostics:".to_string());
+                for d in &diff.diagnostics_new {
+                    lines.push(format!("  + {} on {} at {}", d.pattern, d.entity, d.loc));
+                }
+            }
+            if !diff.diagnostics_resolved.is_empty() {
+                lines.push(String::new());
+                lines.push("Resolved diagnostics:".to_string());
+                for d in &diff.diagnostics_resolved {
+                    lines.push(format!("  - {} on {} at {}", d.pattern, d.entity, d.loc));
+                }
+            }
+            Ok(lines.join("\n"))
+        }
+        OutputFormat::Sarif => Err(FlowspecError::FormatNotImplemented {
+            format: "sarif".to_string(),
+        }),
+    }
+}
+
+/// Validate section names against the known manifest sections.
+fn validate_sections(sections: &[String]) -> Result<(), FlowspecError> {
+    for section in sections {
+        if !VALID_SECTIONS.contains(&section.as_str()) {
+            return Err(FlowspecError::Config {
+                reason: format!("unknown section: {}", section),
+                suggestion: format!("valid sections are: {}", VALID_SECTIONS.join(", ")),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Directories excluded from language detection during `init`.

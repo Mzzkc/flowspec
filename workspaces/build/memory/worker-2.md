@@ -5,15 +5,15 @@ Analysis engineer. 13 diagnostic patterns, flow tracing, boundary detection, con
 
 ## Hot (Cycle 17)
 
-### Investigation Phase — stale_reference Residual 64
+### Investigation — stale_reference Residual 64
 
 **Finding:** 64 stale_reference findings (was 61 at C16 end, +3 from new test code). Four distinct FP mechanisms identified:
 
-1. **Module-name leaf imports (43/64, 67%):** `use crate::analyzer::patterns::data_dead_end` — `data_dead_end` is a child module, not a symbol in `patterns/mod.rs`. The Rust adapter doesn't extract `mod` declarations as symbols. Fix: check if lookup_name matches a child module file in the module map. Location: `populate.rs:867`.
+1. **Module-name leaf imports (43/64, 67%):** `use crate::analyzer::patterns::data_dead_end` — `data_dead_end` is a child module, not a symbol in `patterns/mod.rs`. Rust adapter doesn't extract `mod` declarations as symbols. Fix: check if lookup_name matches a child module file in the module map. Location: `populate.rs:867`.
 
 2. **Macro-generated types (10/64, 16%):** `SymbolId`, `ReferenceId` etc. from `slotmap::new_key_type!`. Tree-sitter can't see macro expansions. Not fixable without macro-specific handling. Deferred.
 
-3. **Re-export resolution (8/64, 12.5%):** `DiagnosticEntry`/`Manifest` imported via `use crate::manifest::*` but defined in `manifest/types.rs`, re-exported through `pub use`. Resolver doesn't follow re-export chains. Deferred (M5 scope).
+3. **Re-export resolution (8/64, 12.5%):** `DiagnosticEntry`/`Manifest` via `use crate::manifest::*` but defined in `manifest/types.rs`, re-exported through `pub use`. Resolver doesn't follow re-export chains. Deferred (M5 scope).
 
 4. **Test fixture artifacts (3/64, 4.7%):** Intentional stale refs in fixture files. True positives — keep.
 
@@ -21,54 +21,35 @@ Analysis engineer. 13 diagnostic patterns, flow tracing, boundary detection, con
 
 **Fix plan for Phase 2:** Implement Mechanism A fix (module-name child detection) in `populate.rs:867`. Expected: -43 findings, residual ~21.
 
-### Experiential (C17 Investigation)
-The investigation was clean and thorough. Four mechanisms instead of the predicted two — macro-generated types and re-export chains are new discoveries. The module-name mechanism is exactly what I predicted in C16, but the root cause is more precise: `mod` declarations aren't symbols, not a name-confusion issue. Feeling confident about the fix — it's surgical like C16's path-segment fix. The attack surface for QA-2 is well-defined.
+### Experiential (C17)
+Investigation was clean and thorough. Four mechanisms instead of predicted two — macro-generated types and re-export chains are new discoveries. The module-name mechanism is exactly what I predicted in C16, but root cause is more precise: `mod` declarations aren't symbols, not name-confusion. Confident about the fix — surgical like C16's path-segment fix.
 
-## Warm (Cycle 16 → moved from Hot)
+### C18 Investigation Notes
 
-### Phase 1: Process Deliverables — CLEARED
-- 6 GitHub issues filed: #18-#23 covering all FP categories from investigation-2.md
-- investigation-2.md committed to `.flowspec/state/` at `074a786`
-- 3-cycle process debt resolved. Phase 1 hard gate cleared.
+**Key discovery:** The stash recovery situation is simpler than described. My `is_child_module` fix and the `lib.rs` mod declaration are already on main (committed by Worker 1 in `6920f68`). The ONLY thing missing is committing the untracked test file `cycle17_child_module_tests.rs`. Stash@{0} is redundant with HEAD.
 
-### Phase 2: stale_reference Path-Segment Fix — DELIVERED
-**Commit:** `5a7d6f9` — fix + 34 QA-2 tests, all pass, clippy/fmt clean.
+**Dogfood baseline measured:** 495 total findings. data_dead_end=221, phantom_dependency=136, missing_reexport=59, orphaned_impl=53, stale_reference=18, circular_dependency=5, partial_wiring=2, isolated_cluster=1. stale_reference dropped from 64→18 thanks to the child module fix — better than the predicted -43 (got -46).
 
-**The fix (2 changes in parser/rust.rs):**
-1. `is_path_prefix` check at line 698: when `extract_use_tree` recurses into a `scoped_use_list`, the path child (`scoped_identifier`) is the module prefix — NOT a leaf import. Check `node.child_by_field_name("path").is_some_and(|p| p.id() == child.id())` to skip it.
-2. `extract_use_path_last_segment` at line 788: handle the recursive case where `use_node` IS the `scoped_use_list` (not a parent of one). This fixes self-import handling (`use crate::module::{self, Item}`).
+**Baseline drift explained:** 178→221 is real code growth from C17 additions (TS preprocessing code, init command, test files), NOT a TS duplication artifact. Self-dogfood runs on pure Rust — TS dedup fix won't change these numbers.
 
-**Dogfood delta (measured):**
-- stale_reference: 117 → 61 (-56). Eliminated true intermediate segments.
-- Remaining 61 are module-name LEAF imports and unresolvable type references — a different FP class.
-- Total: 620 → 494 (combined with Worker 1's this.method() fix). Then 494 → 441 with all workers.
-- phantom: 205 → 135 (Worker 1), orphaned: 53 → 0 (Worker 1), dead_end: 178 → 178 (unchanged).
+### Experiential (C18 Investigation)
+Relief. The stash situation that seemed scary is actually fine — my code is already on main, just need to commit one file. The coordination failure in C17 was painful but the actual damage is minimal. Still frustrated that "uncommitted = undelivered" was applied to me when the code WAS there, just the test file got displaced. But the fix is trivial and I can move forward.
 
-**34 QA-2 tests across 7 sections:**
-- T1-T10: Parser-level TDD (grouped, deep, single, star, aliased, nested, self, multi-stmt, annotation, empty)
-- T11-T15: Dogfood regression guards
-- T16-T19: C15 flipped guards (FP reproduction → correct behavior)
-- T20-T24: Issue verification (one per issue)
-- T25-T30: Adversarial (module-as-leaf, enum variants, aliased groups, extern crate, pub use, mixed)
-- T31-T34: Cross-pattern interaction (orthogonality, no new phantom, dead_end unaffected, confidence stable)
-
-### Experiential
-The fix was small (~15 lines) but the investigation and testing were substantial. The path-segment bug was exactly where I predicted — in `extract_use_tree`'s recursion handling. The self-import fix was a surprise — during recursion, `node` IS the scoped_use_list, but the function was looking for scoped_use_list CHILDREN. Would have been a regression without T7.
-
-Worker 1's concurrent commit changed the dogfood landscape significantly. The 3-cycle process debt is now cleared. 6 issues filed, triage committed. Feeling relief — the hard gates work.
+Three GitHub issues to file: mixed-language module_map, macro-generated types, re-export resolution. These are my backlog — honest tracking instead of pretending they'll be fixed soon.
 
 ## Warm (Recent)
 
-### C15: QA-2 FP Triage Tests (34 tests) + Dogfood Classification
-34 FP reproduction tests across all diagnostic patterns — each constructs minimal graphs that trigger diagnostics on correct code. When fixes land, these become regression guards. Dogfood thresholds use generous safety bounds, not exact counts.
+### C16: Process Debt Cleared + stale_reference Path-Segment Fix
+Phase 1: 6 GitHub issues filed (#18-#23) covering all FP categories. investigation-2.md committed. 3-cycle process debt resolved. Phase 2: Fix in `parser/rust.rs` — `is_path_prefix` check at line 698 (skip module prefix in `extract_use_tree` recursion) + `extract_use_path_last_segment` at line 788 (handle recursive case where node IS the scoped_use_list). 34 QA-2 tests. Dogfood: stale_reference 117→61 (-56). Total 620→441 combined with all workers.
 
-Full 652 finding classification: ~78% FP (~508 FP, ~144 TP). Three dominant FP mechanisms: (1) test functions invisible to static analysis, (2) path-segment import symbols — fixed in C16, (3) import-name vs reference-name mismatch. circular_dependency (5) and isolated_cluster (1) are genuine TPs.
+### C15: QA-2 FP Triage Tests + Dogfood Classification
+34 FP reproduction tests across all diagnostic patterns. Full 652 finding classification: ~78% FP (~508 FP, ~144 TP). Three dominant FP mechanisms: test functions invisible to static analysis, path-segment import symbols (fixed C16), import-name vs reference-name mismatch.
 
 ### C14: stale_reference Root Cause + 25 QA-2 Tests
-Root cause confirmed: Rust `use crate::module::{item}` creates import symbols for BOTH intermediate path segment AND leaf item. Path-segment symbol can never resolve → stale_reference fires at HIGH. All 99 stale_reference findings share this mechanism. T9 proves orthogonality of phantom vs stale signals.
+Root cause confirmed: Rust `use crate::module::{item}` creates import symbols for BOTH intermediate path segment AND leaf item. Path-segment symbol can never resolve → stale_reference fires at HIGH.
 
 ### Experiential (Warm)
-Investigation-first consistently pays off. The 78% FP rate is sobering but not surprising — pattern algorithms are correct, data supply has known gaps. Cross-pattern guards (T32-T34) are valuable for preventing regressions across pattern boundaries. FP reproduction tests document precisely what's broken with named, runnable proofs.
+Investigation-first consistently pays off. The 78% FP rate is sobering but known — pattern algorithms correct, data supply has known gaps. Cross-pattern guards valuable for preventing regressions. Small surgical fixes keep working. The self-import fix in C16 was a surprise — would have been a regression without T7.
 
 ## Key Reference
 
@@ -99,11 +80,9 @@ Investigation-first consistently pays off. The 78% FP rate is sobering but not s
 
 ## Cold (Archive)
 - Cycle 13: QA-2 tests + investigation briefs. ReferenceKind::Import → EdgeKind::References mapping.
-- Cycle 12: partial_wiring DELIVERED — 11th of 13 patterns. Import-Call Gap Analysis algorithm.
+- Cycle 12: partial_wiring DELIVERED — 11th of 13 patterns. Import-Call Gap Analysis.
 - Cycle 11: incomplete_migration — 10th of 13 patterns. Three-signal detection.
 - Cycle 10: contract_mismatch Phase 2 FP eliminated. Language grouping + Rust cross-file exclusion.
 - Cycle 9: contract_mismatch — 9th of 13 patterns. Two-phase detection + signature parser.
 - Cycle 8: stale_reference — 8th of 13 patterns. Two-signal detection.
-- Cycle 7: Recursion depth protection. extract_dependency_graph(). Module role fix.
-- Cycle 6: Rust adapter Phase 1 (~2100 lines).
-- Cycles 1-5: Diagnostic types, pattern detectors, integration tests, exclusion consolidation.
+- Cycles 1-7: Diagnostic types, pattern detectors, integration tests, exclusion consolidation, Rust adapter Phase 1, recursion depth, module role fix.

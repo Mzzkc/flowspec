@@ -206,15 +206,10 @@ fn sarif_format_is_accepted() {
 #[test]
 fn deferred_commands_give_not_implemented_error() {
     // trace now requires --symbol, so it's tested separately in trace_command.rs.
-    // diff, init, watch are still stubs.
-    for cmd_name in &["diff", "init", "watch"] {
+    // diff and init are implemented. Only watch remains deferred.
+    for cmd_name in &["watch"] {
         let mut cmd = Command::cargo_bin("flowspec").unwrap();
-        let assert = if *cmd_name == "diff" {
-            // diff requires two path arguments
-            cmd.args([cmd_name, "/tmp/a", "/tmp/b"]).assert()
-        } else {
-            cmd.arg(cmd_name).assert()
-        };
+        let assert = cmd.arg(cmd_name).assert();
         assert.stderr(predicate::str::contains("panic").not());
     }
 }

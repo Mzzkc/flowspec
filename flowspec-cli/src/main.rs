@@ -129,12 +129,15 @@ enum Commands {
         direction: TraceDirection,
     },
 
-    /// Compare two manifests — show structural changes (not yet implemented).
+    /// Compare two manifests — show structural changes.
     Diff {
         /// Path to older manifest.
         old: PathBuf,
         /// Path to newer manifest.
         new: PathBuf,
+        /// Only diff specific sections (entities, diagnostics, etc.).
+        #[arg(long)]
+        section: Vec<String>,
     },
 
     /// Create .flowspec/config.yaml for a project.
@@ -330,19 +333,16 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             output_path,
             config_path,
         )?,
-        Commands::Diff { .. } => {
-            return Err(FlowspecError::CommandNotImplemented {
-                command: "diff".to_string(),
-                suggestion: "use flowspec analyze to compare projects manually; diff is planned for a future release".to_string(),
-            })
+        Commands::Diff { old, new, section } => {
+            commands::run_diff(&old, &new, &section, format, output_path)?
         }
         Commands::Init { path } => commands::run_init(&path)?,
-        Commands::Watch { .. } => {
-            return Err(FlowspecError::CommandNotImplemented {
-                command: "watch".to_string(),
-                suggestion: "use flowspec analyze in a file-watcher loop; watch is planned for a future release".to_string(),
-            })
-        }
+        Commands::Watch { .. } => return Err(FlowspecError::CommandNotImplemented {
+            command: "watch".to_string(),
+            suggestion:
+                "use flowspec analyze in a file-watcher loop; watch is planned for a future release"
+                    .to_string(),
+        }),
     };
 
     Ok(ExitCode::from(exit_code))
