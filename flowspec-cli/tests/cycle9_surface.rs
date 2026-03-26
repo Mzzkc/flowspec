@@ -119,7 +119,6 @@ fn both_direction_error_uses_command_not_implemented() {
 fn command_not_implemented_includes_suggestion() {
     for (cmd_name, args) in &[
         ("diff", vec!["diff", "/tmp/a", "/tmp/b"]),
-        ("init", vec!["init"]),
         ("watch", vec!["watch"]),
     ] {
         let output = flowspec().args(args).output().unwrap();

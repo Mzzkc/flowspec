@@ -137,7 +137,7 @@ enum Commands {
         new: PathBuf,
     },
 
-    /// Create .flowspec/config.yaml for a project (not yet implemented).
+    /// Create .flowspec/config.yaml for a project.
     Init {
         /// Project root.
         #[arg(default_value = ".")]
@@ -336,12 +336,7 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
                 suggestion: "use flowspec analyze to compare projects manually; diff is planned for a future release".to_string(),
             })
         }
-        Commands::Init { .. } => {
-            return Err(FlowspecError::CommandNotImplemented {
-                command: "init".to_string(),
-                suggestion: "create .flowspec/config.yaml manually; init is planned for a future release".to_string(),
-            })
-        }
+        Commands::Init { path } => commands::run_init(&path)?,
         Commands::Watch { .. } => {
             return Err(FlowspecError::CommandNotImplemented {
                 command: "watch".to_string(),
