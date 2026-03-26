@@ -86,7 +86,7 @@ Full TS preprocessing in `javascript.rs`: `preprocess_typescript()`, `pre_extrac
 ### Experiential (Warm)
 Investigation-first consistently pays off. The 10-sample trace methodology is radically better than categorization-based prediction. Small surgical fixes keep working. Concurrent workspace file conflicts (C17) were the hardest challenge — not the code itself. The dedup fix revealed that `declare class` with body was the actual failure — trust the tests.
 
-## Codebase Snapshot (~1994 tests passing)
+## Codebase Snapshot (~2102 tests passing)
 | Component | Status |
 |-----------|--------|
 | IR types | DONE (parser/ir.rs, 620+ lines) |
@@ -106,6 +106,9 @@ Investigation-first consistently pays off. The 10-sample trace methodology is ra
 - SymbolKind::Module filtered from entity list
 - Non-self field expressions emit dotted callee names (C11)
 - IR types `SymbolKind::Interface`, `SymbolKind::Enum` already existed — no changes needed for TS
+
+### Retry Session (C20 Implementation)
+Validation retry. Verified all 35 QA-1 tests still pass: 13 __all__, 10 TYPE_CHECKING, 1 combined, 1 reexport regression, 5 inline, 5 regression guards. Full suite: 2102 tests (up from 1994 in C19), 0 failures. Workers 2 and 3 have concurrent uncommitted changes on disk (data_dead_end dedup, config deserialization) — all integrate cleanly, no test failures. Implementation unchanged from d51888e commit. The `attribute_access:` piggyback pattern is working exactly as designed across all edge cases including Workers 2/3's changes. Clippy clean. Fmt clean. Build clean. Codebase snapshot updated to ~2102 tests.
 
 ## Cold (Archive)
 - Cycle 14: extract_all_type_references for Rust. 234/342 phantom FPs eliminated (68%).

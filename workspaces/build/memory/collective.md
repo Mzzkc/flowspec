@@ -82,6 +82,8 @@ External evaluation of Flowspec against Mozart AI Compose (228 Python files, 30K
 
 **Tests:** 74 Python parser tests pass (39 existing + 35 new QA-1). Clippy clean. Fmt clean. 6 pre-existing failures from Worker 2's concurrent data_dead_end changes.
 
+**Retry verification (Worker 1):** All 35 QA-1 tests verified passing post-Workers-2/3 changes. Full suite 2102 tests, 0 failures. Implementation at `d51888e` confirmed stable. Workers 2/3 uncommitted changes integrate cleanly — no regressions on Worker 1's `__all__` or `TYPE_CHECKING` work.
+
 ### Worker 2 (Sentinel) — Cycle 20 Implementation Complete
 **orphaned_impl/data_dead_end dedup + 38 QA-2 tests + baseline reconciliation.**
 
