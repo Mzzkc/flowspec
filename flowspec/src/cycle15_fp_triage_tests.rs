@@ -1105,12 +1105,13 @@ fn test_c15_t29_dogfood_total_findings_stable() {
     };
 
     let total = result.manifest.diagnostics.len();
-    // Use generous thresholds since other workers may commit concurrently
-    // Exact 652 may shift, but we guard against catastrophic regression
+    // Safety range updated after C16 stale_reference path-segment fix (#18)
+    // removed ~132 findings (117 stale_reference + cascading).
+    // C15 baseline: 620, C16 post-fix baseline: ~488.
     assert!(
-        total >= 500 && total <= 850,
-        "T29: Total findings ({}) outside safety range [500, 850]. \
-         C14 baseline: 652. Investigate if count changed significantly.",
+        total >= 350 && total <= 650,
+        "T29: Total findings ({}) outside safety range [350, 650]. \
+         C16 post-fix baseline: ~488. Investigate if count changed significantly.",
         total
     );
     eprintln!("T29: Dogfood total findings: {}", total);

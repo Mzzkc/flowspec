@@ -690,18 +690,28 @@ fn extract_use_tree(
                 // This might be a simple scoped import like `use std::collections::HashMap;`
                 // Check if this is the final identifier (not containing a use_list)
                 if child.kind() == "scoped_identifier" && !has_use_list_descendant(child) {
-                    // Final scoped identifier — extract last segment as import name
-                    if let Some(name) = last_identifier_segment(content, child) {
-                        // Compute module path from the scoped_identifier's path field
-                        let child_module_path = extract_module_path(content, child);
-                        add_import_symbol(
-                            result,
-                            &name,
-                            visibility,
-                            path,
-                            child,
-                            child_module_path.as_deref(),
-                        );
+                    // Skip if this scoped_identifier is the path prefix of a parent
+                    // that also has a use_list. In `use crate::module::{Item}`, the
+                    // scoped_identifier "crate::module" is the path field of the
+                    // scoped_use_list — it's NOT a leaf import. Only emit when this
+                    // is the complete import target (e.g., `use crate::module::Item;`).
+                    let is_path_prefix = node
+                        .child_by_field_name("path")
+                        .is_some_and(|p| p.id() == child.id());
+                    if !is_path_prefix {
+                        // Final scoped identifier — extract last segment as import name
+                        if let Some(name) = last_identifier_segment(content, child) {
+                            // Compute module path from the scoped_identifier's path field
+                            let child_module_path = extract_module_path(content, child);
+                            add_import_symbol(
+                                result,
+                                &name,
+                                visibility,
+                                path,
+                                child,
+                                child_module_path.as_deref(),
+                            );
+                        }
                     }
                 } else {
                     // Has nested children (scoped_use_list) — recurse with computed module path
@@ -776,6 +786,14 @@ fn last_identifier_segment(content: &[u8], node: Node) -> Option<String> {
 /// Extract the last segment of the path in a use declaration (for `self` imports).
 /// For `use std::io::{self, Read}`, returns "io".
 fn extract_use_path_last_segment(content: &[u8], use_node: Node) -> Option<String> {
+    // If the node itself is a scoped_use_list, extract from its path field directly.
+    // This handles the recursive case where extract_use_tree passes the scoped_use_list
+    // as `node` during recursion.
+    if use_node.kind() == "scoped_use_list" {
+        if let Some(path_node) = use_node.child_by_field_name("path") {
+            return last_identifier_segment(content, path_node);
+        }
+    }
     // Walk the use_declaration's children to find the scoped path before the use_list
     let mut cursor = use_node.walk();
     for child in use_node.children(&mut cursor) {
