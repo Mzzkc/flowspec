@@ -89,6 +89,9 @@ mod cycle16_method_call_tests;
 #[cfg(test)]
 mod cycle16_stale_ref_fix_tests;
 
+#[cfg(test)]
+mod cycle17_child_module_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{

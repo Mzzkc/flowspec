@@ -701,6 +701,22 @@ fn resolve_relative_rust_path(module_name: &str, importing_module_key: &str) -> 
     }
 }
 
+/// Checks whether `lookup_name` refers to a child module of `parent_module_key`.
+///
+/// Only applies to Rust-style module paths (containing `::`). Returns `false`
+/// for Python/JS imports to avoid cross-language false matches.
+fn is_child_module(
+    parent_module_key: &str,
+    lookup_name: &str,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> bool {
+    if !parent_module_key.contains("::") {
+        return false;
+    }
+    let child_key = format!("{}::{}", parent_module_key, lookup_name);
+    module_map.contains_key(&child_key)
+}
+
 /// Resolves cross-file import references by matching import symbols to definitions
 /// in other files via a module-to-file mapping.
 ///
@@ -868,6 +884,9 @@ pub fn resolve_cross_file_imports(
                 // Module-level import (`import X`) — module file found is enough.
                 // No specific symbol to match since we're importing the whole module.
                 resolution_updates.push((*import_id, ResolutionStatus::Resolved));
+            } else if is_child_module(module_name, lookup_name, module_map) {
+                // Child module import: lookup_name is a submodule, not a symbol.
+                resolution_updates.push((*import_id, ResolutionStatus::Resolved));
             } else {
                 // Module found but symbol not in it
                 resolution_updates.push((
@@ -880,6 +899,9 @@ pub fn resolve_cross_file_imports(
             // This handles empty modules
             if lookup_name == module_name || lookup_name.starts_with("*:") {
                 // Module-level import (e.g., `import utils`) — module found is enough
+                resolution_updates.push((*import_id, ResolutionStatus::Resolved));
+            } else if is_child_module(module_name, lookup_name, module_map) {
+                // Child module fallback for empty parent modules
                 resolution_updates.push((*import_id, ResolutionStatus::Resolved));
             } else {
                 resolution_updates.push((

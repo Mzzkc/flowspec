@@ -54,6 +54,19 @@ impl LanguageAdapter for JsAdapter {
     }
 
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError> {
+        let is_ts = is_typescript_file(path);
+        let mut ts_entities: Vec<Symbol> = Vec::new();
+        let parse_content = if is_ts {
+            let fs = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            ts_entities = pre_extract_ts_entities(content, path, &fs);
+            preprocess_typescript(content)
+        } else {
+            content.to_string()
+        };
+
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_javascript::LANGUAGE.into())
@@ -63,13 +76,13 @@ impl LanguageAdapter for JsAdapter {
             })?;
 
         let tree = parser
-            .parse(content, None)
+            .parse(&parse_content, None)
             .ok_or_else(|| FlowspecError::Parse {
                 file: path.to_path_buf(),
                 reason: "tree-sitter failed to produce a parse tree".to_string(),
             })?;
 
-        let content_bytes = content.as_bytes();
+        let content_bytes = parse_content.as_bytes();
         let file_stem = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -102,6 +115,8 @@ impl LanguageAdapter for JsAdapter {
 
         // Extract all function/method calls from the AST
         extract_all_calls(&mut result, content_bytes, path, root, 0);
+
+        result.symbols.extend(ts_entities);
 
         Ok(result)
     }
@@ -1310,6 +1325,567 @@ fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TypeScript preprocessing
+// ---------------------------------------------------------------------------
+
+fn is_typescript_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e, "ts" | "tsx"))
+        .unwrap_or(false)
+}
+
+fn preprocess_typescript(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut in_ts_block = false;
+    let mut brace_depth: i32 = 0;
+    let mut in_type_alias = false;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if idx > 0 {
+            result.push('\n');
+        }
+        if in_type_alias {
+            blank_line(&mut result, line);
+            if line.contains(';') {
+                in_type_alias = false;
+            }
+            continue;
+        }
+        if in_ts_block {
+            let (d, ended) = count_braces_in_line(line, brace_depth);
+            brace_depth = d;
+            blank_line(&mut result, line);
+            if ended {
+                in_ts_block = false;
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            result.push_str(line);
+            continue;
+        }
+        if let Some(rest) = detect_ts_block_start(trimmed) {
+            if let Some(open_idx) = rest.find('{') {
+                let (d, ended) = count_braces_in_line(&rest[open_idx..], 0);
+                blank_line(&mut result, line);
+                if !ended {
+                    in_ts_block = true;
+                    brace_depth = d;
+                }
+            } else if rest.contains(';') {
+                blank_line(&mut result, line);
+            } else {
+                blank_line(&mut result, line);
+                in_type_alias = true;
+            }
+            continue;
+        }
+        result.push_str(&strip_ts_line_syntax(line));
+    }
+    result
+}
+
+fn blank_line(result: &mut String, line: &str) {
+    for c in line.chars() {
+        result.push(if c == '\t' { '\t' } else { ' ' });
+    }
+}
+
+fn detect_ts_block_start(trimmed: &str) -> Option<&str> {
+    let mut s = trimmed;
+    if let Some(r) = s.strip_prefix("export") {
+        s = r.trim_start();
+    }
+    if let Some(r) = s.strip_prefix("declare") {
+        s = r.trim_start();
+    }
+    if let Some(r) = s.strip_prefix("const") {
+        let rt = r.trim_start();
+        if rt.starts_with("enum") {
+            s = rt;
+        }
+    }
+    if s.starts_with("interface ") || s.starts_with("interface\t") {
+        let a = s["interface".len()..].trim_start();
+        return a.find(['{', ';']).map(|i| &a[i..]).or(Some(a));
+    }
+    if s.starts_with("enum ") || s.starts_with("enum\t") {
+        let a = s["enum".len()..].trim_start();
+        return a.find('{').map(|i| &a[i..]).or(Some(a));
+    }
+    if s.starts_with("type ") || s.starts_with("type\t") {
+        let a = s["type".len()..].trim_start();
+        if a.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            return a.find('=').map(|i| &a[i..]).or(Some(a));
+        }
+    }
+    None
+}
+
+fn count_braces_in_line(line: &str, mut depth: i32) -> (i32, bool) {
+    let mut in_str = false;
+    let mut sc = ' ';
+    let mut prev = ' ';
+    for ch in line.chars() {
+        if in_str {
+            if ch == sc && prev != '\\' {
+                in_str = false;
+            }
+        } else {
+            match ch {
+                '"' | '\'' | '`' => {
+                    in_str = true;
+                    sc = ch;
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth <= 0 {
+                        return (0, true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    (depth, false)
+}
+
+fn strip_ts_line_syntax(line: &str) -> String {
+    let mut s = line.to_string();
+    s = strip_keyword_after(&s, "import", "type");
+    s = strip_keyword_after(&s, "export", "type");
+    s = strip_leading_keyword(&s, "declare");
+    s = strip_leading_keyword(&s, "abstract");
+    for m in &["private", "public", "protected", "readonly"] {
+        s = strip_leading_modifier(&s, m);
+    }
+    s = strip_generics(&s);
+    s = strip_type_annotations(&s);
+    s
+}
+
+fn strip_keyword_after(line: &str, kw1: &str, kw2: &str) -> String {
+    if let Some(p) = line.find(kw1) {
+        let after = p + kw1.len();
+        let rest = &line[after..];
+        let ws = rest.len() - rest.trim_start().len();
+        let aw = &rest[ws..];
+        if aw.starts_with(kw2) {
+            let end = after + ws + kw2.len();
+            let tail = &line[end..];
+            if tail.is_empty() || tail.starts_with(|c: char| c.is_whitespace() || c == '{') {
+                let mut r = String::with_capacity(line.len());
+                r.push_str(&line[..after + ws]);
+                r.extend(std::iter::repeat(' ').take(kw2.len()));
+                r.push_str(tail);
+                return r;
+            }
+        }
+    }
+    line.to_string()
+}
+
+fn strip_leading_keyword(line: &str, keyword: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    if let Some(rest) = trimmed.strip_prefix("export") {
+        let rt = rest.trim_start();
+        if let Some(after) = rt.strip_prefix(keyword) {
+            if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                let ks = indent + "export".len() + (rest.len() - rt.len());
+                let ke = ks + keyword.len();
+                let mut r = String::with_capacity(line.len());
+                r.push_str(&line[..ks]);
+                r.extend(std::iter::repeat(' ').take(keyword.len()));
+                r.push_str(&line[ke..]);
+                return r;
+            }
+        }
+    }
+    if let Some(after) = trimmed.strip_prefix(keyword) {
+        if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+            let ke = indent + keyword.len();
+            let mut r = String::with_capacity(line.len());
+            r.push_str(&line[..indent]);
+            r.extend(std::iter::repeat(' ').take(keyword.len()));
+            r.push_str(&line[ke..]);
+            return r;
+        }
+    }
+    line.to_string()
+}
+
+fn strip_leading_modifier(line: &str, keyword: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    if let Some(after) = trimmed.strip_prefix(keyword) {
+        if after.starts_with(|c: char| c.is_whitespace()) {
+            let ke = indent + keyword.len();
+            let mut r = String::with_capacity(line.len());
+            r.push_str(&line[..indent]);
+            r.extend(std::iter::repeat(' ').take(keyword.len()));
+            r.push_str(&line[ke..]);
+            return r;
+        }
+    }
+    line.to_string()
+}
+
+fn strip_generics(line: &str) -> String {
+    let b = line.as_bytes();
+    let len = b.len();
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if b[i] == b'<' && is_generic_open(b, i) {
+            let start = i;
+            let mut depth = 1;
+            i += 1;
+            while i < len && depth > 0 {
+                match b[i] {
+                    b'<' => depth += 1,
+                    b'>' => depth -= 1,
+                    b'\'' | b'"' | b'`' => {
+                        let q = b[i];
+                        i += 1;
+                        while i < len && b[i] != q {
+                            i += 1;
+                        }
+                        if i < len {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            out.extend(std::iter::repeat(b' ').take(i - start));
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| line.to_string())
+}
+
+fn is_generic_open(bytes: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    let mut j = i - 1;
+    while j > 0 && bytes[j] == b' ' {
+        j -= 1;
+    }
+    let p = bytes[j];
+    p.is_ascii_alphanumeric() || p == b'_' || p == b'$'
+}
+
+fn strip_type_annotations(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    let mut pd: i32 = 0;
+    let mut in_str = false;
+    let mut sc = b' ';
+    while i < len {
+        let c = bytes[i];
+        if in_str {
+            out.push(c);
+            if c == sc && (i == 0 || bytes[i - 1] != b'\\') {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => {
+                in_str = true;
+                sc = c;
+                out.push(c);
+                i += 1;
+            }
+            b'(' => {
+                pd += 1;
+                out.push(c);
+                i += 1;
+            }
+            b')' => {
+                pd -= 1;
+                out.push(c);
+                i += 1;
+                if pd <= 0 {
+                    if let Some(co) = find_type_colon(&bytes[i..]) {
+                        let cp = i + co;
+                        let ep = find_annotation_end(&bytes[cp..], false);
+                        let se = cp + ep;
+                        out.extend(std::iter::repeat(b' ').take(se - i));
+                        i = se;
+                    }
+                }
+            }
+            b':' if pd > 0 => {
+                if is_param_type_colon(bytes, i) {
+                    let ep = find_annotation_end(&bytes[i..], true);
+                    out.extend(std::iter::repeat(b' ').take(ep));
+                    i += ep;
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| line.to_string())
+}
+
+fn find_type_colon(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b':' {
+        if i + 1 < bytes.len() && bytes[i + 1] == b':' {
+            return None;
+        }
+        return Some(i);
+    }
+    None
+}
+
+fn is_param_type_colon(bytes: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    let p = bytes[i - 1];
+    p.is_ascii_alphanumeric() || p == b'_' || p == b'$' || p == b'?'
+}
+
+fn find_annotation_end(bytes: &[u8], in_params: bool) -> usize {
+    let mut i = 1;
+    let len = bytes.len();
+    let mut ad: i32 = 0;
+    let mut pd: i32 = 0;
+    let mut in_str = false;
+    let mut sc = b' ';
+    while i < len {
+        let c = bytes[i];
+        if in_str {
+            if c == sc && (i == 0 || bytes[i - 1] != b'\\') {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' | b'"' | b'`' => {
+                in_str = true;
+                sc = c;
+                i += 1;
+            }
+            b'<' => {
+                ad += 1;
+                i += 1;
+            }
+            b'>' => {
+                if ad > 0 {
+                    ad -= 1;
+                }
+                i += 1;
+            }
+            b'(' => {
+                pd += 1;
+                i += 1;
+            }
+            b')' if pd > 0 => {
+                pd -= 1;
+                i += 1;
+            }
+            _ if ad > 0 || pd > 0 => i += 1,
+            b',' | b')' if in_params => return i,
+            b'=' if in_params => return i,
+            b'{' if !in_params => return i,
+            b'=' if !in_params && i + 1 < len && bytes[i + 1] == b'>' => return i,
+            b';' if !in_params => return i,
+            _ => i += 1,
+        }
+    }
+    len
+}
+
+fn pre_extract_ts_entities(content: &str, path: &Path, file_stem: &str) -> Vec<Symbol> {
+    let mut entities = Vec::new();
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut in_block = false;
+    let mut brace_depth: i32 = 0;
+    for (li, line) in lines.iter().enumerate() {
+        if in_block {
+            let (d, ended) = count_braces_in_line(line, brace_depth);
+            brace_depth = d;
+            if ended {
+                in_block = false;
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+        let ln = (li + 1) as u32;
+        if let Some(ent) = try_extract_ts_entity(trimmed, path, file_stem, ln) {
+            entities.push(ent);
+            if let Some(bp) = trimmed.find('{') {
+                let (d, ended) = count_braces_in_line(&trimmed[bp..], 0);
+                if !ended {
+                    in_block = true;
+                    brace_depth = d;
+                }
+            }
+        }
+    }
+    entities
+}
+
+fn try_extract_ts_entity(
+    trimmed: &str,
+    path: &Path,
+    file_stem: &str,
+    line_num: u32,
+) -> Option<Symbol> {
+    let mut s = trimmed;
+    let mut exported = false;
+    if let Some(r) = s.strip_prefix("export") {
+        exported = true;
+        s = r.trim_start();
+    }
+    if let Some(r) = s.strip_prefix("declare") {
+        s = r.trim_start();
+    }
+    if let Some(r) = s.strip_prefix("const") {
+        let rt = r.trim_start();
+        if rt.starts_with("enum") {
+            s = rt;
+        }
+    }
+    let vis = if exported {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    };
+    let loc = Location {
+        file: path.to_path_buf(),
+        line: line_num,
+        column: 1,
+        end_line: line_num,
+        end_column: 1,
+    };
+    if s.starts_with("function ") || s.starts_with("function\t") {
+        let name = extract_identifier(s["function".len()..].trim_start())?;
+        return Some(Symbol {
+            id: SymbolId::default(),
+            kind: SymbolKind::Function,
+            name: name.clone(),
+            qualified_name: format!("{}::{}", file_stem, name),
+            visibility: vis,
+            signature: None,
+            location: loc,
+            resolution: ResolutionStatus::Resolved,
+            scope: ScopeId::default(),
+            annotations: vec!["declare".to_string()],
+        });
+    }
+    if s.starts_with("class ") || s.starts_with("class\t") {
+        let name = extract_identifier(s["class".len()..].trim_start())?;
+        return Some(Symbol {
+            id: SymbolId::default(),
+            kind: SymbolKind::Class,
+            name: name.clone(),
+            qualified_name: format!("{}::{}", file_stem, name),
+            visibility: vis,
+            signature: None,
+            location: loc,
+            resolution: ResolutionStatus::Resolved,
+            scope: ScopeId::default(),
+            annotations: vec!["declare".to_string()],
+        });
+    }
+    if s.starts_with("interface ") || s.starts_with("interface\t") {
+        let name = extract_identifier(s["interface".len()..].trim_start())?;
+        return Some(Symbol {
+            id: SymbolId::default(),
+            kind: SymbolKind::Interface,
+            name: name.clone(),
+            qualified_name: format!("{}::{}", file_stem, name),
+            visibility: vis,
+            signature: None,
+            location: loc,
+            resolution: ResolutionStatus::Resolved,
+            scope: ScopeId::default(),
+            annotations: vec![],
+        });
+    }
+    if s.starts_with("enum ") || s.starts_with("enum\t") {
+        let name = extract_identifier(s["enum".len()..].trim_start())?;
+        return Some(Symbol {
+            id: SymbolId::default(),
+            kind: SymbolKind::Enum,
+            name: name.clone(),
+            qualified_name: format!("{}::{}", file_stem, name),
+            visibility: vis,
+            signature: None,
+            location: loc,
+            resolution: ResolutionStatus::Resolved,
+            scope: ScopeId::default(),
+            annotations: vec![],
+        });
+    }
+    if s.starts_with("type ") || s.starts_with("type\t") {
+        let after = s["type".len()..].trim_start();
+        if after.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            let name = extract_identifier(after)?;
+            if name == "of" {
+                return None;
+            }
+            return Some(Symbol {
+                id: SymbolId::default(),
+                kind: SymbolKind::Interface,
+                name: name.clone(),
+                qualified_name: format!("{}::{}", file_stem, name),
+                visibility: vis,
+                signature: None,
+                location: loc,
+                resolution: ResolutionStatus::Resolved,
+                scope: ScopeId::default(),
+                annotations: vec!["type_alias".to_string()],
+            });
+        }
+    }
+    None
+}
+
+fn extract_identifier(s: &str) -> Option<String> {
+    let name: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2358,5 +2934,799 @@ class MyClass {
             method_names.contains(&"normalMethod"),
             "normalMethod must be extracted"
         );
+    }
+
+    // =========================================================================
+    // QA-1: TypeScript Entity Extraction — Cycle 17
+    // =========================================================================
+
+    fn symbols_by_kind(result: &ParseResult, kind: SymbolKind) -> Vec<&Symbol> {
+        result.symbols.iter().filter(|s| s.kind == kind).collect()
+    }
+
+    // Section 1: Interface Extraction (TS-1 through TS-5)
+
+    #[test]
+    fn ts_interface_declaration_extracted() {
+        let content = r#"interface User {
+    name: string;
+    age: number;
+    email: string;
+}"#;
+        let result = parse_js("types.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "User"),
+            "Must extract Interface 'User', got: {:?}",
+            ifaces.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        let user = ifaces.iter().find(|s| s.name == "User").unwrap();
+        assert_eq!(user.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn ts_exported_interface_extracted_as_public() {
+        let content = r#"export interface Config {
+    host: string;
+    port: number;
+}"#;
+        let result = parse_js("config.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        let cfg = ifaces
+            .iter()
+            .find(|s| s.name == "Config")
+            .expect("Must extract Interface 'Config'");
+        assert_eq!(cfg.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn ts_interface_with_methods_extracted() {
+        let content = r#"interface Repository {
+    find(id: string): User;
+    save(entity: User): void;
+    delete(id: string): boolean;
+}"#;
+        let result = parse_js("service.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "Repository"),
+            "Must extract Interface 'Repository'"
+        );
+        // Method signatures should NOT produce separate Method symbols
+        let methods = symbols_by_kind(&result, SymbolKind::Method);
+        assert_eq!(
+            methods.len(),
+            0,
+            "Interface method signatures must not produce Method symbols"
+        );
+    }
+
+    #[test]
+    fn ts_multiple_interfaces_all_extracted() {
+        let content = r#"interface Readable {
+    read(): string;
+}
+
+interface Writable {
+    write(data: string): void;
+}
+
+interface Closable {
+    close(): void;
+}"#;
+        let result = parse_js("models.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        let names: Vec<&str> = ifaces.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"Readable"),
+            "Missing Readable in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"Writable"),
+            "Missing Writable in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"Closable"),
+            "Missing Closable in {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn ts_interface_extends_extracted() {
+        let content = r#"interface User {
+    name: string;
+}
+
+interface Admin extends User {
+    permissions: string[];
+    role: string;
+}"#;
+        let result = parse_js("admin.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert_eq!(
+            ifaces.len(),
+            2,
+            "Must extract 2 interfaces, got {}",
+            ifaces.len()
+        );
+    }
+
+    // Section 2: Enum Extraction (TS-6 through TS-9)
+
+    #[test]
+    fn ts_enum_declaration_extracted() {
+        let content = r#"enum Status {
+    Active,
+    Inactive,
+    Pending
+}"#;
+        let result = parse_js("status.ts", content);
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        assert!(
+            enums.iter().any(|s| s.name == "Status"),
+            "Must extract Enum 'Status'"
+        );
+    }
+
+    #[test]
+    fn ts_enum_with_values_extracted() {
+        let content = r#"enum HttpCode {
+    OK = 200,
+    NotFound = 404,
+    InternalError = 500
+}"#;
+        let result = parse_js("http.ts", content);
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        assert!(enums.iter().any(|s| s.name == "HttpCode"));
+    }
+
+    #[test]
+    fn ts_const_enum_exported() {
+        let content = r#"export const enum Direction {
+    Up = "UP",
+    Down = "DOWN",
+    Left = "LEFT",
+    Right = "RIGHT"
+}"#;
+        let result = parse_js("direction.ts", content);
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        let dir = enums
+            .iter()
+            .find(|s| s.name == "Direction")
+            .expect("Must extract Enum 'Direction'");
+        assert_eq!(dir.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn ts_enum_string_values_with_special_chars() {
+        let content = r#"enum Template {
+    Header = "{ header }",
+    Footer = "} footer {",
+    Body = "normal"
+}"#;
+        let result = parse_js("templates.ts", content);
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        assert!(
+            enums.iter().any(|s| s.name == "Template"),
+            "Must extract Enum 'Template' despite braces in string values"
+        );
+    }
+
+    // Section 3: Type Alias Extraction (TS-10 through TS-12)
+
+    #[test]
+    fn ts_type_alias_extracted() {
+        let content = "type UserId = string;\n";
+        let result = parse_js("aliases.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "UserId"),
+            "Must extract type alias 'UserId' as Interface"
+        );
+    }
+
+    #[test]
+    fn ts_union_type_alias_extracted() {
+        let content = r#"type Result<T> =
+    | { ok: true; value: T }
+    | { ok: false; error: Error };"#;
+        let result = parse_js("result.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "Result"),
+            "Must extract union type alias 'Result'"
+        );
+    }
+
+    #[test]
+    fn ts_exported_type_alias() {
+        let content = "export type Callback = (data: string) => void;\n";
+        let result = parse_js("callbacks.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        let cb = ifaces
+            .iter()
+            .find(|s| s.name == "Callback")
+            .expect("Must extract type alias 'Callback'");
+        assert_eq!(cb.visibility, Visibility::Public);
+    }
+
+    // Section 4: Type Annotation Stripping (TS-13 through TS-16)
+
+    #[test]
+    fn ts_typed_function_params_extracted() {
+        let content = r#"function greet(name: string, age: number): string {
+    return `Hello ${name}, age ${age}`;
+}"#;
+        let result = parse_js("greet.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "greet"),
+            "Must extract Function 'greet' despite type annotations"
+        );
+    }
+
+    #[test]
+    fn ts_typed_arrow_function_extracted() {
+        let content = r#"const transform = (input: string): number => {
+    return parseInt(input, 10);
+};"#;
+        let result = parse_js("transform.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "transform"),
+            "Must extract arrow Function 'transform' despite type annotations"
+        );
+    }
+
+    #[test]
+    fn ts_generic_function_extracted() {
+        let content = r#"function identity<T>(value: T): T {
+    return value;
+}"#;
+        let result = parse_js("identity.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "identity"),
+            "Must extract generic Function 'identity'"
+        );
+    }
+
+    #[test]
+    fn ts_complex_generic_constraints() {
+        let content = r#"function merge<T extends object, U extends object>(a: T, b: U): T & U {
+    return { ...a, ...b };
+}"#;
+        let result = parse_js("merge.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "merge"),
+            "Must extract Function 'merge' with complex generics"
+        );
+    }
+
+    // Section 5: Class with TS-Specific Features (TS-17 through TS-20)
+
+    #[test]
+    fn ts_class_access_modifiers() {
+        let content = r#"class Account {
+    private balance: number = 0;
+
+    public getBalance(): number {
+        return this.balance;
+    }
+
+    protected deposit(amount: number): void {
+        this.balance += amount;
+    }
+
+    private reset(): void {
+        this.balance = 0;
+    }
+}"#;
+        let result = parse_js("account.ts", content);
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "Account"),
+            "Must extract Class 'Account'"
+        );
+        let methods = symbols_by_kind(&result, SymbolKind::Method);
+        let method_names: Vec<&str> = methods.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            method_names.contains(&"getBalance"),
+            "Must extract method 'getBalance', got {:?}",
+            method_names
+        );
+        assert!(
+            method_names.contains(&"deposit"),
+            "Must extract method 'deposit', got {:?}",
+            method_names
+        );
+        assert!(
+            method_names.contains(&"reset"),
+            "Must extract method 'reset', got {:?}",
+            method_names
+        );
+    }
+
+    #[test]
+    fn ts_class_implements_interface() {
+        let content = r#"interface Logger {
+    log(message: string): void;
+    error(message: string): void;
+}
+
+class ConsoleLogger implements Logger {
+    log(message: string): void {
+        console.log(message);
+    }
+    error(message: string): void {
+        console.error(message);
+    }
+}"#;
+        let result = parse_js("service.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(ifaces.iter().any(|s| s.name == "Logger"));
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(classes.iter().any(|s| s.name == "ConsoleLogger"));
+        let methods = symbols_by_kind(&result, SymbolKind::Method);
+        assert!(methods.len() >= 2, "Must extract at least 2 methods");
+    }
+
+    #[test]
+    fn ts_abstract_class_extracted() {
+        let content = r#"abstract class Shape {
+    abstract area(): number;
+
+    describe(): string {
+        return `Area: ${this.area()}`;
+    }
+}"#;
+        let result = parse_js("shape.ts", content);
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "Shape"),
+            "Must extract abstract Class 'Shape'"
+        );
+    }
+
+    #[test]
+    fn ts_constructor_parameter_properties() {
+        let content = r#"class Point {
+    constructor(
+        private readonly x: number,
+        private readonly y: number
+    ) {}
+
+    distanceTo(other: Point): number {
+        return Math.sqrt((this.x - other.x) ** 2 + (this.y - other.y) ** 2);
+    }
+}"#;
+        let result = parse_js("point.ts", content);
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(classes.iter().any(|s| s.name == "Point"));
+    }
+
+    // Section 6: Import/Export Patterns (TS-21 through TS-23)
+
+    #[test]
+    fn ts_type_only_import_extracted() {
+        let content = r#"import type { User } from './models';
+import { validate } from './utils';
+
+function processUser(user: User): boolean {
+    return validate(user);
+}"#;
+        let result = parse_js("handler.ts", content);
+        let imports: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Import)
+            .collect();
+        assert!(
+            imports.len() >= 2,
+            "Must extract at least 2 imports, got {}",
+            imports.len()
+        );
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(fns.iter().any(|s| s.name == "processUser"));
+    }
+
+    #[test]
+    fn ts_type_reexport() {
+        let content = "export type { Config } from './config';\n";
+        let result = parse_js("index.ts", content);
+        // Should not panic and should handle gracefully
+        let _ = result;
+    }
+
+    #[test]
+    fn ts_namespace_import_with_types() {
+        let content = r#"import * as models from './models';
+
+function lookup(m) {
+    return m;
+}"#;
+        let result = parse_js("app.ts", content);
+        // Namespace imports are standard JS — verify no panic
+        let _ = result;
+    }
+
+    // Section 7: Regression Guards (REG-1 through REG-5)
+
+    #[test]
+    fn ts_file_with_pure_js_extracts_all() {
+        let content = r#"function add(a, b) {
+    return a + b;
+}
+
+function multiply(a, b) {
+    return a * b;
+}
+
+class Calculator {
+    compute(op, a, b) {
+        if (op === '+') return add(a, b);
+        return multiply(a, b);
+    }
+}"#;
+        let result = parse_js("utils.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(fns.iter().any(|s| s.name == "add"), "Must extract 'add'");
+        assert!(
+            fns.iter().any(|s| s.name == "multiply"),
+            "Must extract 'multiply'"
+        );
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "Calculator"),
+            "Must extract 'Calculator'"
+        );
+    }
+
+    #[test]
+    fn js_file_not_preprocessed() {
+        let content = r#"// This interface is implemented in Java
+function createInterface(name) {
+    return { type: name };
+}
+
+class Builder {
+    build() {
+        return createInterface("enum");
+    }
+}"#;
+        let result = parse_js("legacy.js", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(fns.iter().any(|s| s.name == "createInterface"));
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(classes.iter().any(|s| s.name == "Builder"));
+        let methods = symbols_by_kind(&result, SymbolKind::Method);
+        assert!(methods.iter().any(|s| s.name == "build"));
+        // No interfaces should be extracted from .js file
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert_eq!(
+            ifaces.len(),
+            0,
+            "JS file must not produce Interface symbols"
+        );
+    }
+
+    #[test]
+    fn jsx_file_not_preprocessed() {
+        let content = r#"function Component() {
+    return <div>Hello</div>;
+}"#;
+        let result = parse_js("component.jsx", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(fns.iter().any(|s| s.name == "Component"));
+    }
+
+    #[test]
+    fn ts_empty_file_produces_empty_result() {
+        let result = parse_js("empty.ts", "");
+        assert_eq!(
+            result.symbols.len(),
+            0,
+            "Empty .ts file must produce 0 symbols"
+        );
+        assert!(result.scopes.len() >= 1, "Must have at least file scope");
+    }
+
+    #[test]
+    fn cjs_file_not_preprocessed() {
+        let content = "function helper() { return 1; }\nmodule.exports = { helper };\n";
+        let result = parse_js("module.cjs", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(fns.iter().any(|s| s.name == "helper"));
+    }
+
+    // Section 8: Adversarial Edge Cases (ADV-1 through ADV-8)
+
+    #[test]
+    fn ts_syntax_in_strings_not_stripped() {
+        let content = r#"function parseType(input: string): string {
+    const pattern = "interface Foo { bar: string }";
+    return pattern;
+}"#;
+        let result = parse_js("strings.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "parseType"),
+            "Must extract 'parseType'"
+        );
+        // The string content must NOT produce an Interface symbol named "Foo"
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            !ifaces.iter().any(|s| s.name == "Foo"),
+            "Must NOT extract Interface 'Foo' from string literal"
+        );
+    }
+
+    #[test]
+    fn ts_syntax_in_comments_not_stripped() {
+        let content = r#"// interface OldApi { deprecated: true }
+/* enum Status {
+   Active,
+   Inactive
+} */
+function helper(): void {
+    return;
+}"#;
+        let result = parse_js("documented.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(fns.iter().any(|s| s.name == "helper"));
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            !ifaces.iter().any(|s| s.name == "OldApi"),
+            "Must NOT extract Interface from comment"
+        );
+    }
+
+    #[test]
+    fn ts_nested_generics_fully_stripped() {
+        let content = r#"function transform<T>(data: Map<string, Array<T>>): Map<string, T[]> {
+    const result = new Map();
+    return result;
+}"#;
+        let result = parse_js("nested.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "transform"),
+            "Must extract Function 'transform' with nested generics"
+        );
+    }
+
+    #[test]
+    fn ts_interleaved_with_js_extracts_both() {
+        let content = r#"interface Config {
+    debug: boolean;
+}
+
+function create(cfg: Config): void {
+    console.log(cfg);
+}
+
+enum Level {
+    Info,
+    Warn,
+    Error
+}
+
+class App {
+    run() {
+        create({ debug: true });
+    }
+}"#;
+        let result = parse_js("mixed.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "Config"),
+            "Must extract Interface 'Config'"
+        );
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "create"),
+            "Must extract Function 'create'"
+        );
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        assert!(
+            enums.iter().any(|s| s.name == "Level"),
+            "Must extract Enum 'Level'"
+        );
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "App"),
+            "Must extract Class 'App'"
+        );
+    }
+
+    #[test]
+    fn tsx_jsx_and_generics_coexist() {
+        let content = r#"function Wrapper<T>(props: { data: T }) {
+    return <div>{JSON.stringify(props.data)}</div>;
+}"#;
+        // Note: JSX `<div>` may cause issues, but the function should still extract
+        let result = parse_js("component.tsx", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "Wrapper"),
+            "Must extract Function 'Wrapper' from .tsx file"
+        );
+    }
+
+    #[test]
+    fn ts_interface_nested_braces() {
+        let content = r#"interface DataStore {
+    query(sql: string): { rows: any[]; count: number };
+    metadata(): { version: string; tables: { name: string }[] };
+}"#;
+        let result = parse_js("complex.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "DataStore"),
+            "Must extract Interface 'DataStore' with nested braces"
+        );
+    }
+
+    #[test]
+    fn ts_declare_function_extracted() {
+        let content = r#"declare function fetch(url: string): Promise<Response>;
+declare class EventEmitter {
+    on(event: string, handler: Function): void;
+}"#;
+        let result = parse_js("ambient.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        assert!(
+            fns.iter().any(|s| s.name == "fetch"),
+            "Must extract declare function 'fetch'"
+        );
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "EventEmitter"),
+            "Must extract declare class 'EventEmitter'"
+        );
+    }
+
+    #[test]
+    fn ts_only_constructs_all_extracted() {
+        let content = r#"interface Serializable {
+    serialize(): string;
+    deserialize(data: string): void;
+}
+
+enum Format {
+    JSON,
+    XML,
+    CSV
+}
+
+type Options = {
+    format: Format;
+    pretty: boolean;
+};"#;
+        let result = parse_js("pure_types.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        assert!(
+            ifaces.iter().any(|s| s.name == "Serializable"),
+            "Must extract Interface 'Serializable'"
+        );
+        assert!(
+            ifaces.iter().any(|s| s.name == "Options"),
+            "Must extract type alias 'Options' as Interface"
+        );
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        assert!(
+            enums.iter().any(|s| s.name == "Format"),
+            "Must extract Enum 'Format'"
+        );
+    }
+
+    // Section 9: Position Accuracy (POS-1 through POS-3)
+
+    #[test]
+    fn ts_function_line_numbers_correct() {
+        let content = "interface Unused {\n    x: number;\n}\n\nfunction target(a: string, b: number): boolean {\n    return a.length > b;\n}\n";
+        let result = parse_js("positioned.ts", content);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        let target = fns
+            .iter()
+            .find(|s| s.name == "target")
+            .expect("Must find 'target'");
+        assert_eq!(
+            target.location.line, 5,
+            "Function 'target' must be at line 5, got {}",
+            target.location.line
+        );
+    }
+
+    #[test]
+    fn ts_interface_line_number_correct() {
+        let content = "interface First {\n    x: number;\n}\n";
+        let result = parse_js("first.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        let first = ifaces
+            .iter()
+            .find(|s| s.name == "First")
+            .expect("Must find 'First'");
+        assert_eq!(
+            first.location.line, 1,
+            "Interface 'First' must be at line 1, got {}",
+            first.location.line
+        );
+    }
+
+    #[test]
+    fn ts_entity_ordering_preserved() {
+        let content = "interface Alpha {\n    x: number;\n}\n\nfunction beta(a: string): void {\n    return;\n}\n\nenum Gamma {\n    A,\n    B\n}\n";
+        let result = parse_js("ordered.ts", content);
+        let ifaces = symbols_by_kind(&result, SymbolKind::Interface);
+        let fns = symbols_by_kind(&result, SymbolKind::Function);
+        let enums = symbols_by_kind(&result, SymbolKind::Enum);
+        assert!(!ifaces.is_empty() && !fns.is_empty() && !enums.is_empty());
+        let alpha_line = ifaces
+            .iter()
+            .find(|s| s.name == "Alpha")
+            .unwrap()
+            .location
+            .line;
+        let beta_line = fns.iter().find(|s| s.name == "beta").unwrap().location.line;
+        let gamma_line = enums
+            .iter()
+            .find(|s| s.name == "Gamma")
+            .unwrap()
+            .location
+            .line;
+        assert!(
+            alpha_line < beta_line,
+            "Alpha ({}) must come before beta ({})",
+            alpha_line,
+            beta_line
+        );
+        assert!(
+            beta_line < gamma_line,
+            "beta ({}) must come before Gamma ({})",
+            beta_line,
+            gamma_line
+        );
+    }
+
+    // Section 10: Decorator Handling (DEC-1 through DEC-2)
+
+    #[test]
+    fn ts_decorated_class_extracted() {
+        let content = r#"function Injectable() {
+    return function(target) { return target; };
+}
+
+@Injectable()
+class Service {
+    handle() {}
+}"#;
+        let result = parse_js("service.ts", content);
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "Service"),
+            "Must extract decorated Class 'Service'"
+        );
+    }
+
+    #[test]
+    fn ts_multiple_decorators() {
+        let content = r#"function Dec1() { return function(t) { return t; }; }
+function Dec2() { return function(t) { return t; }; }
+
+@Dec1()
+@Dec2()
+class Controller {
+    getUsers() { return []; }
+}"#;
+        let result = parse_js("controller.ts", content);
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(classes.iter().any(|s| s.name == "Controller"));
+        let methods = symbols_by_kind(&result, SymbolKind::Method);
+        assert!(methods.iter().any(|s| s.name == "getUsers"));
     }
 }
