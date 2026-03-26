@@ -32,28 +32,20 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn python_method_fixture_path() -> String {
-    workspace_root()
-        .join("tests/fixtures/method_calls/python")
-        .to_str()
-        .unwrap()
-        .to_string()
-}
-
-fn js_method_fixture_path() -> String {
-    workspace_root()
-        .join("tests/fixtures/method_calls/javascript")
-        .to_str()
-        .unwrap()
-        .to_string()
-}
-
-fn rust_method_fixture_path() -> String {
-    workspace_root()
-        .join("tests/fixtures/method_calls/rust")
-        .to_str()
-        .unwrap()
-        .to_string()
+/// Creates a temp dir with a single fixture file copied from the method_calls fixtures.
+/// Using individual files avoids the 10x manifest size ratio limit that triggers
+/// when analyzing the entire multi-file fixture directory (1102 bytes total source,
+/// ~23KB manifest = 21.4x ratio, exceeds 10x limit).
+fn fixture_tempdir(lang_dir: &str, filename: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let src = workspace_root()
+        .join("tests/fixtures/method_calls")
+        .join(lang_dir)
+        .join(filename);
+    let content = fs::read_to_string(&src)
+        .unwrap_or_else(|e| panic!("Failed to read fixture {:?}: {}", src, e));
+    fs::write(dir.path().join(filename), &content).unwrap();
+    dir
 }
 
 fn rust_fixture_path() -> String {
@@ -98,18 +90,17 @@ fn create_python_with_dead_code() -> TempDir {
 
 // ============================================================================
 // Category 1: Method Call Visibility in Entity Manifest (T1-T5)
-// T1-T4 are TDD anchors — expected to FAIL before Worker 1's method call
-// tracking and PASS after. T5 is a regression guard.
+// T1-T4 verify Worker 1's method call tracking surfaces correctly.
+// T5 is a regression guard.
 // ============================================================================
 
 /// T1: Python self.method() appears in entity calls/called_by.
-/// TDD anchor — requires Worker 1's method call tracking in the graph.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t01_python_self_method_in_entity_calls() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
-        .args(["analyze", &fixture, "--format", "json"])
+        .args(["analyze", dir_path, "--format", "json"])
         .output()
         .unwrap();
 
@@ -133,7 +124,7 @@ fn t01_python_self_method_in_entity_calls() {
         .as_array()
         .expect("entities must be array");
 
-    // Find Processor.transform — its calls should include validate
+    // Find transform — its calls should include validate
     let transform = entities
         .iter()
         .find(|e| {
@@ -142,17 +133,17 @@ fn t01_python_self_method_in_entity_calls() {
                 .map(|id| id.contains("transform"))
                 .unwrap_or(false)
         })
-        .expect("Processor.transform entity must exist");
+        .expect("transform entity must exist");
     let transform_calls = transform["calls"].as_array().expect("calls must be array");
     assert!(
         transform_calls
             .iter()
             .any(|c| c.as_str().map(|s| s.contains("validate")).unwrap_or(false)),
-        "Processor.transform must call validate via self.validate(). calls: {:?}",
+        "transform must call validate via self.validate(). calls: {:?}",
         transform_calls
     );
 
-    // Find Processor.validate — its called_by should include transform
+    // Find validate — its called_by should include transform
     let validate = entities
         .iter()
         .find(|e| {
@@ -161,7 +152,7 @@ fn t01_python_self_method_in_entity_calls() {
                 .map(|id| id.contains("validate"))
                 .unwrap_or(false)
         })
-        .expect("Processor.validate entity must exist");
+        .expect("validate entity must exist");
     let validate_called_by = validate["called_by"]
         .as_array()
         .expect("called_by must be array");
@@ -169,19 +160,18 @@ fn t01_python_self_method_in_entity_calls() {
         validate_called_by
             .iter()
             .any(|c| c.as_str().map(|s| s.contains("transform")).unwrap_or(false)),
-        "Processor.validate must be called_by transform via self.validate(). called_by: {:?}",
+        "validate must be called_by transform via self.validate(). called_by: {:?}",
         validate_called_by
     );
 }
 
 /// T2: JavaScript this.method() appears in entity calls/called_by.
-/// TDD anchor — requires Worker 1's JS adapter fix for this.method().
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t02_js_this_method_in_entity_calls() {
-    let fixture = js_method_fixture_path();
+    let dir = fixture_tempdir("javascript", "basic_this.js");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
-        .args(["analyze", &fixture, "--format", "json"])
+        .args(["analyze", dir_path, "--format", "json"])
         .output()
         .unwrap();
 
@@ -245,13 +235,12 @@ fn t02_js_this_method_in_entity_calls() {
 }
 
 /// T3: Rust self.method() in impl block appears in entity calls/called_by.
-/// TDD anchor — requires Worker 1's Rust adapter method call tracking.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t03_rust_self_method_in_entity_calls() {
-    let fixture = rust_method_fixture_path();
+    let dir = fixture_tempdir("rust", "basic_self.rs");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
-        .args(["analyze", &fixture, "--format", "json"])
+        .args(["analyze", dir_path, "--format", "json"])
         .output()
         .unwrap();
 
@@ -316,15 +305,14 @@ fn t03_rust_self_method_in_entity_calls() {
 }
 
 /// T4: Method called via self no longer appears as data_dead_end.
-/// TDD anchor — requires Worker 1's method call tracking.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t04_self_method_not_data_dead_end() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args([
             "diagnose",
-            &fixture,
+            dir_path,
             "--format",
             "json",
             "--checks",
@@ -362,11 +350,12 @@ fn t04_self_method_not_data_dead_end() {
 /// Regression guard — must pass regardless of Worker 1's changes.
 #[test]
 fn t05_true_dead_end_still_detected() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args([
             "diagnose",
-            &fixture,
+            dir_path,
             "--format",
             "json",
             "--checks",
@@ -409,14 +398,13 @@ fn t05_true_dead_end_still_detected() {
 
 // ============================================================================
 // Category 2: Trace Command Follows Method Call Edges (T6-T8)
-// TDD anchors — require Worker 1's method call edges.
 // ============================================================================
 
 /// T6: Trace backward through self.method() call chain.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t06_trace_backward_through_self_method() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args([
             "trace",
@@ -424,7 +412,7 @@ fn t06_trace_backward_through_self_method() {
             "validate",
             "--direction",
             "backward",
-            &fixture,
+            dir_path,
             "--format",
             "yaml",
         ])
@@ -444,9 +432,9 @@ fn t06_trace_backward_through_self_method() {
 
 /// T7: Trace forward from method that calls self.method().
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t07_trace_forward_from_self_caller() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args([
             "trace",
@@ -454,7 +442,7 @@ fn t07_trace_forward_from_self_caller() {
             "transform",
             "--direction",
             "forward",
-            &fixture,
+            dir_path,
             "--format",
             "yaml",
         ])
@@ -474,14 +462,8 @@ fn t07_trace_forward_from_self_caller() {
 
 /// T8: Trace through chained self.method() calls.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t08_trace_chained_self_methods() {
-    // Use only chained fixture dir to isolate
-    let dir = TempDir::new().unwrap();
-    let chained_src = workspace_root().join("tests/fixtures/method_calls/python/chained_self.py");
-    let content = fs::read_to_string(&chained_src).unwrap();
-    fs::write(dir.path().join("chained_self.py"), &content).unwrap();
-
+    let dir = fixture_tempdir("python", "chained_self.py");
     let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args([
@@ -513,18 +495,17 @@ fn t08_trace_chained_self_methods() {
 
 // ============================================================================
 // Category 3: Cross-Format Consistency for Method Call Edges (T9-T11)
-// TDD anchors — require Worker 1's method call edges.
 // ============================================================================
 
 /// T9: YAML and JSON produce same calls/called_by for method entities.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t09_yaml_json_method_calls_consistent() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
 
     // Run JSON
     let json_out = flowspec()
-        .args(["analyze", &fixture, "--format", "json"])
+        .args(["analyze", dir_path, "--format", "json"])
         .output()
         .unwrap();
     let json_stdout = String::from_utf8(json_out.stdout).unwrap();
@@ -533,7 +514,7 @@ fn t09_yaml_json_method_calls_consistent() {
 
     // Run YAML
     let yaml_out = flowspec()
-        .args(["analyze", &fixture, "--format", "yaml"])
+        .args(["analyze", dir_path, "--format", "yaml"])
         .output()
         .unwrap();
     let yaml_stdout = String::from_utf8(yaml_out.stdout).unwrap();
@@ -550,13 +531,13 @@ fn t09_yaml_json_method_calls_consistent() {
 
 /// T10: SARIF results include method call diagnostic changes.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t10_sarif_method_call_diagnostics_consistent() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
 
     // JSON diagnose
     let json_out = flowspec()
-        .args(["diagnose", &fixture, "--format", "json"])
+        .args(["diagnose", dir_path, "--format", "json"])
         .output()
         .unwrap();
     let json_stdout = String::from_utf8(json_out.stdout).unwrap();
@@ -565,7 +546,7 @@ fn t10_sarif_method_call_diagnostics_consistent() {
 
     // SARIF diagnose
     let sarif_out = flowspec()
-        .args(["diagnose", &fixture, "--format", "sarif"])
+        .args(["diagnose", dir_path, "--format", "sarif"])
         .output()
         .unwrap();
     let sarif_stdout = String::from_utf8(sarif_out.stdout).unwrap();
@@ -589,11 +570,11 @@ fn t10_sarif_method_call_diagnostics_consistent() {
 
 /// T11: Summary format reflects reduced diagnostic count.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t11_summary_reflects_method_call_fix() {
-    let fixture = python_method_fixture_path();
+    let dir = fixture_tempdir("python", "basic_self.py");
+    let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
-        .args(["analyze", &fixture, "--format", "summary"])
+        .args(["analyze", dir_path, "--format", "summary"])
         .output()
         .unwrap();
 
@@ -661,15 +642,9 @@ fn t13_no_stray_untracked_src_files() {
 // ============================================================================
 
 /// T14: Method with same name in two classes — correct calls/called_by attribution.
-/// TDD anchor — requires Worker 1's class-scoped method resolution.
 #[test]
-#[ignore] // Waiting on Worker 1's method call tracking implementation
 fn t14_same_method_name_different_classes() {
-    let dir = TempDir::new().unwrap();
-    let same_name_src = workspace_root().join("tests/fixtures/method_calls/python/same_name.py");
-    let content = fs::read_to_string(&same_name_src).unwrap();
-    fs::write(dir.path().join("same_name.py"), &content).unwrap();
-
+    let dir = fixture_tempdir("python", "same_name.py");
     let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args(["analyze", dir_path, "--format", "json"])
@@ -722,11 +697,7 @@ fn t14_same_method_name_different_classes() {
 /// Regression guard — must not crash regardless of Worker 1's changes.
 #[test]
 fn t15_self_call_to_nonexistent_method_no_edge() {
-    let dir = TempDir::new().unwrap();
-    let broken_src = workspace_root().join("tests/fixtures/method_calls/python/broken_self.py");
-    let content = fs::read_to_string(&broken_src).unwrap();
-    fs::write(dir.path().join("broken_self.py"), &content).unwrap();
-
+    let dir = fixture_tempdir("python", "broken_self.py");
     let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args(["analyze", dir_path, "--format", "json"])
@@ -761,12 +732,7 @@ fn t15_self_call_to_nonexistent_method_no_edge() {
 /// Regression guard — trace must not hang or crash.
 #[test]
 fn t16_recursive_self_method_no_infinite_trace() {
-    let dir = TempDir::new().unwrap();
-    let recursive_src =
-        workspace_root().join("tests/fixtures/method_calls/python/recursive_self.py");
-    let content = fs::read_to_string(&recursive_src).unwrap();
-    fs::write(dir.path().join("recursive_self.py"), &content).unwrap();
-
+    let dir = fixture_tempdir("python", "recursive_self.py");
     let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args([
@@ -796,11 +762,7 @@ fn t16_recursive_self_method_no_infinite_trace() {
 /// Regression guard — analysis must complete safely.
 #[test]
 fn t17_non_self_method_call_no_crash() {
-    let dir = TempDir::new().unwrap();
-    let non_self_src = workspace_root().join("tests/fixtures/method_calls/python/non_self.py");
-    let content = fs::read_to_string(&non_self_src).unwrap();
-    fs::write(dir.path().join("non_self.py"), &content).unwrap();
-
+    let dir = fixture_tempdir("python", "non_self.py");
     let dir_path = dir.path().to_str().unwrap();
     let output = flowspec()
         .args(["analyze", dir_path, "--format", "yaml"])
