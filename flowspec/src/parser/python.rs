@@ -99,6 +99,9 @@ impl LanguageAdapter for PythonAdapter {
         // Extract attribute accesses to track import usage (e.g., os.path.join, sys.argv)
         extract_attribute_accesses(&mut result, content_bytes, path, root, 0);
 
+        // Post-processing: annotate imports inside TYPE_CHECKING blocks
+        mark_type_checking_imports(&mut result, content_bytes, path, root);
+
         Ok(result)
     }
 }
@@ -237,8 +240,46 @@ fn visit_node(
             // Check for assignment as direct child
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() == "assignment" && scope_stack.len() <= 1 {
-                    extract_assignment(result, scope_stack, content, path, file_stem, child);
+                if scope_stack.len() <= 1 {
+                    match child.kind() {
+                        "assignment" => {
+                            // Check if this is __all__ = [...] before standard extraction
+                            let is_dunder_all = child
+                                .child_by_field_name("left")
+                                .map(|left| {
+                                    left.kind() == "identifier"
+                                        && node_text(content, left) == "__all__"
+                                })
+                                .unwrap_or(false);
+                            if is_dunder_all {
+                                extract_dunder_all(result, content, path, child);
+                            }
+                            extract_assignment(
+                                result,
+                                scope_stack,
+                                content,
+                                path,
+                                file_stem,
+                                child,
+                            );
+                        }
+                        "augmented_assignment" => {
+                            // Check for __all__ += [...]
+                            let is_dunder_all = child
+                                .child_by_field_name("left")
+                                .map(|left| {
+                                    left.kind() == "identifier"
+                                        && node_text(content, left) == "__all__"
+                                })
+                                .unwrap_or(false);
+                            if is_dunder_all {
+                                extract_dunder_all(result, content, path, child);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if child.kind() == "assignment" {
+                    // Non-module-level assignments (handled by extract_assignment's guard)
                 }
             }
         }
@@ -771,6 +812,180 @@ fn extract_assignment(
         scope: ScopeId::default(),
         annotations: vec![],
     });
+}
+
+/// Extracts names from `__all__` assignments at module level.
+///
+/// Detects `__all__ = [...]`, `__all__ = (...)`, and `__all__ += [...]` forms.
+/// For each string literal in the list/tuple, creates a `ReferenceKind::Read`
+/// reference with `ResolutionStatus::Partial("attribute_access:<name>")`.
+/// This piggybacks on the existing `attribute_access:` resolution in
+/// `populate_graph`, creating incoming edges on import symbols so that
+/// `phantom_dependency` sees them as used.
+///
+/// Only processes module-level assignments (scope_stack depth <= 1).
+/// Class-level `__all__` attributes are ignored.
+fn extract_dunder_all(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    // `node` is an `assignment` or `augmented_assignment` with left = `__all__`
+    let right = match node.child_by_field_name("right") {
+        Some(n) => n,
+        None => return,
+    };
+
+    // Accept both list [...] and tuple (...) forms
+    if right.kind() != "list" && right.kind() != "tuple" {
+        return;
+    }
+
+    let mut cursor = right.walk();
+    for child in right.children(&mut cursor) {
+        if child.kind() != "string" {
+            continue;
+        }
+        // Extract the unquoted value from string_content child
+        let name = if let Some(content_node) = child.child_by_field_name("content") {
+            // tree-sitter 0.25 exposes string_content via 'content' field
+            node_text(content, content_node).to_string()
+        } else {
+            // Fallback: find string_content child by kind
+            let mut sc = child.walk();
+            let mut found = String::new();
+            for grandchild in child.children(&mut sc) {
+                if grandchild.kind() == "string_content" {
+                    found = node_text(content, grandchild).to_string();
+                    break;
+                }
+            }
+            found
+        };
+
+        if name.is_empty() {
+            continue;
+        }
+
+        result.references.push(Reference {
+            id: ReferenceId::default(),
+            from: SymbolId::default(),
+            to: SymbolId::default(),
+            kind: ReferenceKind::Read,
+            location: node_location(path, node),
+            resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
+        });
+    }
+}
+
+/// Post-processing pass to annotate imports inside `if TYPE_CHECKING:` blocks.
+///
+/// Walks the root AST to find `if_statement` nodes where the condition is
+/// `TYPE_CHECKING` (identifier) or `typing.TYPE_CHECKING` (attribute).
+/// Records byte ranges of consequence blocks. Then annotates any import
+/// symbols whose location falls within those ranges with `"type_checking_import"`.
+///
+/// Also creates `attribute_access:` usage references for:
+/// - `TYPE_CHECKING` itself (so the `from typing import TYPE_CHECKING` isn't phantom)
+/// - Each import inside the TYPE_CHECKING block (so they aren't flagged phantom)
+fn mark_type_checking_imports(result: &mut ParseResult, content: &[u8], path: &Path, root: Node) {
+    // Phase 1: Find all TYPE_CHECKING guard block byte ranges
+    let tc_ranges = find_type_checking_ranges(root, content);
+
+    if tc_ranges.is_empty() {
+        return;
+    }
+
+    // Phase 2: Create usage reference for TYPE_CHECKING itself
+    // This covers both `TYPE_CHECKING` (identifier) and `typing.TYPE_CHECKING` (attribute)
+    result.references.push(Reference {
+        id: ReferenceId::default(),
+        from: SymbolId::default(),
+        to: SymbolId::default(),
+        kind: ReferenceKind::Read,
+        location: node_location(path, root),
+        resolution: ResolutionStatus::Partial("attribute_access:TYPE_CHECKING".to_string()),
+    });
+
+    // Phase 3: Annotate import symbols inside TYPE_CHECKING blocks
+    // and create usage references for them
+    for sym in result.symbols.iter_mut() {
+        if !sym.annotations.contains(&"import".to_string()) {
+            continue;
+        }
+
+        let sym_start = sym.location.line;
+        let sym_end = sym.location.end_line;
+
+        for &(range_start_line, range_end_line) in &tc_ranges {
+            // Check if symbol's location is within the TYPE_CHECKING block
+            if sym_start >= range_start_line && sym_end <= range_end_line {
+                sym.annotations.push("type_checking_import".to_string());
+
+                // No need to check other ranges
+                break;
+            }
+        }
+    }
+
+    // Phase 4: Create attribute_access references for TYPE_CHECKING imports
+    // so they appear "used" and phantom_dependency doesn't flag them
+    let tc_import_names: Vec<String> = result
+        .symbols
+        .iter()
+        .filter(|s| s.annotations.contains(&"type_checking_import".to_string()))
+        .map(|s| s.name.clone())
+        .collect();
+
+    for name in tc_import_names {
+        result.references.push(Reference {
+            id: ReferenceId::default(),
+            from: SymbolId::default(),
+            to: SymbolId::default(),
+            kind: ReferenceKind::Read,
+            location: node_location(path, root),
+            resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
+        });
+    }
+}
+
+/// Finds byte ranges (as 1-based line ranges) of `if TYPE_CHECKING:` consequence blocks.
+///
+/// Detects both `if TYPE_CHECKING:` (identifier condition) and
+/// `if typing.TYPE_CHECKING:` (attribute condition). Skips negated forms
+/// like `if not TYPE_CHECKING:`.
+fn find_type_checking_ranges(node: Node, content: &[u8]) -> Vec<(u32, u32)> {
+    let mut ranges = Vec::new();
+    collect_type_checking_ranges(node, content, &mut ranges);
+    ranges
+}
+
+/// Recursive helper for `find_type_checking_ranges`.
+fn collect_type_checking_ranges(node: Node, content: &[u8], ranges: &mut Vec<(u32, u32)>) {
+    if node.kind() == "if_statement" {
+        if let Some(condition) = node.child_by_field_name("condition") {
+            let is_tc = match condition.kind() {
+                "identifier" => node_text(content, condition) == "TYPE_CHECKING",
+                "attribute" => {
+                    // typing.TYPE_CHECKING
+                    let text = node_text(content, condition);
+                    text == "typing.TYPE_CHECKING"
+                }
+                _ => false,
+            };
+
+            if is_tc {
+                if let Some(consequence) = node.child_by_field_name("consequence") {
+                    let start_line = consequence.start_position().row as u32 + 1;
+                    let end_line = consequence.end_position().row as u32 + 1;
+                    ranges.push((start_line, end_line));
+                }
+                return; // Don't recurse into this if_statement's children
+            }
+        }
+    }
+
+    // Recurse into children
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_type_checking_ranges(child, content, ranges);
+    }
 }
 
 /// Recursively walks the AST to extract all function/method call references.
@@ -1471,6 +1686,590 @@ mod tests {
             hello.qualified_name.starts_with("app.py::"),
             "Qualified name must start with 'app.py::' (includes extension), got: {}",
             hello.qualified_name
+        );
+    }
+
+    // =========================================================================
+    // QA-1 Cycle 20: __all__ + TYPE_CHECKING tests
+    // =========================================================================
+
+    // -- Category 1: __all__ Basic Extraction (ALL-*) -------------------------
+
+    #[test]
+    fn test_dunder_all_basic_creates_export_references() {
+        let result = parse_fixture("dunder_all_basic.py");
+        let has_all_ref = result.references.iter().any(|r| {
+            r.kind == ReferenceKind::Read
+                && matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+        });
+        assert!(
+            has_all_ref,
+            "Symbols listed in __all__ must create attribute_access references. \
+             References: {:?}",
+            result
+                .references
+                .iter()
+                .filter(|r| r.kind == ReferenceKind::Read)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_non_listed_symbol_no_reference() {
+        let result = parse_fixture("dunder_all_basic.py");
+        let has_internal_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:internal_only"))
+        });
+        assert!(
+            !has_internal_ref,
+            "Symbols NOT in __all__ must NOT get attribute_access references from __all__ extraction"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_variable_extracted_as_symbol() {
+        let result = parse_fixture("dunder_all_basic.py");
+        let has_all_symbol = result.symbols.iter().any(|s| s.name == "__all__");
+        assert!(
+            has_all_symbol,
+            "The __all__ variable itself must be extracted as a symbol"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_augmented_assignment() {
+        let result = parse_fixture("dunder_all_augmented.py");
+        let has_foo = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Foo"))
+        });
+        let has_bar = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Bar"))
+        });
+        assert!(has_foo, "Foo from __all__ = [...] must have a reference");
+        assert!(has_bar, "Bar from __all__ += [...] must have a reference");
+    }
+
+    #[test]
+    fn test_dunder_all_augmented_not_in_base_no_false_positive() {
+        let result = parse_fixture("dunder_all_augmented.py");
+        let has_baz = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Baz"))
+        });
+        assert!(
+            !has_baz,
+            "Baz is not in any __all__ list, must not get an attribute_access reference"
+        );
+    }
+
+    // -- Category 2: __all__ Adversarial Edge Cases (AADV-*) ------------------
+
+    #[test]
+    fn test_dunder_all_empty_no_export_references() {
+        let result = parse_fixture("dunder_all_empty.py");
+        let has_helper_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+        });
+        assert!(
+            !has_helper_ref,
+            "Empty __all__ must not create any export references for helper"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_non_string_items_skipped() {
+        let result = parse_fixture("dunder_all_adversarial.py");
+        let has_valid = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Valid"))
+        });
+        assert!(
+            has_valid,
+            "String 'Valid' must be extracted from __all__ despite non-string siblings"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_inside_class_ignored() {
+        let result = parse_fixture("dunder_all_nested.py");
+        let has_helper_export = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+        });
+        assert!(
+            !has_helper_export,
+            "Class-level __all__ must not create module-level export references"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_tuple_form() {
+        let result = parse_fixture("dunder_all_tuple.py");
+        let has_foo = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Foo"))
+        });
+        let has_bar = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Bar"))
+        });
+        assert!(has_foo, "Foo from tuple __all__ must have a reference");
+        assert!(has_bar, "Bar from tuple __all__ must have a reference");
+    }
+
+    #[test]
+    fn test_dunder_all_duplicates_no_panic() {
+        let result = parse_fixture("dunder_all_duplicates.py");
+        let helper_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+            })
+            .collect();
+        assert!(
+            !helper_refs.is_empty(),
+            "Duplicate __all__ entries must still create at least one reference"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_single_quotes() {
+        let source = "from models import Foo\n__all__ = ['Foo']\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test_single_quote.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let has_foo = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Foo"))
+        });
+        assert!(
+            has_foo,
+            "Single-quoted strings in __all__ must be extracted"
+        );
+    }
+
+    #[test]
+    fn test_dunder_all_multiple_assignments() {
+        let source = "from a import X\nfrom b import Y\n__all__ = ['X']\n__all__ = ['Y']\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test_multi_all.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let has_y = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:Y"))
+        });
+        assert!(
+            has_y,
+            "At least the last __all__ assignment must produce references"
+        );
+    }
+
+    // -- Category 3: TYPE_CHECKING Basic Detection (TC-*) ---------------------
+
+    #[test]
+    fn test_type_checking_imports_annotated() {
+        let result = parse_fixture("type_checking_basic.py");
+        let pathlike = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "PathLike" && s.annotations.contains(&"import".to_string()));
+        assert!(pathlike.is_some(), "PathLike import must exist");
+        let pathlike = pathlike.unwrap();
+        assert!(
+            pathlike
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "PathLike inside TYPE_CHECKING block must have 'type_checking_import' annotation. \
+             Got annotations: {:?}",
+            pathlike.annotations
+        );
+    }
+
+    #[test]
+    fn test_type_checking_import_has_usage_reference() {
+        let result = parse_fixture("type_checking_basic.py");
+        let has_pathlike_ref = result.references.iter().any(|r| {
+            r.kind == ReferenceKind::Read
+                && matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:PathLike"))
+        });
+        assert!(
+            has_pathlike_ref,
+            "TYPE_CHECKING imports must have attribute_access references to prevent phantom flagging"
+        );
+    }
+
+    #[test]
+    fn test_regular_imports_no_type_checking_annotation() {
+        let result = parse_fixture("type_checking_basic.py");
+        let os_import = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "os" && s.annotations.contains(&"import".to_string()));
+        assert!(os_import.is_some(), "os import must exist");
+        let os_import = os_import.unwrap();
+        assert!(
+            !os_import
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "Regular imports outside TYPE_CHECKING must NOT get type_checking_import annotation"
+        );
+    }
+
+    #[test]
+    fn test_type_checking_name_has_usage_reference() {
+        let result = parse_fixture("type_checking_basic.py");
+        let has_tc_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:TYPE_CHECKING"))
+        });
+        assert!(
+            has_tc_ref,
+            "TYPE_CHECKING itself must have a usage reference (the if-guard uses it)"
+        );
+    }
+
+    #[test]
+    fn test_type_checking_import_symbol_exists() {
+        let result = parse_fixture("type_checking_basic.py");
+        let tc_sym = result.symbols.iter().find(|s| s.name == "TYPE_CHECKING");
+        assert!(tc_sym.is_some(), "TYPE_CHECKING symbol must be extracted");
+        let tc_sym = tc_sym.unwrap();
+        assert!(
+            tc_sym.annotations.contains(&"import".to_string()),
+            "TYPE_CHECKING must have 'import' annotation"
+        );
+        assert!(
+            tc_sym.annotations.iter().any(|a| a.contains("from:typing")),
+            "TYPE_CHECKING must have 'from:typing' annotation"
+        );
+    }
+
+    // -- Category 4: TYPE_CHECKING Adversarial Edge Cases (TCADV-*) -----------
+
+    #[test]
+    fn test_type_checking_no_imports_no_crash() {
+        let result = parse_fixture("type_checking_no_imports.py");
+        let tc_annotated: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.contains(&"type_checking_import".to_string()))
+            .collect();
+        assert!(
+            tc_annotated.is_empty(),
+            "No imports in TYPE_CHECKING block → no type_checking_import annotations. Got: {:?}",
+            tc_annotated.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_type_checking_attribute_form() {
+        let result = parse_fixture("type_checking_attribute_form.py");
+        let request = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Request" && s.annotations.contains(&"import".to_string()));
+        assert!(request.is_some(), "Request import must exist");
+        let request = request.unwrap();
+        assert!(
+            request
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "Imports inside `typing.TYPE_CHECKING` block must have type_checking_import annotation. \
+             Got: {:?}",
+            request.annotations
+        );
+    }
+
+    #[test]
+    fn test_type_checking_negated_not_a_guard() {
+        let result = parse_fixture("type_checking_negated.py");
+        let getcwd = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "getcwd" && s.annotations.contains(&"import".to_string()));
+        assert!(getcwd.is_some(), "getcwd import must exist");
+        let getcwd = getcwd.unwrap();
+        assert!(
+            !getcwd
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "Imports in `if not TYPE_CHECKING:` are runtime imports, NOT type-only"
+        );
+    }
+
+    #[test]
+    fn test_type_checking_user_assignment_no_crash() {
+        let result = parse_fixture("type_checking_assignment.py");
+        let has_tc_var = result.symbols.iter().any(|s| s.name == "TYPE_CHECKING");
+        assert!(
+            has_tc_var,
+            "TYPE_CHECKING variable assignment should be extracted"
+        );
+    }
+
+    #[test]
+    fn test_type_checking_plain_import_statement() {
+        let source = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    import sys\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test_tc_plain_import.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let sys_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "sys" && s.annotations.contains(&"import".to_string()));
+        assert!(sys_sym.is_some(), "sys import must exist");
+        let sys_sym = sys_sym.unwrap();
+        assert!(
+            sys_sym
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "Plain import inside TYPE_CHECKING must also get type_checking_import annotation"
+        );
+    }
+
+    #[test]
+    fn test_type_checking_nested_if_still_in_scope() {
+        let source = concat!(
+            "from typing import TYPE_CHECKING\nimport sys\n\n",
+            "if TYPE_CHECKING:\n",
+            "    if sys.version_info >= (3, 9):\n",
+            "        from collections.abc import Sequence\n",
+        );
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("test_tc_nested.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let seq = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Sequence" && s.annotations.contains(&"import".to_string()));
+        assert!(seq.is_some(), "Sequence import must exist");
+        let seq = seq.unwrap();
+        assert!(
+            seq.annotations
+                .contains(&"type_checking_import".to_string()),
+            "Nested import inside TYPE_CHECKING block must still be annotated"
+        );
+    }
+
+    // -- Category 5: Integration Tests (INT-*) --------------------------------
+
+    #[test]
+    fn test_combined_all_and_type_checking() {
+        let result = parse_fixture("combined_all_typechecking.py");
+
+        // __all__ creates reference for helper
+        let has_helper_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+        });
+        assert!(
+            has_helper_ref,
+            "helper in __all__ must have attribute_access reference"
+        );
+
+        // PathLike inside TYPE_CHECKING gets annotation
+        let pathlike = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "PathLike" && s.annotations.contains(&"import".to_string()));
+        assert!(pathlike.is_some(), "PathLike import must exist");
+        assert!(
+            pathlike
+                .unwrap()
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "PathLike must have type_checking_import annotation"
+        );
+
+        // TYPE_CHECKING itself has usage reference
+        let has_tc_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:TYPE_CHECKING"))
+        });
+        assert!(has_tc_ref, "TYPE_CHECKING must have usage reference");
+
+        // unused_thing has no __all__ or TYPE_CHECKING protection
+        let unused_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:unused_thing"))
+            })
+            .collect();
+        assert!(
+            unused_refs.is_empty(),
+            "unused_thing must NOT have any attribute_access references from __all__ or TYPE_CHECKING"
+        );
+    }
+
+    #[test]
+    fn test_reexport_init_regression() {
+        let result = parse_fixture("reexport_init.py");
+        let has_all = result.symbols.iter().any(|s| s.name == "__all__");
+        assert!(
+            has_all,
+            "reexport_init.py must still extract __all__ symbol"
+        );
+
+        let has_helper_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+        });
+        assert!(
+            has_helper_ref,
+            "reexport_init.py: helper in __all__ must get attribute_access reference after implementation"
+        );
+    }
+
+    #[test]
+    fn test_unused_import_fixture_unaffected() {
+        let result = parse_fixture("unused_import.py");
+        let import_syms: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.contains(&"import".to_string()))
+            .collect();
+        assert_eq!(
+            import_syms.len(),
+            5,
+            "unused_import.py must still have exactly 5 import symbols"
+        );
+        let tc_annotated: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.contains(&"type_checking_import".to_string()))
+            .collect();
+        assert!(
+            tc_annotated.is_empty(),
+            "No TYPE_CHECKING in file → no type_checking_import annotations"
+        );
+    }
+
+    // -- Category 6: Inline Source Unit Tests (INLINE-*) ----------------------
+
+    #[test]
+    fn test_inline_minimal_dunder_all() {
+        let source = "from x import A\n__all__ = [\"A\"]\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("inline_min_all.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let has_a_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:A"))
+        });
+        assert!(has_a_ref, "Minimal __all__ must create reference for A");
+    }
+
+    #[test]
+    fn test_inline_minimal_type_checking() {
+        let source =
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from os import PathLike\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("inline_min_tc.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let pathlike = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "PathLike" && s.annotations.contains(&"import".to_string()))
+            .expect("PathLike import must exist");
+        assert!(
+            pathlike
+                .annotations
+                .contains(&"type_checking_import".to_string()),
+            "Minimal TYPE_CHECKING must annotate import"
+        );
+    }
+
+    #[test]
+    fn test_inline_dunder_all_annotated_assignment() {
+        let source = "from x import Foo\n__all__: list[str] = [\"Foo\"]\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("inline_annotated_all.py");
+        let result = adapter.parse_file(&path, source);
+        assert!(
+            result.is_ok(),
+            "Annotated __all__ assignment must not crash"
+        );
+    }
+
+    #[test]
+    fn test_inline_dunder_all_no_imports() {
+        let source = "__all__ = [\"Foo\", \"Bar\"]\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("inline_all_no_imports.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        assert!(result.symbols.iter().any(|s| s.name == "__all__"));
+    }
+
+    #[test]
+    fn test_inline_type_checking_with_else() {
+        let source = concat!(
+            "from typing import TYPE_CHECKING\n\n",
+            "if TYPE_CHECKING:\n",
+            "    from os import PathLike\n",
+            "else:\n",
+            "    PathLike = object\n",
+        );
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("inline_tc_else.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let pathlike_import = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "PathLike" && s.annotations.contains(&"import".to_string()));
+        if let Some(sym) = pathlike_import {
+            assert!(
+                sym.annotations
+                    .contains(&"type_checking_import".to_string()),
+                "Import in if-branch of TYPE_CHECKING must be annotated even with else"
+            );
+        }
+    }
+
+    // -- Category 7: Regression Guards (REG-*) --------------------------------
+
+    #[test]
+    fn test_dunder_all_variable_kind_correct() {
+        let source = "from x import A\n__all__ = [\"A\"]\n";
+        let adapter = PythonAdapter::new();
+        let path = PathBuf::from("reg_all_kind.py");
+        let result = adapter.parse_file(&path, source).unwrap();
+        let all_sym = result.symbols.iter().find(|s| s.name == "__all__").unwrap();
+        assert_eq!(
+            all_sym.kind,
+            SymbolKind::Variable,
+            "__all__ must remain SymbolKind::Variable (not Constant)"
+        );
+    }
+
+    #[test]
+    fn test_regression_import_count_basic_functions() {
+        let result = parse_fixture("basic_functions.py");
+        let import_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Import)
+            .collect();
+        assert_eq!(
+            import_refs.len(),
+            0,
+            "basic_functions.py has no imports — count must remain 0"
+        );
+    }
+
+    #[test]
+    fn test_regression_empty_file_with_new_features() {
+        let result = parse_fixture("empty.py");
+        assert!(
+            result.symbols.is_empty(),
+            "Empty file must still produce no symbols"
+        );
+        assert!(
+            result.references.is_empty(),
+            "Empty file must still produce no references"
+        );
+    }
+
+    #[test]
+    fn test_regression_syntax_errors_with_new_features() {
+        let result = parse_fixture("syntax_errors.py");
+        let names: Vec<_> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"valid_function"),
+            "valid_function must survive syntax errors"
+        );
+        assert!(
+            names.contains(&"another_valid"),
+            "another_valid must survive syntax errors"
         );
     }
 }
