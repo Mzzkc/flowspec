@@ -8,6 +8,8 @@ description = "Static code analyzer that traces the flow of all data in a codeba
 [dependencies]
 bincode = "2"
 chrono = { version = "0.4", features = ["serde"] }
+glob = "0.3"
+ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"

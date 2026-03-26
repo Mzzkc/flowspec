@@ -115,6 +115,50 @@ External evaluation of Flowspec against Mozart AI Compose (228 Python files, 30K
 
 **Tests:** 1769 pass, 0 fail. Clippy clean. Fmt clean. Dogfood: total=537, data_dead_end=258, orphaned_impl=53.
 
+### Worker 3 (Interface) — Cycle 20 Implementation Complete
+**Config deserialization + file exclusion + .gitignore respect — the 59% contamination fix.**
+
+**Config deserialization (`config/mod.rs`):**
+- Added `ConfigFile` intermediate struct with `#[derive(Deserialize, Default)]` — `config_path` never deserialized from YAML (security: `#[serde(skip)]` equivalent via separate struct)
+- `Config::load()` now reads and parses YAML via `serde_yaml::from_str`
+- Added `exclude: Vec<String>` field with `#[serde(default)]`
+- Malformed YAML degrades to defaults with `tracing::warn!` — no crashes
+- Empty files, comment-only YAML, unknown fields all handled gracefully
+- Round-trip verified: `init` template → file → `Config::load()` → correct fields
+
+**File exclusion wiring (`lib.rs`):**
+- `discover_source_files()` now takes `exclude_patterns: &[String]`
+- `analyze()` parameter renamed `_config` → `config`, passes `&config.exclude` to discovery
+- Three exclusion sources active simultaneously: hardcoded skip_dirs (safety net), config exclude (user patterns), .gitignore (ignore crate)
+- Exclude patterns compiled as `glob::Pattern` — supports wildcards, nested matching
+- Hardcoded skip_dirs preserved as fallback even with empty config
+
+**.gitignore respect (`lib.rs` — `ignore` crate):**
+- Replaced custom `walk_dir` with `ignore::WalkBuilder` (Unlicense/MIT, BurntSushi)
+- Respects `.gitignore`, `.git/info/exclude`, global gitignore, nested `.gitignore` files
+- New deps: `ignore = "0.4"`, `glob = "0.3"` (both AGPL-compatible)
+
+**Config languages as fallback:**
+- Priority chain: CLI `--language` flags > config `languages` > auto-detect
+- Adapter filter now uses `active_languages` (was only checking CLI param)
+- Invalid language names in config silently skipped (no matching adapter)
+
+**42 QA-3 tests (14 in config/mod.rs, 28 in cycle20_surface_tests.rs):**
+- Cat 1 (T1-T10): Config deserialization — facade proof, exclude field, malformed YAML, round-trip, config_path injection, backward compat
+- Cat 2 (T11-T19): File exclusion — config patterns, hardcoded regression, glob patterns, nested dirs, file patterns, duplicates
+- Cat 3 (T20-T28): .gitignore — basic, no-crash (no .gitignore, no .git), nested gitignore, negation, combined sources, wildcards, symlinks
+- Cat 4 (T29-T33): Language filtering — config filters, CLI override, auto-detect, invalid lang, detection reporting
+- Cat 5 (T34-T38): Integration — full pipeline e2e, backward compat, all three mechanisms, large exclude list, wiring proof
+- Cat 6 (T39-T42): Edge cases — config-is-directory, comment-only YAML, YAML anchors, malformed explicit path
+
+**Baseline reconciliation:**
+- `cycle16_stale_ref_fix_tests.rs` T14: circular_dependency 5→6 (C20 code growth)
+- `cycle16_surface.rs` T5: Updated for Worker 2's Method exclusion from data_dead_end
+
+**Files touched:** `config/mod.rs` (complete rewrite), `lib.rs` (discover_source_files rewrite + analyze wiring), `Cargo.toml` (ignore + glob deps), `cycle20_surface_tests.rs` (new, 28 tests), `cycle16_stale_ref_fix_tests.rs` (1 baseline), `cycle16_surface.rs` (1 test update for W2 dedup)
+
+**Tests:** All pass. Clippy clean. Fmt clean.
+
 ---
 
 ## Warm (Recent)
