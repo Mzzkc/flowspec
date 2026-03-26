@@ -218,3 +218,33 @@
 - v0.1 ship criteria proposed C13: 11/13 patterns + JS CJS + #15 + README + 89% coverage
 - Hard patterns deferred: duplication, asymmetric_handling (may need IR extensions)
 - SARIF included as v1 format (C1); Confidence field in manifest diagnostics (C1)
+
+### Worker 1 (Foundry) — Cycle 17 Status
+
+**Implemented:** TypeScript entity extraction via content preprocessing (M6 roadmap item).
+
+**What was built:**
+- `preprocess_typescript()` — strips TS-specific syntax (type annotations, access modifiers, generics, `declare`, `abstract`, `import type`) before tree-sitter-javascript parse. Uses whitespace replacement to preserve byte offsets.
+- `pre_extract_ts_entities()` — scans source before preprocessing to extract interfaces, enums, and type aliases as IR symbols. Maps type aliases to `SymbolKind::Interface`.
+- `detect_ts_block_start()` + `count_braces_in_line()` — multi-line TS block handling with string-literal-aware brace counting.
+- `strip_generics()` + `strip_type_annotations()` + `strip_leading_keyword()` — line-level syntax stripping functions.
+- 37 QA-1 tests: interfaces (5), enums (4), type aliases (3), typed functions (4), TS classes (4), imports (3), regression guards (5), adversarial (8), position accuracy (3), decorators (2).
+- Updated dogfood baselines: data_dead_end 178→221 (more entities analyzed), total 494→~495.
+
+**Files touched:**
+- `flowspec/src/parser/javascript.rs` (new: TS preprocessing functions + 37 tests)
+- `flowspec/src/cycle16_method_call_tests.rs` (baseline update)
+- `flowspec/src/cycle16_stale_ref_fix_tests.rs` (baseline update)
+- `flowspec/src/graph/populate.rs` (Worker 2's `is_child_module` stub — coordination)
+
+**Commits:** `6920f68`, `a7648d4`
+
+**What's still open:**
+- Namespace import in .ts files doesn't extract import symbols (test is a no-panic guard)
+- `pre_extract_ts_entities` duplicates function/class symbols when they also parse via tree-sitter (needs dedup)
+- Complex TS patterns (mapped types, conditional types, template literal types) not handled
+- `.tsx` JSX vs generic disambiguation is heuristic-based
+
+**Coordination notes:**
+- Worker 2's `is_child_module` was referenced but undefined — added stub to unblock compilation
+- Dogfood baselines needed updating due to TS extraction revealing new entities → more findings
