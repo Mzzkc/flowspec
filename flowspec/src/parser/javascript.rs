@@ -440,7 +440,7 @@ fn extract_function_declaration(
 
     let params = node
         .child_by_field_name("parameters")
-        .map(|n| node_text(content, n).to_string());
+        .map(|n| collapse_signature_whitespace(node_text(content, n)));
 
     let visibility = if exported {
         Visibility::Public
@@ -537,7 +537,7 @@ fn extract_arrow_functions_from_declaration(
 
                     let params = value_node
                         .child_by_field_name("parameters")
-                        .map(|n| node_text(content, n).to_string());
+                        .map(|n| collapse_signature_whitespace(node_text(content, n)));
 
                     // For single-param arrows without parens, the parameter field
                     // might be an identifier directly
@@ -605,7 +605,7 @@ fn extract_arrow_functions_from_declaration(
 
                     let params = value_node
                         .child_by_field_name("parameters")
-                        .map(|n| node_text(content, n).to_string());
+                        .map(|n| collapse_signature_whitespace(node_text(content, n)));
 
                     let visibility = if exported {
                         Visibility::Public
@@ -806,7 +806,7 @@ fn extract_method_definition(
 
     let params = node
         .child_by_field_name("parameters")
-        .map(|n| node_text(content, n).to_string());
+        .map(|n| collapse_signature_whitespace(node_text(content, n)));
 
     let qualified_name = build_qualified_name(result, scope_stack, file_stem, &name);
 
@@ -1329,6 +1329,26 @@ fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
 // TypeScript preprocessing
 // ---------------------------------------------------------------------------
 
+/// Collapses runs of 2+ whitespace characters into a single space.
+/// Applied to function/method signatures extracted from preprocessed TS content,
+/// where `strip_type_annotations()` leaves multi-space gaps.
+fn collapse_signature_whitespace(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut prev_was_space = false;
+    for ch in s.chars() {
+        if ch == ' ' || ch == '\t' {
+            if !prev_was_space {
+                result.push(' ');
+            }
+            prev_was_space = true;
+        } else {
+            prev_was_space = false;
+            result.push(ch);
+        }
+    }
+    result
+}
+
 fn is_typescript_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -1765,11 +1785,13 @@ fn try_extract_ts_entity(
 ) -> Option<Symbol> {
     let mut s = trimmed;
     let mut exported = false;
+    let mut is_declare = false;
     if let Some(r) = s.strip_prefix("export") {
         exported = true;
         s = r.trim_start();
     }
     if let Some(r) = s.strip_prefix("declare") {
+        is_declare = true;
         s = r.trim_start();
     }
     if let Some(r) = s.strip_prefix("const") {
@@ -1790,7 +1812,15 @@ fn try_extract_ts_entity(
         end_line: line_num,
         end_column: 1,
     };
-    if s.starts_with("function ") || s.starts_with("function\t") {
+    // Only pre-extract function/class for `declare` variants that are bodyless
+    // (no `{`). Bodyless forms like `declare function greet(): void;` become
+    // `function greet();` after stripping, which tree-sitter-javascript cannot
+    // parse. Forms WITH bodies survive preprocessing and tree-sitter handles them,
+    // so pre-extracting those would create duplicates.
+    if is_declare
+        && !trimmed.contains('{')
+        && (s.starts_with("function ") || s.starts_with("function\t"))
+    {
         let name = extract_identifier(s["function".len()..].trim_start())?;
         return Some(Symbol {
             id: SymbolId::default(),
@@ -1805,7 +1835,8 @@ fn try_extract_ts_entity(
             annotations: vec!["declare".to_string()],
         });
     }
-    if s.starts_with("class ") || s.starts_with("class\t") {
+    if is_declare && !trimmed.contains('{') && (s.starts_with("class ") || s.starts_with("class\t"))
+    {
         let name = extract_identifier(s["class".len()..].trim_start())?;
         return Some(Symbol {
             id: SymbolId::default(),
@@ -3728,5 +3759,636 @@ class Controller {
         assert!(classes.iter().any(|s| s.name == "Controller"));
         let methods = symbols_by_kind(&result, SymbolKind::Method);
         assert!(methods.iter().any(|s| s.name == "getUsers"));
+    }
+
+    // -----------------------------------------------------------------------
+    // C18 QA-1: Entity Deduplication Verification (DEDUP-1 through DEDUP-10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ts_function_not_duplicated_after_dedup_fix() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "function greet(name: string): void {\n  console.log(name);\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function && s.name == "greet")
+            .collect();
+        assert_eq!(
+            funcs.len(),
+            1,
+            "Expected exactly 1 'greet' function, got {} — dedup fix may not be applied",
+            funcs.len()
+        );
+    }
+
+    #[test]
+    fn ts_class_not_duplicated_after_dedup_fix() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "class Foo implements Bar {\n  constructor() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Foo")
+            .collect();
+        assert_eq!(
+            classes.len(),
+            1,
+            "Expected exactly 1 'Foo' class, got {} — dedup fix may not be applied",
+            classes.len()
+        );
+    }
+
+    #[test]
+    fn ts_interface_still_extracted_after_dedup_fix() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "interface User {\n  name: string;\n  age: number;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let ifaces: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Interface && s.name == "User")
+            .collect();
+        assert_eq!(
+            ifaces.len(),
+            1,
+            "Interface must still be extracted via pre-extraction after dedup fix"
+        );
+    }
+
+    #[test]
+    fn ts_enum_still_extracted_after_dedup_fix() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "enum Direction {\n  Up,\n  Down,\n  Left,\n  Right\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let enums: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Enum && s.name == "Direction")
+            .collect();
+        assert_eq!(
+            enums.len(),
+            1,
+            "Enum must still be extracted via pre-extraction after dedup fix"
+        );
+    }
+
+    #[test]
+    fn ts_type_alias_still_extracted_after_dedup_fix() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "type StringOrNumber = string | number;\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let types: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.name == "StringOrNumber")
+            .collect();
+        assert_eq!(
+            types.len(),
+            1,
+            "Type alias must still be extracted via pre-extraction after dedup fix"
+        );
+    }
+
+    #[test]
+    fn ts_mixed_file_exact_entity_counts() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("mixed.ts");
+        let content = "interface Config {\n  debug: boolean;\n}\n\n\
+                        function setup(cfg: Config): void {\n  console.log(cfg);\n}\n\n\
+                        class App implements Config {\n  debug: boolean = false;\n  constructor() {}\n}\n\n\
+                        enum Mode {\n  Dev,\n  Prod\n}\n\n\
+                        type AppConfig = Config & { mode: Mode };\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let interfaces = result
+            .symbols
+            .iter()
+            .filter(|s| {
+                s.kind == SymbolKind::Interface
+                    && !s.annotations.contains(&"type_alias".to_string())
+            })
+            .count();
+        let functions = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        let classes = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .count();
+        let enums = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Enum)
+            .count();
+        let type_aliases = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.contains(&"type_alias".to_string()))
+            .count();
+
+        assert_eq!(
+            interfaces, 1,
+            "Expected 1 interface (Config), got {}",
+            interfaces
+        );
+        assert_eq!(
+            functions, 1,
+            "Expected 1 function (setup), got {} — dedup fix may be incomplete",
+            functions
+        );
+        assert_eq!(
+            classes, 1,
+            "Expected 1 class (App), got {} — dedup fix may be incomplete",
+            classes
+        );
+        assert_eq!(enums, 1, "Expected 1 enum (Mode), got {}", enums);
+        assert_eq!(
+            type_aliases, 1,
+            "Expected 1 type alias (AppConfig), got {}",
+            type_aliases
+        );
+    }
+
+    #[test]
+    fn ts_export_function_not_duplicated() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content =
+            "export function calculate(a: number, b: number): number {\n  return a + b;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function && s.name == "calculate")
+            .collect();
+        assert_eq!(funcs.len(), 1, "Export function should not be duplicated");
+        assert_eq!(
+            funcs[0].visibility,
+            Visibility::Public,
+            "Exported function must be Public"
+        );
+    }
+
+    #[test]
+    fn ts_export_class_not_duplicated() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "export class Service {\n  start(): void {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Service")
+            .collect();
+        assert_eq!(classes.len(), 1, "Export class should not be duplicated");
+    }
+
+    #[test]
+    fn ts_declare_function_bodyless_not_lost() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "declare function greet(): void;\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let greets: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.name == "greet")
+            .collect();
+        assert!(
+            !greets.is_empty(),
+            "declare function bodyless must still produce an entity"
+        );
+        assert!(
+            greets.len() <= 1,
+            "declare function must not produce duplicates, got {}",
+            greets.len()
+        );
+    }
+
+    #[test]
+    fn ts_declare_class_bodyless_not_lost() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "declare class Foo {}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let foos: Vec<_> = result.symbols.iter().filter(|s| s.name == "Foo").collect();
+        assert!(
+            !foos.is_empty(),
+            "declare class must still produce an entity after dedup fix"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C18 QA-1: Regression Guards (REG-1 through REG-5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ts_pure_js_in_ts_file_still_works() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("legacy.ts");
+        let content = "function add(a, b) {\n  return a + b;\n}\n\nclass Animal {\n  constructor(name) {\n    this.name = name;\n  }\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function && s.name == "add")
+            .count();
+        let classes = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Animal")
+            .count();
+        assert_eq!(
+            funcs, 1,
+            "Pure JS function in .ts file must produce exactly 1 entity"
+        );
+        assert_eq!(
+            classes, 1,
+            "Pure JS class in .ts file must produce exactly 1 entity"
+        );
+    }
+
+    #[test]
+    fn js_file_unaffected_by_dedup_fix() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("module.js");
+        let content =
+            "function process(data) {\n  return data;\n}\n\nclass Handler {\n  handle() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function && s.name == "process")
+            .count();
+        let classes = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Handler")
+            .count();
+        assert_eq!(funcs, 1, ".js file should produce exactly 1 function");
+        assert_eq!(classes, 1, ".js file should produce exactly 1 class");
+    }
+
+    #[test]
+    fn tsx_file_gets_preprocessing() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("component.tsx");
+        let content = "interface Props {\n  label: string;\n}\n\nfunction Component(props: Props): void {\n  return;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let ifaces = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Interface)
+            .count();
+        let funcs = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function && s.name == "Component")
+            .count();
+        assert_eq!(
+            ifaces, 1,
+            ".tsx must trigger preprocessing and extract interfaces"
+        );
+        assert_eq!(funcs, 1, ".tsx function must not be duplicated");
+    }
+
+    #[test]
+    fn jsx_file_no_preprocessing() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("component.jsx");
+        let content = "function Component(props) {\n  return null;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        assert!(!is_typescript_file(&PathBuf::from("component.jsx")));
+        let funcs = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        assert_eq!(funcs, 1);
+    }
+
+    // REG-5 is a meta-test: all existing 37 QA-1 C17 TS tests must still pass.
+    // Verified by running `cargo test ts_` — no new code needed.
+
+    // -----------------------------------------------------------------------
+    // C18 QA-1: Fixture File Integration (FIX-1 through FIX-5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fixture_ts_file_routes_through_preprocessing() {
+        assert!(is_typescript_file(&PathBuf::from(
+            "tests/fixtures/typescript/interfaces.ts"
+        )));
+        assert!(is_typescript_file(&PathBuf::from(
+            "tests/fixtures/typescript/typed_functions.ts"
+        )));
+        assert!(is_typescript_file(&PathBuf::from(
+            "tests/fixtures/typescript/mixed.ts"
+        )));
+    }
+
+    #[test]
+    fn fixture_interfaces_matches_inline() {
+        let adapter = JsAdapter::new();
+        let fixture_content = "interface User {\n  name: string;\n  age: number;\n}\n\n\
+                               interface Admin extends User {\n  role: string;\n}\n\n\
+                               interface Collection<T> {\n  items: T[];\n  add(item: T): void;\n}\n";
+        let fixture_path = PathBuf::from("tests/fixtures/typescript/interfaces.ts");
+        let result = adapter.parse_file(&fixture_path, fixture_content).unwrap();
+        let ifaces: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Interface)
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(ifaces.len(), 3, "Should extract 3 interfaces from fixture");
+        assert!(ifaces.contains(&"User".to_string()));
+        assert!(ifaces.contains(&"Admin".to_string()));
+        assert!(ifaces.contains(&"Collection".to_string()));
+    }
+
+    #[test]
+    fn fixture_typed_functions_no_duplication() {
+        let adapter = JsAdapter::new();
+        let fixture_content = "function add(a: number, b: number): number {\n  return a + b;\n}\n\n\
+                               export function greet(name: string): void {\n  console.log(name);\n}\n\n\
+                               function identity<T>(value: T): T {\n  return value;\n}\n";
+        let fixture_path = PathBuf::from("tests/fixtures/typescript/typed_functions.ts");
+        let result = adapter.parse_file(&fixture_path, fixture_content).unwrap();
+        let funcs: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .collect();
+        assert_eq!(
+            funcs.len(),
+            3,
+            "Should extract exactly 3 functions — no duplicates"
+        );
+    }
+
+    #[test]
+    fn fixture_mixed_ts_complete_coverage() {
+        let adapter = JsAdapter::new();
+        let fixture_content = "interface Config {\n  verbose: boolean;\n}\n\n\
+                               function init(cfg: Config): void {\n  console.log(cfg);\n}\n\n\
+                               class App {\n  constructor() {}\n}\n\n\
+                               enum LogLevel {\n  Debug,\n  Info,\n  Error\n}\n\n\
+                               type AppMode = 'dev' | 'prod';\n\n\
+                               const VERSION = '1.0.0';\n";
+        let fixture_path = PathBuf::from("tests/fixtures/typescript/mixed.ts");
+        let result = adapter.parse_file(&fixture_path, fixture_content).unwrap();
+        let interfaces = result
+            .symbols
+            .iter()
+            .filter(|s| {
+                s.kind == SymbolKind::Interface
+                    && !s.annotations.contains(&"type_alias".to_string())
+            })
+            .count();
+        let type_aliases = result
+            .symbols
+            .iter()
+            .filter(|s| s.annotations.contains(&"type_alias".to_string()))
+            .count();
+        let functions = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        let classes = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .count();
+        let enums = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Enum)
+            .count();
+        assert_eq!(interfaces, 1, "1 interface (Config)");
+        assert_eq!(type_aliases, 1, "1 type alias (AppMode)");
+        assert_eq!(functions, 1, "1 function (init)");
+        assert_eq!(classes, 1, "1 class (App)");
+        assert_eq!(enums, 1, "1 enum (LogLevel)");
+    }
+
+    #[test]
+    fn fixture_js_file_no_preprocessing() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("tests/fixtures/javascript/module.js");
+        let content = "function helper() { return 42; }\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        assert_eq!(funcs, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // C18 QA-1: Whitespace Artifact Tests (WS-1 through WS-5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ts_function_signature_no_multispace() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "function greet(name: string, age: number): void {\n  return;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == SymbolKind::Function && s.name == "greet")
+            .expect("greet function should exist");
+        if let Some(ref sig) = func.signature {
+            assert!(
+                !sig.contains("  "),
+                "Signature '{}' contains multi-space runs — whitespace collapse not applied",
+                sig
+            );
+        }
+    }
+
+    #[test]
+    fn ts_class_method_signature_no_multispace() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "class Svc {\n  process(input: string, count: number): boolean {\n    return true;\n  }\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        for sym in &result.symbols {
+            if let Some(ref sig) = sym.signature {
+                assert!(
+                    !sig.contains("  "),
+                    "Symbol '{}' signature '{}' has multi-space artifact",
+                    sym.name,
+                    sig
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ts_arrow_function_signature_no_multispace() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content =
+            "const transform = (data: string[]): number[] => {\n  return data.map(Number);\n};\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        for sym in &result.symbols {
+            if let Some(ref sig) = sym.signature {
+                assert!(
+                    !sig.contains("  "),
+                    "Signature '{}' has whitespace artifact",
+                    sig
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ts_generic_signature_no_multispace() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "function merge<T extends object, U extends object>(a: T, b: U): T & U {\n  return Object.assign(a, b);\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "merge")
+            .expect("merge function should exist");
+        if let Some(ref sig) = func.signature {
+            assert!(
+                !sig.contains("  "),
+                "Generic signature '{}' has multi-space artifact",
+                sig
+            );
+        }
+    }
+
+    #[test]
+    fn ts_many_params_signature_no_multispace() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "function configure(host: string, port: number, secure: boolean, timeout: number): void {\n  return;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "configure")
+            .expect("configure function should exist");
+        if let Some(ref sig) = func.signature {
+            assert!(
+                !sig.contains("  "),
+                "Multi-param signature '{}' has whitespace artifact",
+                sig
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // C18 QA-1: Adversarial Edge Cases (ADV-1 through ADV-5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ts_only_functions_no_preextraction_needed() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "function a(x: number): number { return x; }\n\
+                        function b(y: string): void { console.log(y); }\n\
+                        export function c(): boolean { return true; }\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        assert_eq!(
+            funcs, 3,
+            "3 functions, each appearing exactly once (tree-sitter only, no pre-extraction)"
+        );
+    }
+
+    #[test]
+    fn ts_empty_file_no_crash() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("empty.ts");
+        let content = "";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let named: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.name != "empty" && s.kind != SymbolKind::Module)
+            .collect();
+        assert!(
+            named.is_empty(),
+            "Empty .ts file should produce no named entities"
+        );
+    }
+
+    #[test]
+    fn ts_only_comments_no_entities() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("comments.ts");
+        let content =
+            "// This is a comment\n/* Block comment\n   spanning lines */\n/// Triple slash\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let named = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind != SymbolKind::Module)
+            .count();
+        assert_eq!(named, 0, "Comment-only .ts file should produce no entities");
+    }
+
+    #[test]
+    fn ts_export_declare_function_handled() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("ambient.ts");
+        let content = "export declare function fetch(url: string): Promise<Response>;\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let fetchs: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.name == "fetch")
+            .collect();
+        assert!(
+            !fetchs.is_empty(),
+            "export declare function must produce at least 1 entity"
+        );
+        assert!(
+            fetchs.len() <= 1,
+            "export declare function must not produce duplicates, got {}",
+            fetchs.len()
+        );
+    }
+
+    #[test]
+    fn ts_const_enum_extracted() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "const enum Status {\n  Active,\n  Inactive\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let enums: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Enum && s.name == "Status")
+            .collect();
+        assert_eq!(
+            enums.len(),
+            1,
+            "const enum should be extracted exactly once"
+        );
     }
 }
