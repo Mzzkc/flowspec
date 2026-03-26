@@ -317,6 +317,11 @@ fn insert_references(
                 }
             }
             ResolutionStatus::Partial(info) if info.starts_with("attribute_access:") => {
+                // Attribute access references (e.g., `obj.attr`) are resolved differently
+                // from direct calls. The info string encodes "attribute_access:<root_name>"
+                // where root_name is the importable symbol (e.g., the module or object that
+                // was imported). We extract the root name and resolve it via proximity-based
+                // import resolution, connecting the attribute access to the imported symbol.
                 let root_name = &info["attribute_access:".len()..];
 
                 // Resolve from: find the containing function/method
@@ -429,8 +434,9 @@ fn find_containing_symbol(
 
 /// Resolves a callee name to a `SymbolId` by matching against same-file symbols.
 ///
-/// Handles three patterns:
+/// Handles four patterns:
 /// - `self.method` — matches `Method` symbols in the same class scope as `from`
+/// - `this.method` — same as `self.method` (JavaScript `this` receiver)
 /// - `simple_name` — matches any symbol with the same name
 /// - `obj.attr` — stays unresolved (cross-file or requires type inference)
 fn resolve_callee(
@@ -440,8 +446,11 @@ fn resolve_callee(
     symbol_id_map: &[(usize, SymbolId)],
     symbols: &[Symbol],
 ) -> SymbolId {
-    // Handle self.method pattern
-    if let Some(method_name) = callee_name.strip_prefix("self.") {
+    // Handle self.method (Python/Rust) and this.method (JavaScript) patterns
+    let method_name = callee_name
+        .strip_prefix("self.")
+        .or_else(|| callee_name.strip_prefix("this."));
+    if let Some(method_name) = method_name {
         if let Some(from_sym) = graph.get_symbol(*from_id) {
             let from_scope = from_sym.scope;
             for &(idx, real_id) in symbol_id_map {
