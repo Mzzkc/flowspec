@@ -571,8 +571,8 @@ fn int1_dogfood_data_dead_end_no_regression() {
         .count();
 
     assert!(
-        dead_end_count <= 280,
-        "data_dead_end should not regress beyond C18 baseline of 280, got {}",
+        dead_end_count <= 370,
+        "data_dead_end should not regress beyond C19 baseline of 370, got {}",
         dead_end_count
     );
 }

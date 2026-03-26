@@ -110,8 +110,8 @@ pub enum ManifestError {
         reason: String,
     },
 
-    /// Manifest exceeds the 10x source code size limit.
-    #[error("manifest size ({manifest_bytes} bytes) exceeds 10x source size ({source_bytes} bytes). Ratio: {ratio:.1}x")]
+    /// Manifest exceeds the format-specific source code size limit.
+    #[error("manifest size ({manifest_bytes} bytes) exceeds {limit}x source size ({source_bytes} bytes). Ratio: {ratio:.1}x")]
     SizeLimit {
         /// Manifest size in bytes.
         manifest_bytes: u64,
@@ -119,6 +119,8 @@ pub enum ManifestError {
         source_bytes: u64,
         /// The actual ratio.
         ratio: f64,
+        /// The format-specific ratio limit that was exceeded.
+        limit: f64,
     },
 }
 

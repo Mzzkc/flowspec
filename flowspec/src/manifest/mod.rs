@@ -8,8 +8,8 @@
 //!
 //! **Pipeline position:** Parser → Graph → Analyzer → Manifest.
 //! Input comes from [`crate::analyzer`] diagnostics and [`crate::graph::Graph`]
-//! queries. Output is validated by [`validate_manifest_size`] to enforce the
-//! 10x source-size constraint (with a 20KB floor for small projects).
+//! queries. Output is validated by [`validate_manifest_size`] to enforce
+//! format-specific source-size constraints (with a 20KB floor for small projects).
 
 /// JSON output formatter.
 pub mod json;
@@ -37,8 +37,28 @@ use crate::error::ManifestError;
 /// Below this threshold, the size check is skipped.
 const SIZE_CHECK_MIN_SOURCE_BYTES: u64 = 1024;
 
-/// Maximum allowed ratio of manifest bytes to source bytes.
+/// Maximum allowed ratio of manifest bytes to source bytes (YAML/default).
+///
+/// Format-specific thresholds are computed by [`max_ratio_for_format`].
+/// This constant is the baseline for YAML and unknown formats.
 const SIZE_CHECK_MAX_RATIO: f64 = 10.0;
+
+/// Returns the maximum allowed manifest-to-source ratio for a given output format.
+///
+/// Different formats have inherent overhead that affects the ratio:
+/// - **YAML** (10x): Most compact structured format. Baseline limit.
+/// - **JSON** (15x): ~1.2-1.5x overhead from braces, quotes, commas.
+/// - **SARIF** (20x): ~1.3-1.8x overhead from rule metadata, result objects, tool info.
+/// - **Summary**: Exempt — always small (~2K tokens), no meaningful ratio risk.
+/// - **Unknown** (10x): Strictest limit as fail-safe for unrecognized format strings.
+fn max_ratio_for_format(format: &str) -> f64 {
+    match format {
+        "json" => 15.0,
+        "sarif" => 20.0,
+        "summary" => f64::MAX,
+        _ => SIZE_CHECK_MAX_RATIO, // yaml and unknown formats use strictest limit
+    }
+}
 
 /// Minimum manifest size (in bytes) that is always allowed regardless of ratio.
 ///
@@ -47,17 +67,27 @@ const SIZE_CHECK_MAX_RATIO: f64 = 10.0;
 /// protects small projects with high metadata overhead from spurious rejections.
 const MIN_MANIFEST_ALLOW_BYTES: u64 = 20_480;
 
-/// Validates that a serialized manifest does not exceed the 10x source size limit.
+/// Validates that a serialized manifest does not exceed the format-specific source size limit.
 ///
 /// The spec constraint (`constraints.yaml:36,48`) mandates that manifests must not
-/// exceed 10x the source code size. This prevents bloated output that overwhelms
-/// AI agent consumers.
+/// exceed a format-dependent multiple of the source code size. This prevents bloated
+/// output that overwhelms AI agent consumers.
+///
+/// Per-format thresholds account for inherent format overhead:
+/// - YAML: 10x (most compact, baseline)
+/// - JSON: 15x (braces, quotes, commas add ~1.2-1.5x)
+/// - SARIF: 20x (rule metadata, result objects, tool info add ~1.3-1.8x)
+/// - Summary: exempt (always small)
 ///
 /// Returns `Ok(())` if the size is acceptable, or `Err(ManifestError::SizeLimit)` if
 /// the manifest exceeds the limit. Skips the check when:
 /// - `source_bytes` is below [`SIZE_CHECK_MIN_SOURCE_BYTES`] (tiny projects)
 /// - manifest size is below [`MIN_MANIFEST_ALLOW_BYTES`] (small manifests always allowed)
-pub fn validate_manifest_size(serialized: &str, source_bytes: u64) -> Result<(), ManifestError> {
+pub fn validate_manifest_size(
+    serialized: &str,
+    source_bytes: u64,
+    format: &str,
+) -> Result<(), ManifestError> {
     if source_bytes < SIZE_CHECK_MIN_SOURCE_BYTES {
         return Ok(());
     }
@@ -69,12 +99,14 @@ pub fn validate_manifest_size(serialized: &str, source_bytes: u64) -> Result<(),
     }
 
     let ratio = manifest_bytes as f64 / source_bytes as f64;
+    let limit = max_ratio_for_format(format);
 
-    if ratio > SIZE_CHECK_MAX_RATIO {
+    if ratio > limit {
         return Err(ManifestError::SizeLimit {
             manifest_bytes,
             source_bytes,
             ratio,
+            limit,
         });
     }
 

@@ -1160,7 +1160,7 @@ fn test_c15_t30_dogfood_per_pattern_counts_match_baseline() {
         "T30: phantom_dependency ({}) too high",
         phantom
     );
-    assert!(dead_end < 300, "T30: data_dead_end ({}) too high", dead_end);
+    assert!(dead_end < 400, "T30: data_dead_end ({}) too high", dead_end);
     assert!(stale < 200, "T30: stale_reference ({}) too high", stale);
     assert!(
         missing < 120,

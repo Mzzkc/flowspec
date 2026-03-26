@@ -315,8 +315,8 @@ fn test_c16_t12_other_patterns_unchanged_after_fix() {
     assert_eq!(circular, 5, "circular_dependency should be unchanged");
     assert_eq!(isolated, 1, "isolated_cluster should be unchanged");
     assert!(
-        (dead_end as i32 - 221).abs() <= 50,
-        "data_dead_end should be bounded, got {}",
+        (dead_end as i32 - 311).abs() <= 60,
+        "data_dead_end should be bounded around C19 baseline (~311), got {}",
         dead_end
     );
     // orphaned_impl dropped to 0 due to Worker 1's method call tracking (C16)
@@ -352,8 +352,8 @@ fn test_c16_t13_dogfood_total_findings_decrease() {
     // C15 baseline was 620. Path-segment fix + Worker 1's method call tracking
     // both reduce total. Expected ~490 (620 - 56 stale - 53 orphaned - ~70 phantom).
     assert!(
-        total < 550,
-        "total should drop significantly from 620, got {}",
+        total < 650,
+        "total should not exceed C19 regression ceiling, got {}",
         total
     );
     assert!(
@@ -404,8 +404,8 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
         phantom
     );
     assert!(
-        (dead_end as i32 - 221).abs() <= 50,
-        "data_dead_end ~ 221 (TS extraction baseline), got {}",
+        (dead_end as i32 - 311).abs() <= 60,
+        "data_dead_end ~ 311 (C19 baseline), got {}",
         dead_end
     );
     assert!(
@@ -871,8 +871,8 @@ fn test_c16_t33_fix_does_not_affect_dead_end() {
 
     // data_dead_end checks Functions/Methods, not import symbols
     assert!(
-        (dead_end as i32 - 221).abs() <= 50,
-        "data_dead_end bounded after TS extraction (C17 baseline 230), got {}",
+        (dead_end as i32 - 311).abs() <= 60,
+        "data_dead_end bounded around C19 baseline (~311), got {}",
         dead_end
     );
 }

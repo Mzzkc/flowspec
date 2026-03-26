@@ -22,7 +22,7 @@
 
 /// Diagnostic detection, flow tracing, and boundary analysis.
 pub mod analyzer;
-/// Extracted CLI command logic — testable library functions for analyze, diagnose, trace.
+/// Extracted CLI command logic — testable library functions for analyze, diagnose, trace, diff, init.
 pub mod commands;
 /// Configuration loading and validation.
 pub mod config;
@@ -94,6 +94,9 @@ mod cycle17_child_module_tests;
 
 #[cfg(test)]
 mod cycle18_analysis_tests;
+
+#[cfg(test)]
+mod cycle19_analysis_tests;
 
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};

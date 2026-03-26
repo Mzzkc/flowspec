@@ -36,7 +36,7 @@ fn build_symbol_map(
 #[test]
 fn t01_byte_floor_small_project_small_manifest_passes() {
     let serialized = "x".repeat(15_000);
-    let result = validate_manifest_size(&serialized, 2048);
+    let result = validate_manifest_size(&serialized, 2048, "yaml");
     assert!(
         result.is_ok(),
         "15KB manifest with 2KB source should pass (under 20KB floor). Got: {:?}",
@@ -50,7 +50,7 @@ fn t01_byte_floor_small_project_small_manifest_passes() {
 #[test]
 fn t02_byte_floor_manifest_at_19kb_passes() {
     let serialized = "x".repeat(19_000);
-    let result = validate_manifest_size(&serialized, 1500);
+    let result = validate_manifest_size(&serialized, 1500, "yaml");
     assert!(
         result.is_ok(),
         "19KB manifest should pass despite 12.7x ratio — byte floor saves it. Got: {:?}",
@@ -62,7 +62,7 @@ fn t02_byte_floor_manifest_at_19kb_passes() {
 #[test]
 fn t03_byte_floor_boundary_20479_passes() {
     let serialized = "x".repeat(20_479);
-    let result = validate_manifest_size(&serialized, 1500);
+    let result = validate_manifest_size(&serialized, 1500, "yaml");
     assert!(
         result.is_ok(),
         "20,479 bytes < 20,480 floor — must pass. Got: {:?}",
@@ -76,7 +76,7 @@ fn t03_byte_floor_boundary_20479_passes() {
 #[test]
 fn t04_byte_floor_boundary_20480_fails() {
     let serialized = "x".repeat(20_480);
-    let result = validate_manifest_size(&serialized, 1500);
+    let result = validate_manifest_size(&serialized, 1500, "yaml");
     assert!(
         result.is_err(),
         "20,480 bytes = floor boundary, falls through to ratio check (13.65x > 10x) — must fail"
@@ -88,7 +88,7 @@ fn t04_byte_floor_boundary_20480_fails() {
 #[test]
 fn t05_byte_floor_exceeded_ratio_check_fires() {
     let serialized = "x".repeat(25_000);
-    let result = validate_manifest_size(&serialized, 2048);
+    let result = validate_manifest_size(&serialized, 2048, "yaml");
     assert!(
         result.is_err(),
         "25KB manifest > 20KB floor, 12.2x > 10x — must fail"
@@ -106,7 +106,7 @@ fn t05_byte_floor_exceeded_ratio_check_fires() {
 #[test]
 fn t06_byte_floor_exceeded_but_ratio_ok_passes() {
     let serialized = "x".repeat(25_000);
-    let result = validate_manifest_size(&serialized, 10_000);
+    let result = validate_manifest_size(&serialized, 10_000, "yaml");
     assert!(
         result.is_ok(),
         "25KB manifest, 2.5x ratio — should pass. Got: {:?}",
@@ -119,7 +119,7 @@ fn t06_byte_floor_exceeded_but_ratio_ok_passes() {
 #[test]
 fn t07_byte_floor_large_project_normal_ratio_passes() {
     let serialized = "x".repeat(500_000);
-    let result = validate_manifest_size(&serialized, 100_000);
+    let result = validate_manifest_size(&serialized, 100_000, "yaml");
     assert!(
         result.is_ok(),
         "Large project, 5x ratio — must pass. Got: {:?}",
@@ -132,7 +132,7 @@ fn t07_byte_floor_large_project_normal_ratio_passes() {
 #[test]
 fn t08_byte_floor_large_project_over_ratio_fails() {
     let serialized = "x".repeat(1_100_000);
-    let result = validate_manifest_size(&serialized, 100_000);
+    let result = validate_manifest_size(&serialized, 100_000, "yaml");
     assert!(
         result.is_err(),
         "Large project, 11x ratio — must fail. Byte floor does NOT save large projects."
@@ -144,7 +144,7 @@ fn t08_byte_floor_large_project_over_ratio_fails() {
 #[test]
 fn t09_byte_floor_tiny_source_still_skips() {
     let serialized = "x".repeat(30_000);
-    let result = validate_manifest_size(&serialized, 500);
+    let result = validate_manifest_size(&serialized, 500, "yaml");
     assert!(
         result.is_ok(),
         "Source < 1024 — existing bypass must still work. Got: {:?}",
@@ -156,7 +156,7 @@ fn t09_byte_floor_tiny_source_still_skips() {
 #[test]
 fn t10_byte_floor_zero_source_passes() {
     let serialized = "x".repeat(50_000);
-    let result = validate_manifest_size(&serialized, 0);
+    let result = validate_manifest_size(&serialized, 0, "yaml");
     assert!(
         result.is_ok(),
         "Zero source — existing bypass must still work. Got: {:?}",
@@ -900,7 +900,7 @@ fn t37_regression_exit_codes_contract() {
 #[test]
 fn t38_adversarial_one_byte_over_floor_pathological_ratio() {
     let serialized = "x".repeat(20_481);
-    let result = validate_manifest_size(&serialized, 1500);
+    let result = validate_manifest_size(&serialized, 1500, "yaml");
     assert!(
         result.is_err(),
         "20,481 bytes > 20,480 floor, 13.65x > 10x — must fail"
@@ -912,7 +912,7 @@ fn t38_adversarial_one_byte_over_floor_pathological_ratio() {
 #[test]
 fn t39_adversarial_over_floor_ratio_exactly_10() {
     let serialized = "x".repeat(30_000);
-    let result = validate_manifest_size(&serialized, 3000);
+    let result = validate_manifest_size(&serialized, 3000, "yaml");
     assert!(
         result.is_ok(),
         "Ratio exactly 10.0 is NOT > 10.0 — must pass. Got: {:?}",
@@ -928,7 +928,7 @@ fn t40_adversarial_unicode_manifest_byte_vs_char_count() {
     // 4750 chars × 4 bytes = 19,000 bytes — under 20KB floor
     let serialized: String = std::iter::repeat('\u{1F600}').take(4750).collect();
     assert_eq!(serialized.len(), 19_000, "Should be exactly 19,000 bytes");
-    let result = validate_manifest_size(&serialized, 2000);
+    let result = validate_manifest_size(&serialized, 2000, "yaml");
     assert!(
         result.is_ok(),
         "19KB byte count (under floor) must pass despite high ratio. Got: {:?}",
@@ -965,7 +965,7 @@ fn t41_adversarial_duplicate_import_names_same_file() {
 #[test]
 fn t42_adversarial_both_bypasses_active() {
     let serialized = "x".repeat(15_000);
-    let result = validate_manifest_size(&serialized, 500);
+    let result = validate_manifest_size(&serialized, 500, "yaml");
     assert!(
         result.is_ok(),
         "Both bypasses active (source < 1024 AND manifest < 20KB) — must pass. Got: {:?}",

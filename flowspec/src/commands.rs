@@ -110,7 +110,7 @@ pub fn run_analyze(
 
     let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
 
-    validate_manifest_size(&output, result.source_bytes)?;
+    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
 
     write_output(&output, output_path)?;
 
@@ -409,16 +409,9 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
 }
 
 /// Valid manifest section names for `--section` validation in `diff`.
-const VALID_SECTIONS: &[&str] = &[
-    "metadata",
-    "summary",
-    "diagnostics",
-    "entities",
-    "flows",
-    "boundaries",
-    "dependency_graph",
-    "type_flows",
-];
+// TODO: Add "metadata", "summary", "flows", "boundaries", "dependency_graph", "type_flows"
+// when compute_diff() gains support for these sections.
+const VALID_SECTIONS: &[&str] = &["entities", "diagnostics"];
 
 /// Result of comparing two manifests.
 ///
@@ -1270,7 +1263,7 @@ pub fn normalize_languages(languages: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::types::{EntityEntry, Manifest};
+    use crate::manifest::types::{DiagnosticEntry, EntityEntry, Manifest};
 
     fn entity_with_id(id: &str) -> EntityEntry {
         EntityEntry {
@@ -1477,5 +1470,613 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("nonexistent_pattern"));
+    }
+
+    // --- Diff command unit test helpers ---
+
+    /// Create a DiagnosticEntry with specified fields for diff testing.
+    fn diag_entry(pattern: &str, entity: &str, loc: &str, severity: &str) -> DiagnosticEntry {
+        DiagnosticEntry {
+            id: "D001".to_string(),
+            pattern: pattern.to_string(),
+            severity: severity.to_string(),
+            confidence: "high".to_string(),
+            entity: entity.to_string(),
+            message: String::new(),
+            evidence: vec![],
+            suggestion: String::new(),
+            loc: loc.to_string(),
+        }
+    }
+
+    /// Create a Manifest with specified entities and diagnostics.
+    fn manifest_with(entities: Vec<EntityEntry>, diagnostics: Vec<DiagnosticEntry>) -> Manifest {
+        let mut m = Manifest::empty();
+        m.entities = entities;
+        m.diagnostics = diagnostics;
+        m
+    }
+
+    // --- T1: compute_diff — identical empty manifests ---
+    #[test]
+    fn compute_diff_identical_empty() {
+        let old = Manifest::empty();
+        let new = Manifest::empty();
+        let diff = compute_diff(&old, &new);
+        assert!(diff.entities_added.is_empty());
+        assert!(diff.entities_removed.is_empty());
+        assert!(diff.entities_changed.is_empty());
+        assert!(diff.diagnostics_new.is_empty());
+        assert!(diff.diagnostics_resolved.is_empty());
+        assert!(!diff.has_regressions);
+        assert_eq!(diff.summary, vec!["no changes"]);
+    }
+
+    // --- T2: compute_diff — entity added ---
+    #[test]
+    fn compute_diff_entity_added() {
+        let old = manifest_with(vec![entity_with_id("A")], vec![]);
+        let new = manifest_with(vec![entity_with_id("A"), entity_with_id("B")], vec![]);
+        let diff = compute_diff(&old, &new);
+        assert!(diff.entities_added.contains(&"B".to_string()));
+        assert!(diff.entities_removed.is_empty());
+        assert!(diff.entities_changed.is_empty());
+    }
+
+    // --- T3: compute_diff — entity removed ---
+    #[test]
+    fn compute_diff_entity_removed() {
+        let old = manifest_with(vec![entity_with_id("A"), entity_with_id("B")], vec![]);
+        let new = manifest_with(vec![entity_with_id("A")], vec![]);
+        let diff = compute_diff(&old, &new);
+        assert!(diff.entities_removed.contains(&"B".to_string()));
+        assert!(diff.entities_added.is_empty());
+    }
+
+    // --- T4: compute_diff — entity field change (sig) ---
+    #[test]
+    fn compute_diff_entity_changed_sig() {
+        let mut old_e = entity_with_id("A");
+        old_e.sig = String::new();
+        let mut new_e = entity_with_id("A");
+        new_e.sig = "(i32) -> bool".to_string();
+        let old = manifest_with(vec![old_e], vec![]);
+        let new = manifest_with(vec![new_e], vec![]);
+        let diff = compute_diff(&old, &new);
+        assert!(diff.entities_added.is_empty());
+        assert!(diff.entities_removed.is_empty());
+        assert_eq!(diff.entities_changed.len(), 1);
+        let change = &diff.entities_changed[0];
+        assert_eq!(change.id, "A");
+        assert_eq!(change.changes.len(), 1);
+        assert_eq!(change.changes[0].field, "sig");
+        assert_eq!(change.changes[0].old, "");
+        assert_eq!(change.changes[0].new, "(i32) -> bool");
+    }
+
+    // --- T5: compute_diff — mixed changes (add + remove + change) ---
+    #[test]
+    fn compute_diff_mixed_changes() {
+        let mut old_a = entity_with_id("A");
+        old_a.vis = "pub".to_string();
+        let old = manifest_with(vec![old_a, entity_with_id("B")], vec![]);
+        let mut new_a = entity_with_id("A");
+        new_a.vis = "priv".to_string();
+        let new = manifest_with(vec![new_a, entity_with_id("C")], vec![]);
+        let diff = compute_diff(&old, &new);
+        assert!(diff.entities_added.contains(&"C".to_string()));
+        assert!(diff.entities_removed.contains(&"B".to_string()));
+        assert_eq!(diff.entities_changed.len(), 1);
+        assert_eq!(diff.entities_changed[0].id, "A");
+        let summary_str = diff.summary.join(" ");
+        assert!(summary_str.contains("added"), "summary: {}", summary_str);
+        assert!(summary_str.contains("removed"), "summary: {}", summary_str);
+        assert!(summary_str.contains("changed"), "summary: {}", summary_str);
+    }
+
+    // --- T6: compute_diff — new critical diagnostic triggers has_regressions ---
+    #[test]
+    fn compute_diff_new_critical_regression() {
+        let old = manifest_with(vec![], vec![]);
+        let new = manifest_with(
+            vec![],
+            vec![diag_entry(
+                "contract_mismatch",
+                "foo",
+                "test.py:1",
+                "critical",
+            )],
+        );
+        let diff = compute_diff(&old, &new);
+        assert!(
+            diff.has_regressions,
+            "Critical diagnostic must trigger has_regressions"
+        );
+        assert_eq!(diff.diagnostics_new.len(), 1);
+    }
+
+    // --- T7: compute_diff — new warning does NOT trigger regressions ---
+    #[test]
+    fn compute_diff_new_warning_no_regression() {
+        let old = manifest_with(vec![], vec![]);
+        let new = manifest_with(
+            vec![],
+            vec![diag_entry("data_dead_end", "bar", "test.py:5", "warning")],
+        );
+        let diff = compute_diff(&old, &new);
+        assert!(
+            !diff.has_regressions,
+            "Warning diagnostic must not trigger has_regressions"
+        );
+        assert_eq!(diff.diagnostics_new.len(), 1);
+    }
+
+    // --- T8: compute_diff — resolved diagnostic detected ---
+    #[test]
+    fn compute_diff_diagnostic_resolved() {
+        let old = manifest_with(
+            vec![],
+            vec![diag_entry("phantom_dependency", "os", "main.py:2", "info")],
+        );
+        let new = manifest_with(vec![], vec![]);
+        let diff = compute_diff(&old, &new);
+        assert_eq!(diff.diagnostics_resolved.len(), 1);
+        assert_eq!(diff.diagnostics_resolved[0].pattern, "phantom_dependency");
+        assert!(diff.diagnostics_new.is_empty());
+        assert!(!diff.has_regressions);
+    }
+
+    // --- T9: load_manifest — valid YAML ---
+    #[test]
+    fn load_manifest_valid_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.yaml");
+        let manifest = Manifest::empty();
+        let yaml = serde_yaml::to_string(&manifest).unwrap();
+        std::fs::write(&path, &yaml).unwrap();
+        let result = load_manifest(&path);
+        assert!(
+            result.is_ok(),
+            "load_manifest YAML failed: {:?}",
+            result.err()
+        );
+    }
+
+    // --- T10: load_manifest — valid JSON ---
+    #[test]
+    fn load_manifest_valid_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.json");
+        let manifest = Manifest::empty();
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        std::fs::write(&path, &json).unwrap();
+        let result = load_manifest(&path);
+        assert!(
+            result.is_ok(),
+            "load_manifest JSON failed: {:?}",
+            result.err()
+        );
+    }
+
+    // --- T11: load_manifest — empty file returns error ---
+    #[test]
+    fn load_manifest_empty_file_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.yaml");
+        std::fs::write(&path, "   \n  ").unwrap();
+        let result = load_manifest(&path);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("file is empty"),
+            "Error should mention 'file is empty': {}",
+            err_msg
+        );
+    }
+
+    // --- T12: load_manifest — nonexistent path returns TargetNotFound ---
+    #[test]
+    fn load_manifest_nonexistent_path() {
+        let path = Path::new("/tmp/nonexistent_manifest_test_12345.yaml");
+        let result = load_manifest(path);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FlowspecError::TargetNotFound { path: p } => {
+                assert_eq!(p, path.to_path_buf());
+            }
+            other => panic!("Expected TargetNotFound, got: {:?}", other),
+        }
+    }
+
+    // --- T13: apply_section_filter — entities only ---
+    #[test]
+    fn apply_section_filter_entities_only() {
+        let mut diff = DiffResult {
+            entities_added: vec!["A".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "data_dead_end".to_string(),
+                entity: "foo".to_string(),
+                loc: "x.py:1".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: true,
+            summary: vec![
+                "1 entities added".to_string(),
+                "1 new diagnostics".to_string(),
+            ],
+        };
+        apply_section_filter(&mut diff, &["entities".to_string()]);
+        assert_eq!(diff.entities_added, vec!["A".to_string()]);
+        assert!(diff.diagnostics_new.is_empty());
+        assert!(diff.diagnostics_resolved.is_empty());
+        assert!(
+            !diff.has_regressions,
+            "has_regressions must be false when diagnostics filtered out"
+        );
+    }
+
+    // --- T14: apply_section_filter — diagnostics only ---
+    #[test]
+    fn apply_section_filter_diagnostics_only() {
+        let mut diff = DiffResult {
+            entities_added: vec!["A".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "data_dead_end".to_string(),
+                entity: "foo".to_string(),
+                loc: "x.py:1".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: true,
+            summary: vec![],
+        };
+        apply_section_filter(&mut diff, &["diagnostics".to_string()]);
+        assert!(diff.entities_added.is_empty());
+        assert!(diff.entities_removed.is_empty());
+        assert!(diff.entities_changed.is_empty());
+        assert_eq!(diff.diagnostics_new.len(), 1);
+        assert!(
+            diff.has_regressions,
+            "has_regressions must be preserved for diagnostics filter"
+        );
+    }
+
+    // --- T15: apply_section_filter — both sections preserves all ---
+    #[test]
+    fn apply_section_filter_both_sections() {
+        let mut diff = DiffResult {
+            entities_added: vec!["A".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "data_dead_end".to_string(),
+                entity: "foo".to_string(),
+                loc: "x.py:1".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: true,
+            summary: vec![],
+        };
+        apply_section_filter(
+            &mut diff,
+            &["entities".to_string(), "diagnostics".to_string()],
+        );
+        assert_eq!(diff.entities_added.len(), 1);
+        assert_eq!(diff.diagnostics_new.len(), 1);
+        assert!(diff.has_regressions);
+    }
+
+    // --- T16: apply_section_filter — empty clears all ---
+    #[test]
+    fn apply_section_filter_empty_clears_all() {
+        let mut diff = DiffResult {
+            entities_added: vec!["X".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "test".to_string(),
+                entity: "e".to_string(),
+                loc: "l".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: true,
+            summary: vec![],
+        };
+        apply_section_filter(&mut diff, &[]);
+        assert!(diff.entities_added.is_empty());
+        assert!(diff.diagnostics_new.is_empty());
+        assert!(!diff.has_regressions);
+        assert_eq!(diff.summary, vec!["no changes"]);
+    }
+
+    // --- T17: validate_sections — all valid section names accepted ---
+    #[test]
+    fn validate_sections_all_valid_accepted() {
+        for &name in VALID_SECTIONS {
+            assert!(
+                validate_sections(&[name.to_string()]).is_ok(),
+                "Section '{}' should be accepted",
+                name
+            );
+        }
+    }
+
+    // --- T18: validate_sections — unknown rejected with helpful error ---
+    #[test]
+    fn validate_sections_unknown_rejected() {
+        let result = validate_sections(&["nonexistent".to_string()]);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("unknown section: nonexistent"),
+            "Error must mention unknown section: {}",
+            err_msg
+        );
+    }
+
+    // --- T19: validate_sections — empty list accepted ---
+    #[test]
+    fn validate_sections_empty_accepted() {
+        assert!(validate_sections(&[]).is_ok());
+    }
+
+    // --- T20: DiffResult serializes to YAML ---
+    #[test]
+    fn diff_result_serializes_yaml() {
+        let diff = DiffResult {
+            entities_added: vec!["new_fn".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![],
+            diagnostics_resolved: vec![],
+            has_regressions: false,
+            summary: vec!["1 entities added".to_string()],
+        };
+        let yaml = serde_yaml::to_string(&diff).unwrap();
+        assert!(yaml.contains("entities_added"));
+        assert!(yaml.contains("new_fn"));
+    }
+
+    // --- T21: Empty DiffResult serializes cleanly ---
+    #[test]
+    fn diff_result_empty_serializes_cleanly() {
+        let diff = DiffResult {
+            entities_added: vec![],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![],
+            diagnostics_resolved: vec![],
+            has_regressions: false,
+            summary: vec!["no changes".to_string()],
+        };
+        let yaml = serde_yaml::to_string(&diff);
+        assert!(yaml.is_ok(), "Empty DiffResult YAML: {:?}", yaml.err());
+        let json = serde_json::to_string_pretty(&diff);
+        assert!(json.is_ok(), "Empty DiffResult JSON: {:?}", json.err());
+    }
+
+    // --- T22: DiffResult round-trips through JSON ---
+    #[test]
+    fn diff_result_json_roundtrip() {
+        let diff = DiffResult {
+            entities_added: vec!["A".to_string()],
+            entities_removed: vec!["B".to_string()],
+            entities_changed: vec![EntityChange {
+                id: "C".to_string(),
+                changes: vec![FieldChange {
+                    field: "vis".to_string(),
+                    old: "pub".to_string(),
+                    new: "priv".to_string(),
+                }],
+            }],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "data_dead_end".to_string(),
+                entity: "foo".to_string(),
+                loc: "test.py:1".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: false,
+            summary: vec!["1 entities added".to_string()],
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let deserialized: DiffResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.entities_added, diff.entities_added);
+        assert_eq!(deserialized.entities_removed, diff.entities_removed);
+        assert_eq!(deserialized.entities_changed.len(), 1);
+        assert_eq!(deserialized.entities_changed[0].id, "C");
+        assert_eq!(deserialized.diagnostics_new.len(), 1);
+        assert_eq!(deserialized.diagnostics_new[0].pattern, "data_dead_end");
+    }
+
+    // --- T23: format_diff_result — YAML format ---
+    #[test]
+    fn format_diff_result_yaml() {
+        let diff = DiffResult {
+            entities_added: vec!["new_entity".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![],
+            diagnostics_resolved: vec![],
+            has_regressions: false,
+            summary: vec!["1 entities added".to_string()],
+        };
+        let result = format_diff_result(&diff, OutputFormat::Yaml);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("entities_added"));
+        assert!(output.contains("new_entity"));
+    }
+
+    // --- T24: format_diff_result — Summary structure ---
+    #[test]
+    fn format_diff_result_summary_structure() {
+        let diff = DiffResult {
+            entities_added: vec!["fn_a".to_string()],
+            entities_removed: vec!["fn_b".to_string()],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "data_dead_end".to_string(),
+                entity: "fn_c".to_string(),
+                loc: "x.py:1".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: false,
+            summary: vec![
+                "1 entities added".to_string(),
+                "1 entities removed".to_string(),
+                "1 new diagnostics".to_string(),
+            ],
+        };
+        let result = format_diff_result(&diff, OutputFormat::Summary);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("Diff Summary:"), "output: {}", output);
+        assert!(output.contains("Entities added:"), "output: {}", output);
+        assert!(output.contains("+ fn_a"), "output: {}", output);
+        assert!(output.contains("Entities removed:"), "output: {}", output);
+        assert!(output.contains("- fn_b"), "output: {}", output);
+        assert!(output.contains("New diagnostics:"), "output: {}", output);
+        assert!(
+            output.contains("data_dead_end on fn_c"),
+            "output: {}",
+            output
+        );
+    }
+
+    // --- T25: format_diff_result — SARIF returns FormatNotImplemented ---
+    #[test]
+    fn format_diff_result_sarif_not_implemented() {
+        let diff = DiffResult {
+            entities_added: vec![],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![],
+            diagnostics_resolved: vec![],
+            has_regressions: false,
+            summary: vec!["no changes".to_string()],
+        };
+        let result = format_diff_result(&diff, OutputFormat::Sarif);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FlowspecError::FormatNotImplemented { format } => {
+                assert_eq!(format, "sarif");
+            }
+            other => panic!("Expected FormatNotImplemented, got: {:?}", other),
+        }
+    }
+
+    // --- T29: compute_diff — identical non-empty manifests ---
+    #[test]
+    fn compute_diff_identical_nonempty() {
+        let entities = vec![
+            entity_with_id("A"),
+            entity_with_id("B"),
+            entity_with_id("C"),
+        ];
+        let diagnostics = vec![
+            diag_entry("data_dead_end", "A", "a.py:1", "warning"),
+            diag_entry("phantom_dependency", "os", "b.py:2", "info"),
+        ];
+        let old = manifest_with(entities.clone(), diagnostics.clone());
+        let new = manifest_with(entities, diagnostics);
+        let diff = compute_diff(&old, &new);
+        assert!(diff.entities_added.is_empty());
+        assert!(diff.entities_removed.is_empty());
+        assert!(diff.entities_changed.is_empty());
+        assert!(diff.diagnostics_new.is_empty());
+        assert!(diff.diagnostics_resolved.is_empty());
+        assert!(!diff.has_regressions);
+        assert_eq!(diff.summary, vec!["no changes"]);
+    }
+
+    // --- T30: section filter with unimplemented section produces empty output ---
+    #[test]
+    fn section_filter_unimplemented_section_empty_output() {
+        let mut diff = DiffResult {
+            entities_added: vec!["A".to_string()],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "test".to_string(),
+                entity: "e".to_string(),
+                loc: "l".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: true,
+            summary: vec![],
+        };
+        apply_section_filter(&mut diff, &["flows".to_string()]);
+        assert!(diff.entities_added.is_empty());
+        assert!(diff.diagnostics_new.is_empty());
+        assert!(!diff.has_regressions);
+        assert_eq!(diff.summary, vec!["no changes"]);
+    }
+
+    // --- T31: redundant condition — filtering out diagnostics clears has_regressions ---
+    #[test]
+    fn apply_section_filter_regression_redundant_condition() {
+        let mut diff = DiffResult {
+            entities_added: vec![],
+            entities_removed: vec![],
+            entities_changed: vec![],
+            diagnostics_new: vec![DiagnosticIdentity {
+                pattern: "contract_mismatch".to_string(),
+                entity: "foo".to_string(),
+                loc: "x.py:1".to_string(),
+            }],
+            diagnostics_resolved: vec![],
+            has_regressions: true,
+            summary: vec![],
+        };
+        apply_section_filter(&mut diff, &["entities".to_string()]);
+        assert!(
+            !diff.has_regressions,
+            "Filtering out diagnostics must clear has_regressions"
+        );
+    }
+
+    // --- T32: entity with all 4 fields changed ---
+    #[test]
+    fn compute_diff_entity_all_fields_changed() {
+        let old_e = EntityEntry {
+            id: "A".to_string(),
+            kind: "fn".to_string(),
+            vis: "pub".to_string(),
+            sig: "()".to_string(),
+            loc: "a.py:1".to_string(),
+            calls: vec![],
+            called_by: vec![],
+            annotations: vec![],
+        };
+        let new_e = EntityEntry {
+            id: "A".to_string(),
+            kind: "method".to_string(),
+            vis: "priv".to_string(),
+            sig: "(self, i32) -> bool".to_string(),
+            loc: "b.py:42".to_string(),
+            calls: vec![],
+            called_by: vec![],
+            annotations: vec![],
+        };
+        let old = manifest_with(vec![old_e], vec![]);
+        let new = manifest_with(vec![new_e], vec![]);
+        let diff = compute_diff(&old, &new);
+        assert_eq!(diff.entities_changed.len(), 1);
+        let change = &diff.entities_changed[0];
+        assert_eq!(change.id, "A");
+        assert_eq!(
+            change.changes.len(),
+            4,
+            "All 4 fields should be changed: {:?}",
+            change.changes
+        );
+        let field_names: Vec<&str> = change.changes.iter().map(|c| c.field.as_str()).collect();
+        assert!(field_names.contains(&"kind"));
+        assert!(field_names.contains(&"vis"));
+        assert!(field_names.contains(&"sig"));
+        assert!(field_names.contains(&"loc"));
     }
 }

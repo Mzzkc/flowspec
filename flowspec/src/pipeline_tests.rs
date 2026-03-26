@@ -2587,9 +2587,10 @@ fn test_pipeline_manifest_size_limit_enforced_on_pathological_input() {
                 if source_bytes >= 1024 {
                     let ratio = manifest_bytes as f64 / source_bytes as f64;
                     // Verify either ratio is within bounds OR
-                    // validate_manifest_size catches it
-                    let validation = crate::manifest::validate_manifest_size(output, source_bytes);
-                    if ratio > 10.0 {
+                    // validate_manifest_size catches it (JSON limit is 15x)
+                    let validation =
+                        crate::manifest::validate_manifest_size(output, source_bytes, "json");
+                    if ratio > 15.0 {
                         assert!(
                             validation.is_err(),
                             "Pathological input produced {:.1}x ratio but \
