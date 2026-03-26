@@ -77,6 +77,12 @@ mod cycle14_diagnostic_interaction_tests;
 #[cfg(test)]
 mod cycle14_surface_tests;
 
+#[cfg(test)]
+mod cycle15_fp_triage_tests;
+
+#[cfg(test)]
+mod cycle15_proximity_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{
