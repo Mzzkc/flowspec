@@ -98,6 +98,12 @@ mod cycle18_analysis_tests;
 #[cfg(test)]
 mod cycle19_analysis_tests;
 
+#[cfg(test)]
+mod cycle20_analysis_tests;
+
+#[cfg(test)]
+mod cycle20_surface_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{
@@ -220,7 +226,7 @@ pub struct AnalysisResult {
 ///    modules, and dependency edges.
 pub fn analyze(
     project_path: &Path,
-    _config: &Config,
+    config: &Config,
     languages: &[String],
 ) -> Result<AnalysisResult, FlowspecError> {
     // Validate path
@@ -242,14 +248,16 @@ pub fn analyze(
         }
     }
 
-    // Discover source files
-    let (files, detected_langs) = discover_source_files(project_path);
+    // Discover source files (respects .gitignore, config exclude, hardcoded skip_dirs)
+    let (files, detected_langs) = discover_source_files(project_path, &config.exclude);
 
-    // Determine which languages to analyze
-    let active_languages = if languages.is_empty() {
-        detected_langs
-    } else {
+    // Language priority: CLI flags > config languages > auto-detect
+    let active_languages = if !languages.is_empty() {
         languages.to_vec()
+    } else if !config.languages.is_empty() {
+        config.languages.clone()
+    } else {
+        detected_langs
     };
 
     // Build the project name from the directory
@@ -265,12 +273,12 @@ pub fn analyze(
         Box::new(RustAdapter::new()),
     ];
 
-    // Filter adapters when --language is specified.
+    // Filter adapters when languages are specified (CLI flags or config).
     // "typescript" maps to the JS adapter (language_name: "javascript").
-    let adapters: Vec<&Box<dyn LanguageAdapter>> = if languages.is_empty() {
+    let adapters: Vec<&Box<dyn LanguageAdapter>> = if active_languages.is_empty() {
         all_adapters.iter().collect()
     } else {
-        let requested: HashSet<&str> = languages.iter().map(|s| s.as_str()).collect();
+        let requested: HashSet<&str> = active_languages.iter().map(|s| s.as_str()).collect();
         all_adapters
             .iter()
             .filter(|a| {
@@ -695,12 +703,20 @@ pub fn diagnose(
 }
 
 /// Discover source files in a project directory, returning file paths and detected languages.
-fn discover_source_files(project_path: &Path) -> (Vec<std::path::PathBuf>, Vec<String>) {
+///
+/// Respects three exclusion sources (all active simultaneously):
+/// 1. **Hardcoded skip_dirs** — safety net for generated/tool directories
+/// 2. **Config exclude patterns** — user-specified in `.flowspec/config.yaml`
+/// 3. **`.gitignore`** — automatically respected via the `ignore` crate
+fn discover_source_files(
+    project_path: &Path,
+    exclude_patterns: &[String],
+) -> (Vec<PathBuf>, Vec<String>) {
     let mut files = Vec::new();
-    let mut languages = std::collections::HashSet::new();
+    let mut languages = HashSet::new();
 
-    // Directories to skip
-    let skip_dirs = [
+    // Hardcoded safety-net directories — always skipped, even without config
+    let skip_dirs: HashSet<&str> = [
         "target",
         "node_modules",
         "__pycache__",
@@ -710,68 +726,102 @@ fn discover_source_files(project_path: &Path) -> (Vec<std::path::PathBuf>, Vec<S
         "dist",
         ".venv",
         "venv",
-    ];
+    ]
+    .into_iter()
+    .collect();
 
-    if let Ok(entries) = walk_dir(project_path, &skip_dirs) {
-        for entry in entries {
-            if let Some(ext) = entry.extension() {
-                match ext.to_str() {
-                    Some("py") => {
-                        files.push(entry);
-                        languages.insert("python".to_string());
+    // Pre-compile config exclude patterns as globs
+    let exclude_globs: Vec<glob::Pattern> = exclude_patterns
+        .iter()
+        .filter_map(|p| {
+            let pattern_str = p.trim_end_matches('/');
+            glob::Pattern::new(pattern_str)
+                .or_else(|_| glob::Pattern::new(&format!("**/{}", pattern_str)))
+                .ok()
+        })
+        .collect();
+
+    // Build walker using `ignore` crate — respects .gitignore automatically
+    let mut builder = ignore::WalkBuilder::new(project_path);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true);
+
+    for result in builder.build() {
+        let entry = match result {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Directory walk error: {}", e);
+                continue;
+            }
+        };
+
+        let path = entry.path();
+
+        // Must be a file
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+
+        // Check if any ancestor directory is in the hardcoded skip list
+        let rel_path = path.strip_prefix(project_path).unwrap_or(path);
+        let in_skip_dir = rel_path.components().any(|c| {
+            if let std::path::Component::Normal(name) = c {
+                name.to_str().is_some_and(|n| skip_dirs.contains(n))
+            } else {
+                false
+            }
+        });
+        if in_skip_dir {
+            continue;
+        }
+
+        // Check config exclude patterns against relative path components and file name
+        let rel_str = rel_path.to_string_lossy();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let matches_exclude = exclude_globs.iter().any(|g| {
+            g.matches(&rel_str)
+                || g.matches(file_name)
+                || rel_path.components().any(|c| {
+                    if let std::path::Component::Normal(name) = c {
+                        name.to_str().is_some_and(|n| g.matches(n))
+                    } else {
+                        false
                     }
-                    Some("js" | "jsx" | "mjs" | "cjs") => {
-                        files.push(entry);
-                        languages.insert("javascript".to_string());
-                    }
-                    Some("ts" | "tsx") => {
-                        files.push(entry);
-                        languages.insert("typescript".to_string());
-                    }
-                    Some("rs") => {
-                        files.push(entry);
-                        languages.insert("rust".to_string());
-                    }
-                    _ => {}
+                })
+        });
+        if matches_exclude {
+            continue;
+        }
+
+        // Filter by supported source file extensions
+        if let Some(ext) = path.extension() {
+            match ext.to_str() {
+                Some("py") => {
+                    files.push(path.to_path_buf());
+                    languages.insert("python".to_string());
                 }
+                Some("js" | "jsx" | "mjs" | "cjs") => {
+                    files.push(path.to_path_buf());
+                    languages.insert("javascript".to_string());
+                }
+                Some("ts" | "tsx") => {
+                    files.push(path.to_path_buf());
+                    languages.insert("typescript".to_string());
+                }
+                Some("rs") => {
+                    files.push(path.to_path_buf());
+                    languages.insert("rust".to_string());
+                }
+                _ => {}
             }
         }
     }
 
     let detected: Vec<String> = languages.into_iter().collect();
     (files, detected)
-}
-
-/// Recursively walk a directory, skipping excluded directories.
-fn walk_dir(path: &Path, skip_dirs: &[&str]) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
-    let mut result = Vec::new();
-
-    if path.is_file() {
-        result.push(path.to_path_buf());
-        return Ok(result);
-    }
-
-    if !path.is_dir() {
-        return Ok(result);
-    }
-
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-
-        if entry_path.is_dir() {
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if skip_dirs.contains(&name) {
-                    continue;
-                }
-            }
-            result.extend(walk_dir(&entry_path, skip_dirs)?);
-        } else {
-            result.push(entry_path);
-        }
-    }
-
-    Ok(result)
 }
 
 /// Maps a [`SymbolKind`] to the abbreviated string used in entity entries.

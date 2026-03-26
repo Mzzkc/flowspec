@@ -82,6 +82,39 @@ External evaluation of Flowspec against Mozart AI Compose (228 Python files, 30K
 
 **Tests:** 74 Python parser tests pass (39 existing + 35 new QA-1). Clippy clean. Fmt clean. 6 pre-existing failures from Worker 2's concurrent data_dead_end changes.
 
+### Worker 2 (Sentinel) — Cycle 20 Implementation Complete
+**orphaned_impl/data_dead_end dedup + 38 QA-2 tests + baseline reconciliation.**
+
+**Dedup fix (`data_dead_end.rs:43-48`):**
+- Added `SymbolKind::Method` to the kind exclusion list (Module, Class, Struct, **Method**)
+- Methods now ONLY diagnosed by `orphaned_impl` (dedicated pattern), no longer by `data_dead_end`
+- One-line fix, principled: methods have a dedicated pattern, just like imports have `phantom_dependency`
+- **Impact:** data_dead_end dropped 311→258, total dropped 588→537, orphaned_impl unchanged at 53
+- 100% overlap on Method symbols eliminated (64% finding count inflation fixed)
+
+**38 QA-2 tests (`cycle20_analysis_tests.rs`):**
+- T1-T5: Circular dependency true positives (2-file, 3-file, 4-file Python import cycles, evidence completeness)
+- T6-T9: True negatives (linear chain, intra-module, diamond, single-file)
+- T10-T13: Adversarial (self-import, mixed edge types, TYPE_CHECKING cycle design question, re-export chain)
+- T14-T15: Resolution gap regression (T14 documents known gap, T15 validates post-fix behavior)
+- T16-T23: Dedup core (Method→orphaned_impl only, Function/Variable/Constant→data_dead_end, registry integration)
+- T24-T29: Adversarial dedup (Trait/Enum/Interface/Macro still detected, dunders double-excluded, cross-pattern orthogonality)
+- T30-T32: Dogfood baseline impact (total drops, data_dead_end drops, no entity in both patterns)
+- T33-T38: Regression (confidence calibration, message format, empty graph safety)
+
+**Baseline reconciliation across 4 test files:**
+- `mod.rs`: Updated `test_orphaned_implementation_and_data_dead_end_both_fire_on_method` → `_dedup_on_method` (now asserts data_dead_end does NOT fire on Method)
+- `cycle16_method_call_tests.rs`: `int3_true_dead_end_method_still_detected` → checks `orphaned_impl` instead of `data_dead_end`
+- `cycle16_stale_ref_fix_tests.rs`: T12 + T14 data_dead_end baselines updated 311→258, circular 5→range 5-8
+- `cycle17_child_module_tests.rs`: T21 circular_dependency 5→range 5-8
+- `cycle19_analysis_tests.rs`: T11 total range 558-618→507-567, T12 data_dead_end threshold 200→150
+
+**circular_dependency escalation still open:** The detector algorithm is correct. The gap is in `resolve_cross_file_imports` (graph/populate.rs) — no Python relative import handler. This is outside my file ownership. Documented in T14 (passes today, documents the gap) and investigation brief.
+
+**Files touched:** `data_dead_end.rs` (1-line fix), `cycle20_analysis_tests.rs` (new, 38 tests), `mod.rs` (1 test update), `cycle16_method_call_tests.rs` (1 test update), `cycle16_stale_ref_fix_tests.rs` (2 baseline updates), `cycle17_child_module_tests.rs` (1 baseline update), `cycle19_analysis_tests.rs` (2 baseline updates), `lib.rs` (module registration)
+
+**Tests:** 1769 pass, 0 fail. Clippy clean. Fmt clean. Dogfood: total=537, data_dead_end=258, orphaned_impl=53.
+
 ---
 
 ## Warm (Recent)

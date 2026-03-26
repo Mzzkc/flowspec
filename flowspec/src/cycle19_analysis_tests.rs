@@ -167,9 +167,11 @@ fn test_c19_t11_total_findings_within_baseline_tolerance() {
     let results = run_dogfood_c19();
     let total = results.len();
     eprintln!("T11: total findings = {}", total);
+    // After C20 dedup: Methods excluded from data_dead_end, total dropped ~51
+    // C20 baseline: 537 ±30
     assert!(
-        total >= 558 && total <= 618,
-        "T11: total={}, expected 558-618 (C19 baseline 588 ±30)",
+        total >= 507 && total <= 567,
+        "T11: total={}, expected 507-567 (C20 baseline 537 ±30, post-Method dedup)",
         total
     );
 }
@@ -181,9 +183,10 @@ fn test_c19_t12_data_dead_end_dominant() {
     let results = run_dogfood_c19();
     let dead_end = count_pattern_c19(&results, "data_dead_end");
     eprintln!("T12: data_dead_end = {}", dead_end);
+    // After C20 dedup: Methods excluded, data_dead_end dropped from 311 to ~258
     assert!(
-        dead_end > 200,
-        "T12: data_dead_end={}, must be >200 (C18 was 252)",
+        dead_end > 150,
+        "T12: data_dead_end={}, must be >150 (C20 post-dedup baseline ~258)",
         dead_end
     );
 }

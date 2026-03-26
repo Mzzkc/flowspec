@@ -659,21 +659,22 @@ class Service:
     )
     .unwrap();
 
-    let dead_end_entities: Vec<&str> = diagnostics
+    // After C20 dedup: Methods are detected by orphaned_impl, not data_dead_end
+    let orphaned_entities: Vec<&str> = diagnostics
         .iter()
-        .filter(|d| d.pattern == "data_dead_end")
+        .filter(|d| d.pattern == "orphaned_impl")
         .map(|d| d.entity.as_str())
         .collect();
 
     // unused_helper is never called by anything — must still be detected
-    let has_unused = dead_end_entities
+    let has_unused = orphaned_entities
         .iter()
         .any(|entity| entity.contains("unused_helper"));
     assert!(
         has_unused,
-        "unused_helper() must still be detected as data_dead_end (true positive). \
-         Dead ends found: {:?}",
-        dead_end_entities
+        "unused_helper() must still be detected as orphaned_impl (true positive). \
+         Orphaned methods found: {:?}",
+        orphaned_entities
     );
 }
 

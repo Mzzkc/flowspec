@@ -39,10 +39,12 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
             continue;
         }
 
-        // Pattern-specific: skip structural container kinds
+        // Pattern-specific: skip structural container kinds and Methods
+        // (Methods have a dedicated orphaned_implementation pattern)
         if symbol.kind == SymbolKind::Module
             || symbol.kind == SymbolKind::Class
             || symbol.kind == SymbolKind::Struct
+            || symbol.kind == SymbolKind::Method
         {
             continue;
         }

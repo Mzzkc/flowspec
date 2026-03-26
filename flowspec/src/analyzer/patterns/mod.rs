@@ -1775,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn test_orphaned_implementation_and_data_dead_end_both_fire_on_method() {
+    fn test_orphaned_implementation_and_data_dead_end_dedup_on_method() {
         let mut graph = Graph::new();
 
         let _m = graph.add_symbol(make_symbol(
@@ -1793,19 +1793,13 @@ mod tests {
             orphan_results
                 .iter()
                 .any(|d| d.pattern == DiagnosticPattern::OrphanedImplementation),
-            "orphaned_implementation should fire"
+            "orphaned_implementation should fire on Method"
         );
+        // After C20 dedup: Methods are excluded from data_dead_end to avoid
+        // 100% overlap with orphaned_impl (Methods have dedicated pattern)
         assert!(
-            dead_end_results
-                .iter()
-                .any(|d| d.pattern == DiagnosticPattern::DataDeadEnd),
-            "data_dead_end should ALSO fire on the same method"
-        );
-
-        // Different pattern enum values
-        assert_ne!(
-            orphan_results[0].pattern, dead_end_results[0].pattern,
-            "Patterns must be different enum values"
+            dead_end_results.is_empty(),
+            "data_dead_end must NOT fire on Method after dedup (dedicated orphaned_impl pattern)"
         );
     }
 
