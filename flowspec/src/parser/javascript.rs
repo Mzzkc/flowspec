@@ -1482,7 +1482,7 @@ fn strip_keyword_after(line: &str, kw1: &str, kw2: &str) -> String {
             if tail.is_empty() || tail.starts_with(|c: char| c.is_whitespace() || c == '{') {
                 let mut r = String::with_capacity(line.len());
                 r.push_str(&line[..after + ws]);
-                r.extend(std::iter::repeat(' ').take(kw2.len()));
+                r.extend(std::iter::repeat_n(' ', kw2.len()));
                 r.push_str(tail);
                 return r;
             }
@@ -1502,7 +1502,7 @@ fn strip_leading_keyword(line: &str, keyword: &str) -> String {
                 let ke = ks + keyword.len();
                 let mut r = String::with_capacity(line.len());
                 r.push_str(&line[..ks]);
-                r.extend(std::iter::repeat(' ').take(keyword.len()));
+                r.extend(std::iter::repeat_n(' ', keyword.len()));
                 r.push_str(&line[ke..]);
                 return r;
             }
@@ -1513,7 +1513,7 @@ fn strip_leading_keyword(line: &str, keyword: &str) -> String {
             let ke = indent + keyword.len();
             let mut r = String::with_capacity(line.len());
             r.push_str(&line[..indent]);
-            r.extend(std::iter::repeat(' ').take(keyword.len()));
+            r.extend(std::iter::repeat_n(' ', keyword.len()));
             r.push_str(&line[ke..]);
             return r;
         }
@@ -1529,7 +1529,7 @@ fn strip_leading_modifier(line: &str, keyword: &str) -> String {
             let ke = indent + keyword.len();
             let mut r = String::with_capacity(line.len());
             r.push_str(&line[..indent]);
-            r.extend(std::iter::repeat(' ').take(keyword.len()));
+            r.extend(std::iter::repeat_n(' ', keyword.len()));
             r.push_str(&line[ke..]);
             return r;
         }
@@ -1566,7 +1566,7 @@ fn strip_generics(line: &str) -> String {
                 }
                 i += 1;
             }
-            out.extend(std::iter::repeat(b' ').take(i - start));
+            out.extend(std::iter::repeat_n(b' ', i - start));
         } else {
             out.push(b[i]);
             i += 1;
@@ -1626,7 +1626,7 @@ fn strip_type_annotations(line: &str) -> String {
                         let cp = i + co;
                         let ep = find_annotation_end(&bytes[cp..], false);
                         let se = cp + ep;
-                        out.extend(std::iter::repeat(b' ').take(se - i));
+                        out.extend(std::iter::repeat_n(b' ', se - i));
                         i = se;
                     }
                 }
@@ -1634,7 +1634,7 @@ fn strip_type_annotations(line: &str) -> String {
             b':' if pd > 0 => {
                 if is_param_type_colon(bytes, i) {
                     let ep = find_annotation_end(&bytes[i..], true);
-                    out.extend(std::iter::repeat(b' ').take(ep));
+                    out.extend(std::iter::repeat_n(b' ', ep));
                     i += ep;
                 } else {
                     out.push(c);

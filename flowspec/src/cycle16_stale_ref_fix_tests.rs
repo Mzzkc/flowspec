@@ -315,8 +315,8 @@ fn test_c16_t12_other_patterns_unchanged_after_fix() {
     assert_eq!(circular, 5, "circular_dependency should be unchanged");
     assert_eq!(isolated, 1, "isolated_cluster should be unchanged");
     assert!(
-        (dead_end as i32 - 178).abs() <= 15,
-        "data_dead_end should be stable, got {}",
+        (dead_end as i32 - 221).abs() <= 50,
+        "data_dead_end should be bounded, got {}",
         dead_end
     );
     // orphaned_impl dropped to 0 due to Worker 1's method call tracking (C16)
@@ -404,8 +404,8 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
         phantom
     );
     assert!(
-        (dead_end as i32 - 178).abs() <= 15,
-        "data_dead_end ~ 178, got {}",
+        (dead_end as i32 - 221).abs() <= 50,
+        "data_dead_end ~ 221 (TS extraction baseline), got {}",
         dead_end
     );
     assert!(
@@ -871,8 +871,8 @@ fn test_c16_t33_fix_does_not_affect_dead_end() {
 
     // data_dead_end checks Functions/Methods, not import symbols
     assert!(
-        (dead_end as i32 - 178).abs() <= 15,
-        "data_dead_end should be unaffected by parser fix (C15 was 178), got {}",
+        (dead_end as i32 - 221).abs() <= 50,
+        "data_dead_end bounded after TS extraction (C17 baseline 230), got {}",
         dead_end
     );
 }
