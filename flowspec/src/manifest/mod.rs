@@ -1,9 +1,15 @@
-//! Manifest output formatting — OutputFormatter trait and implementations.
+//! Manifest output formatting — the final stage of the Flowspec pipeline.
 //!
 //! The manifest module owns the output contract: what format the analysis
-//! results take when written to stdout or a file. OutputFormatter is one of
-//! two sanctioned traits (per conventions.yaml) — one implementation per
-//! output format (YAML, JSON, SARIF, summary).
+//! results take when written to stdout or a file. [`OutputFormatter`] is one
+//! of two sanctioned traits (per `conventions.yaml`) — one implementation per
+//! output format (YAML, JSON, SARIF, summary). The graph is the source of
+//! truth; manifests are exports of it.
+//!
+//! **Pipeline position:** Parser → Graph → Analyzer → Manifest.
+//! Input comes from [`crate::analyzer`] diagnostics and [`crate::graph::Graph`]
+//! queries. Output is validated by [`validate_manifest_size`] to enforce the
+//! 10x source-size constraint (with a 20KB floor for small projects).
 
 /// JSON output formatter.
 pub mod json;

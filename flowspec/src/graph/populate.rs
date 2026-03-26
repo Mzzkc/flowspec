@@ -327,7 +327,12 @@ fn insert_references(
                     });
 
                 // Resolve to: find the import symbol with matching name
-                new_ref.to = resolve_import_by_name(root_name, symbol_id_map, symbols);
+                new_ref.to = resolve_import_by_name(
+                    root_name,
+                    symbol_id_map,
+                    symbols,
+                    reference.location.line,
+                );
             }
             _ => {
                 // Non-call references: keep existing behavior
@@ -489,19 +494,56 @@ fn resolve_callee(
 /// Resolves an import symbol by name for attribute access references.
 ///
 /// Searches the symbol list for an import symbol (annotated with `"import"`) whose
-/// name matches the given root identifier. Returns `SymbolId::default()` if no match.
+/// name matches the given root identifier. When multiple imports share the same name
+/// (e.g., test functions each importing `use std::path::Path`), returns the one
+/// closest to `ref_line` (nearest preceding import by line number). Falls back to
+/// any matching import if none precedes the reference. Returns `SymbolId::default()`
+/// if no match.
 pub(crate) fn resolve_import_by_name(
     root_name: &str,
     symbol_id_map: &[(usize, SymbolId)],
     symbols: &[Symbol],
+    ref_line: u32,
 ) -> SymbolId {
+    let mut best_id = SymbolId::default();
+    let mut best_line: Option<u32> = None;
+    let mut any_match_id = SymbolId::default();
+
     for &(idx, real_id) in symbol_id_map {
         let sym = &symbols[idx];
         if sym.name == root_name && sym.annotations.contains(&"import".to_string()) {
-            return real_id;
+            let sym_line = sym.location.line;
+
+            // Track any match as fallback (for when no import precedes the reference)
+            if any_match_id == SymbolId::default() {
+                any_match_id = real_id;
+            }
+
+            // Only consider imports at or before the reference line
+            if sym_line <= ref_line {
+                match best_line {
+                    Some(prev_line) if sym_line > prev_line => {
+                        // Closer preceding import found
+                        best_id = real_id;
+                        best_line = Some(sym_line);
+                    }
+                    None => {
+                        // First preceding import
+                        best_id = real_id;
+                        best_line = Some(sym_line);
+                    }
+                    _ => {} // Keep existing best (farther or equal)
+                }
+            }
         }
     }
-    SymbolId::default()
+
+    if best_id != SymbolId::default() {
+        best_id
+    } else {
+        // No preceding import found — fall back to any matching import
+        any_match_id
+    }
 }
 
 /// Inserts boundaries with scope ID remapping.

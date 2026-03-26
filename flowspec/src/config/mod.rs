@@ -1,8 +1,9 @@
 //! Configuration loading and validation.
 //!
-//! Placeholder for cycle 1 — loads config from `.flowspec/config.yaml`
-//! if it exists, otherwise uses defaults. The config module will grow
-//! to support language-specific settings and layer violation rules.
+//! Loads project configuration from `.flowspec/config.yaml` if it exists,
+//! otherwise uses defaults. Supports explicit config path override via
+//! the `--config` CLI flag. Currently handles language selection; layer
+//! violation rules and other analysis settings are planned for v0.2.
 
 use std::path::{Path, PathBuf};
 

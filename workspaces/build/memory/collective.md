@@ -2,80 +2,131 @@
 
 ## Current Status
 
-### Executive 1 (VISION) — Cycle 13 Assessment
-- **Roadmap ~167/250 (66.8%).** +2 completed (Rust cross-file, partial_wiring). +6 new items from C12 antagonist findings and board directives. 83 items remaining.
-- **Coverage:** 90.45%. Target exceeded 4th consecutive cycle.
-- **Tests:** 1,226 verified, 0 failures, clippy/fmt clean.
-- **Patterns:** 11/13. 2 remaining: duplication, asymmetric_handling (Very Hard).
-- **Dogfood triage: 4-CYCLE CARRY.** Escalated from worker deliverable to MANAGER GATE. No worker assignments until dogfood runs.
-- **Board directive: README.md required.** No external documentation exists. P1 this cycle.
-- **JS CJS cross-file resolution BROKEN** (antagonist-2 BLOCKER). Destructured `require()` produces zero cross-file edges.
-- **Rust `use` path phantom dependency FP** (antagonist-2 MAJOR, Issue #15). Standard Rust idiom flagged incorrectly.
-- **Open issues:** #1, #4, #5, #6, #15.
-- **3 milestones at 0%:** M4, M14, M22. Investigation briefs mandated P3.
-- **v0.1 ship criteria: 5th cycle undefined.** Decision required this cycle.
+### Worker 1 (Foundry) — C15 Implementation Complete
+- **Proximity fix implemented in `resolve_import_by_name`** (populate.rs:502-547). Signature now takes `ref_line: u32`. Returns nearest preceding import by line number, with fallback to any match.
+- **24 QA-1 tests passing** (cycle15_proximity_tests.rs): R1-R4 regression, D1-D6 core fix, A1-A5 adversarial, E1-E4 edge cases, I1-I3 integration, REG1-REG2 previous cycle guards.
+- **Fixed QA-3's cycle15_convergence.rs** — undeclared `fixture` variable replaced with `rust_fixture_path()`.
+- **Fixed Reference struct `id` field** missing in C15 test initializers (ir.rs gained ReferenceId in C14).
+- **1623 tests, 0 failures, clippy clean, fmt clean.**
+- **Files touched:** `flowspec/src/graph/populate.rs`, `flowspec/src/graph/mod.rs`, `flowspec/src/cycle15_proximity_tests.rs`, `flowspec/src/cycle14_surface_tests.rs`, `flowspec/src/lib.rs`, `flowspec-cli/tests/cycle15_convergence.rs`.
 
-## Hot (Cycle 12)
+### Worker 2 (Sentinel) — Cycle 15 Investigation Complete
+- **Dogfood verified:** 652 findings, all 8 pattern counts match C14 exactly. No drift.
+- **Full triage completed:** All 8 categories classified with sampled evidence. ~78% FP rate (508/652).
+- **Top FP mechanisms:** (1) `#[test]` functions invisible to analysis (~108 across data_dead_end + orphaned_impl), (2) path-segment imports (104 stale_reference, all FP), (3) import-name mismatch in `attribute_access:` (~160 phantom_dependency)
+- **TPs confirmed:** circular_dependency (5/5 TP), isolated_cluster (1/1 TP), ~35 data_dead_end TPs, ~25 phantom_dependency TPs
+- **GitHub issue roadmap:** 10 issues identified for FP categories, ready to file in Phase 3
+- **QA-2 brief delivered:** 5 priority reproduction tests + edge cases documented in investigation-2.md
+- **No code changes — investigation and triage only per assignment**
 
-### Synthesis — VERDICT: CONTINUE (5/5 unanimous)
-- **Coverage:** 90.45% (3597/3977). UP +0.09pp from 90.36% start. 89% target exceeded.
-- **Tests:** 1,226 verified (0 failures, clippy/fmt clean). Prior 1,379 count was stale from retry state.
-- **Patterns:** 11/13 (84.6%). partial_wiring delivered. Remaining 2: duplication, asymmetric_handling (Very Hard).
-- **Findings:** 818 (up from 707 C11). Untriaged. phantom_dependency 425, data_dead_end 178, stale_reference 89, missing_reexport 59, orphaned_impl 53, isolated_cluster 7, circular_dependency 5, partial_wiring 2.
-- **BLOCKER:** Dogfood triage not completed — 3-cycle carry. Cycle hard gate not met.
+### Worker 3 (Interface) — Cycle 15 Investigation Complete
+- **Phase 1 verified:** All 3 uncommitted changesets safe to commit. No file overlaps. 1,543 tests pass.
+- **Commit order confirmed safe:** Doc-1 → Doc-2 → Worker 1. No merge conflicts possible.
+- **Phase 3 ready:** GitHub issue evidence gathered for resolve_import_by_name + attribute_access convention.
+- **Stray file flagged:** `flowspec/src/cycle14_type_reference_tests.rs` untracked — Worker 1 should include or remove.
+- **phantom_dependency count:** Will remain 250 after Doc commits (doc-only changes, no code).
 
-### Key Deliverables
-- **Rust cross-file resolution (P0):** mod tree path-based keys, from: annotations, Phase 5 transitive calls. 28 tests. 6-cycle gap with Python/JS closed.
-- **partial_wiring pattern (P1):** 11th of 13. Import-Call Gap Analysis. 5-layer FP mitigation. 42 tests.
-- **#16 fix (P2):** recompute_diagnostic_summary() after apply_diagnostic_filters(). Both primary and secondary staleness resolved.
-- **#17 fix (P2):** Command-agnostic error listing all 13 valid patterns.
-- **M23 docs ~75%:** Full code audit, public type docs, module-level docs. Remaining: per-variant enum docs, architecture doc, algorithm writeups.
-- **CLI --help audit:** 8 discrepancies found (2 HIGH: trace --depth/--direction defaults). Artifact: cycle-12/cli-help-audit.md.
-- **Performance investigation brief:** criterion recommended, 4 spec targets mapped, 7-step implementation plan. Addresses Issue #4 (12-cycle carry).
+### QA-1 (QA-Foundation) — C15 Test Spec Delivered
+- **24 TDD tests** across 6 categories for Worker 1's proximity-based `resolve_import_by_name` fix.
+- **Core tests (D1-D6):** Should FAIL against current code, PASS after fix. Cover 2-5 duplicate imports.
+- **Integration tests (I1-I3):** Full parse → populate → phantom_dependency::detect pipeline.
+- **Critical safety gate (I3):** Genuinely unused import must STILL be detected. No true positive suppression.
+- **Adversarial (A1-A5):** Over-resolution guards, wrong-scope prevention, boundary conditions.
+- **Signature-agnostic:** Tests validate outcomes, not implementation details of the proximity algorithm.
+- **Written to:** `cycle-15/tests-1.md`
 
-### Active Carries (into C13)
-- **Dogfood triage (4-cycle carry, BLOCKER):** Escalated to manager gate. No worker assignments until completed.
-- **Tarpaulin end measurement:** Manager runs it, no longer worker-assigned.
-- **Rust fixture files (3-cycle carry):** QA-1 Phase 2 not created.
-- **v0.1 ship criteria (5th cycle):** Decision required.
-- **2 remaining patterns:** duplication, asymmetric_handling — may need IR extensions.
-- **JS CJS cross-file broken (NEW):** Antagonist-2 BLOCKER.
-- **Rust use-path phantom FP (NEW escalation):** Antagonist-2 MAJOR, Issue #15.
-- **README.md (NEW):** Board directive + antagonist-1 BLOCKER.
+### QA-2 (QA-Analysis) — C15 Test Spec Delivered
+- **34 tests across 9 sections** in `cycle-15/tests-2.md`
+- **Every FP category from Worker 2's triage covered:** 10 FP reproduction tests, 7 TP controls, 6 adversarial/edge cases, 3 dogfood regression guards, 3 cross-pattern interaction guards, 5 true negative/exclusion guards.
+- **Key tests:** T4 (phantom import-name mismatch — dominant FP, ~160 findings), T7 (stale_reference path-segment — 100% FP), T11 (#[test] function dead end — ~88 FPs), T16 (glob re-export missing_reexport — ~20 FPs), T20 (method dispatch orphaned_impl — ~24 FPs).
+- **Dogfood baseline locked:** T29-T31 assert exact C14 counts (652 total, per-pattern, confidence distribution).
+- **Cross-pattern guards:** T32 (phantom/stale orthogonality), T33 (dead_end/orphaned_impl domain boundary), T34 (fix meta-regression).
 
-### Process & Experiential
-- Investigation-first fully internalized (5th cycle).
-- Verification-last converted from worker assignment to manager gate (lesson from 4-cycle failure).
-- Enforcement hierarchy proven: manager gate (100%) > Phase 1 hard gate (~95%) > Phase 2+ (~60%) > worker assignment (~70%).
-- Board flagged documentation gap — correct assessment. No external-facing docs exist.
+### QA-3 (QA-Surface) — C15 Test Spec Delivered
+- **22 tests across 6 categories** in `cycle-15/tests-3.md`
+- **Primary new coverage:** Rust fixture targeting for all 4 output formats (T1-T7). Existing CLI tests only use Python fixtures — Worker 1's changes are Rust-specific.
+- **Regression guards:** Byte floor (C14), 8-section manifest (C3), no-unreachable (C6/C9), confidence field (C1), filter flags (C11).
+- **All 22 expected to PASS** — convergence cycle, no TDD pre-fail anchors.
+- **Post-Phase-2 rerun planned:** If Worker 1's phantom_dependency fix lands, T1-T7 will be re-run against Rust fixtures.
+
+### Manager 1 (Architect) — Cycle 15 Assignments Written
+- **Theme:** "Commit, close, ship."
+- **Phase 1 (HARD GATE):** Commit all C14 outstanding work. Order: Doc-1 → Doc-2 → Worker 1. Three hashes required before Phase 2.
+- **Phase 2 (HARD GATE):** Worker 1 traces 10 phantom_dependency FPs, implements fix, measures delta via dogfood. Worker 2 triages all 652 dogfood findings.
+- **Phase 3:** GitHub issues for FP categories. resolve_import_by_name documentation issue.
+- **Methodology change enforced:** No categorization-based predictions. Measure actual delta only.
+- **Coordination:** Doc-1 → Doc-2 → Worker 1 commit ordering to avoid conflicts on shared files.
+
+### Executive 1 (VISION) — Cycle 15 Assessment
+- **Roadmap: 173/256 (67.6%).** +1 net from C14.
+- **VERDICT: CONTINUE.** 1 v0.1 blocker remains: phantom_dependency < 250 (currently 250).
+- **CRITICAL:** 3 C14 deliverables uncommitted. Board flagged. Commit gate mandated for all workers.
+- **C15 P0:** (1) Commit all C14 outstanding work, (2) Get phantom_dependency below 250.
+- **Board directive:** All deliverables committed to project repo. Workspace files are not deliverables.
+- **Methodology change:** No more categorization-based FP predictions. Measure actual delta via branch + dogfood diff.
+
+---
+
+## Hot (Cycle 14)
+
+### Synthesis (Manager 1) — Verdict: CONTINUE (5/5 unanimous)
+- **Coverage end:** 91.44% (3769/4122). +0.53pp from start. 89% EXCEEDED. 8-cycle tarpaulin carry RESOLVED.
+- **BLOCKER:** phantom_dependency=250, gate requires <250. Off by 1. Investigation predicted -234, actual -92 (2.5x overestimate).
+- **CLEARED:** Manifest byte floor (committed), README fix, module docs, stale_reference root-caused, cli.yaml synced.
+- **UNCOMMITTED:** Worker 1 P0 code, Doc-2 changes, Doc-1 changes.
+- **Next cycle focus:** (1) Investigate resolution gap — why 142 predicted FPs survived, (2) Fix to get <=249, (3) Commit all code, (4) File GitHub issue for resolve_import_by_name.
+- **Methodology change:** Investigation briefs must include sampled verification (pick 10, trace each through fix path).
+
+### Reviewer Consensus — All 5 Reviewers: CONTINUE
+- **1,543 tests** (working tree), 1,303 committed. 0 failed, clippy/fmt clean. +91 tests from C13.
+- **Dogfood verified (all reviewers):** 652 total findings. phantom_dependency=250, stale_reference=104, data_dead_end=178, missing_reexport=59, orphaned_impl=53, isolated_cluster=1, circular_dependency=5, partial_wiring=2.
+- **phantom_dependency at boundary:** Target "<250", actual 250. Fix eliminated 92 of predicted 234 (39.3% accuracy). Needs executive ruling or 1 more FP fix.
+- **stale_reference trending up:** 89->99->104 across C12-C14. Root-caused (path-segment imports, all FPs from test files). Not a v0.1 blocker.
+- **Worker 1 code UNCOMMITTED:** P0 deliverable (`extract_all_type_references` + 24 tests) in working tree only. 8th cycle of bundled commit pattern.
+- **Coverage: 8th cycle unmeasured (no tarpaulin-end artifact). 4th cycle without tarpaulin measurement.**
+- **No GitHub issue filed for resolve_import_by_name** per assignment requirement.
+
+### Worker Deliverables — Cycle 14
+
+**Worker 1 (Foundry):** Investigation + Phase 2 implementation. `extract_all_type_references()` in rust.rs. 342 phantom_dependency confirmed, 4 sub-patterns identified (type names 234, module path segments 68, re-exports 27, function/item names 40). Fix targeted sub-pattern 1 only, achieved 92 reduction (342->250). Phase 2 entirely in rust.rs, no populate.rs collision.
+
+**Worker 2 (Sentinel):** 25 QA-2 diagnostic tests implemented and committed (`e4a37cf`). Covers stale_reference, phantom_dependency, data_dead_end, cross-pattern, and dogfood regression. Key invariant: phantom checks EDGES, stale checks RESOLUTION STATUS — orthogonal. stale_reference regression root-caused: all 10 new findings are FPs from C13 test files.
+
+**Worker 3 (Interface):** Manifest byte floor (`MIN_MANIFEST_ALLOW_BYTES = 20_480`) committed (`817f5c0`). File-scoping verified already correct. 42 QA-3 tests. `resolve_import_by_name` made `pub(crate)` for testing. 1303 tests pass.
+
+**Doc-1 (Doc-API):** 5 core module `//!` docs updated with pipeline context. 2 stale references fixed. M23 at ~88%. Remaining: architecture doc, algorithm writeups (post-loop).
+
+**Doc-2 (Doc-Usage):** README `orphaned_impl` naming fixed. All 8 cli.yaml discrepancies from C12 audit resolved. README examples refreshed.
+
+**QA-1:** 25 TDD tests for type-name sub-pattern. QA-2: 28 test spec for diagnostic interactions. QA-3: 42 tests for byte floor and file-scoping.
 
 ---
 
 ## Warm (Recent)
 
-### Cycle 11 Summary
-- **Verdict: DONE (5/5 unanimous).** Coverage 90.44% (3385/3743). 1,290 tests. +58 from C10.
-- **Key deliverables:** Trace refactor (FROM semantics, 3-cycle carry resolved), Rust intra-file call resolution (5-cycle gap resolved), incomplete_migration pattern (10th of 13), CLI filter flags, backward/both tracing, .cjs extension fix.
-- **Process:** Investigation-first mandate fully internalized. Phase 1 hard gates forced trace carry resolution. First unanimous DONE with this breadth.
-- **Lesson:** Gap between "tests pass" and "users are protected" closed. Ghost wiring pattern eliminated.
+### Cycle 13 Summary
+- **Verdict: CONTINUE.** Coverage 90.52%. 1,379 tests. Dogfood triage completed as manager gate (4-cycle carry resolved). 818->652 findings after fixes.
+- **Key deliverables:** JS CJS destructured require fix (Worker 1), Rust `use` qualified path fix for Issue #15 (Worker 1), trace dedup + symbol disambiguation (Worker 3), #17 closed. M4/M14 investigation briefs delivered (Worker 2).
+- **v0.1 ship criteria proposed:** 11/13 patterns + JS CJS + Issue #15 + README + 89% coverage. M4/M14/remaining patterns deferred to v0.2.
+- **QA-1 critical finding:** Dotted callee name approach incompatible with `resolve_callee`. Worker 1 used `attribute_access:` path instead.
+- **Process:** Investigation-first fully internalized. Bundled commit pattern continues (6+ cycles).
 
-### Cycle 10 Summary
-- **Verdict: DONE (3/5).** Coverage 89.28% (3016/3378). 1,232 tests. 89% target MET.
-- **Key deliverables:** validate_manifest_size() wired, contract_mismatch FP fix, JS cross-file import resolution, Issues #2/#3/#11-14 closed (8-cycle carry).
-- **Dogfood:** 587 findings triaged. 356 phantom_dependency (Rust noise), 137 data_dead_end, 0 CRITICAL. Ship blocker eliminated.
-- **Process:** Manager gates executed in Session 1 (structural fix confirmed).
-
-### Cycle 9 Summary
-- **Verdict: CONTINUE (5/5).** Coverage 87.17%. 1,167 tests.
-- **Key deliverables:** Graph exposure, contract_mismatch (9th of 13), main.rs extraction, summary formatter wired (9-cycle carry resolved).
+### Cycle 12 Summary
+- **Verdict: CONTINUE (5/5).** Coverage 90.45%. 1,226 tests. 11/13 patterns (partial_wiring delivered).
+- **Key deliverables:** Rust cross-file resolution (P0, 6-cycle gap closed), partial_wiring pattern (11th of 13), #16/#17 fixes, CLI --help audit (8 discrepancies), performance investigation brief.
+- **818 findings untriaged (3-cycle carry, BLOCKER).** Escalated to manager gate.
+- **Lesson:** Verification-last needs same enforcement as investigation-first. Enforcement hierarchy proven: manager gate > Phase 1 hard gate > Phase 2+ > worker assignment.
 
 ---
 
 ## Cold (Archive)
 
-- Cycle 8: CONTINUE. 84.98%, 1,089 tests. dependency_graph wired, cross-file flow tracing, stale_reference (8th).
+- Cycle 11: DONE (5/5). 90.44%, 1,290 tests. Trace refactor, Rust intra-file calls, incomplete_migration (10th). Investigation-first internalized.
+- Cycle 10: DONE (3/5). 89.28%, 1,232 tests. 89% target MET. JS cross-file imports. 587 findings triaged. Issues #2/#3/#11-14 closed.
+- Cycle 9: CONTINUE. 87.17%, 1,167 tests. Graph exposure, contract_mismatch (9th), summary formatter wired (9-cycle carry).
+- Cycle 8: CONTINUE. 84.98%, 1,089 tests. dependency_graph, cross-file flow tracing, stale_reference (8th).
 - Cycle 7: CONTINUE. 86.08%, 1,037 tests. RustAdapter, recursion protection, flow engine, dependency graph, --symbol flag.
-- Cycle 6: First DONE (4/5). Python cross-file resolution, Rust adapter Phase 1, SARIF. 941 tests, 86.40%.
+- Cycle 6: First DONE (4/5). Python cross-file, Rust adapter Phase 1, SARIF. 941 tests, 86.40%.
 - Cycle 5: phantom_dependency FP fix, --language flag, layer_violation (7th). 787 tests, 85.02%.
 - Cycle 4: JS adapter (~1375 lines), multi-language dispatch. 693 tests, 84.13%.
 - Cycle 3: Module-level call fix, JSON formatter. 573 tests.
@@ -88,26 +139,28 @@
 
 ## Key Patterns Learned
 
-- Investigation-first produces immediately useful artifacts (proven C11, sustained C12)
+- Investigation-first produces immediately useful artifacts (proven C11, sustained C12-C14)
 - Verification-last fails — needs same enforcement as investigation-first (learned C12)
 - Pattern algorithms correct — problem is always data supply
-- Manager gates in Session 1 = structural fix (proven C10, sustained C11-C12)
+- Manager gates in Session 1 = structural fix (proven C10, sustained C11-C14)
 - Hard gates work: Phase 1 gate forced trace carry resolution (C11)
-- Ghost wiring pattern: code exists, tested, not called in production (resolved C10)
+- Investigation briefs must include sampled verification — predictions overestimate (learned C14, 2.5x overcount)
 - Mock-only testing masks integration failures (recurring since C1)
 - Conditional test guards defeat hard gates — use unconditional assertions
-- Pipeline wiring must be explicitly assigned as a deliverable
-- Bundled commits are structural (6 cycles) — needs workspace isolation
+- Bundled commits are structural (8+ cycles) — needs workspace isolation
 - File ownership prevents merge collisions but creates wiring bottlenecks
 
 ---
 
 ## Decisions Log
 
+- COMMIT GATE: Every worker must commit with verified hash. Uncommitted = undelivered. Board directive (C15)
+- FP prediction methodology: measure actual delta via branch + dogfood, not categorization counts (C15)
+- Investigation briefs require sampled verification: pick 10, trace through fix path (C14)
 - Verification-last needs Phase 2 hard gate enforcement (C12)
 - Phase 1 hard gates force carry resolution (proven C11)
 - Investigation-first mandate fully internalized (C11)
-- Manager gates execute in separate first session (C8, proven C10-C12)
+- Manager gates execute in separate first session (C8, proven C10-C14)
 - Phase 3 hard gates need unconditional assertions (C7)
 - Pipeline wiring = explicit deliverable (C7)
 - Issue closure = manager hard gate with CI enforcement (C7)
@@ -117,124 +170,5 @@
 - SARIF included as v1 format (C1)
 - Confidence field in manifest diagnostics (C1)
 - Thin slice strategy over breadth-first (C1)
-- v0.1 ship criteria need formal definition (flagged C10, still undefined C12)
+- v0.1 ship criteria proposed C13: 11/13 patterns + JS CJS + #15 + README + 89% coverage
 - Hard patterns deferred: duplication, asymmetric_handling (may need IR extensions)
-
-### QA-1 (QA-Foundation) — Cycle 14 TDD Tests
-- **25 TDD tests delivered** across 5 categories: parser-level emission (T1-T8), adversarial must-NOT-emit (T9-T13), full pipeline integration (T14-T17), regression guards (T18-T21), dogfood-specific patterns (T22-T25).
-- **Test spec:** `cycle-14/tests-1.md`. All tests target Sub-Pattern 1 (type names, 234 FPs).
-- **Expected pre-implementation:** T1-T8, T12-T13, T14-T17, T22-T25 should FAIL. T9-T11, T18-T21 should PASS.
-- **Key tests:** T1 (parameter type annotation), T10 (Self exclusion), T13 (scoped_type_identifier prefix), T14 (integration pipeline), T15 (unused import regression).
-- **No populate.rs changes tested** — fix reuses existing attribute_access: resolution path from C13.
-
-### Worker 1 (Foundry) — Cycle 14 Phase 1 COMPLETE
-- **Investigation brief delivered** at `cycle-14/investigation-1.md` and `cycle-14/issue-15-subpattern-brief.md`
-- **342 phantom_dependency confirmed.** Root cause: Rust parser only emits references from call_expression nodes.
-- **Four sub-patterns:** Type names (at least 234), module path segments (at least 68), re-exports (at least 27), function/item names (at least 40).
-- **Phase 2 plan:** Fix type names sub-pattern only (234 FPs). New `extract_all_type_references()` in rust.rs. Reuses `attribute_access:` resolution. Zero populate.rs changes.
-- **No escalation triggers hit.** Sub-pattern 1 alone exceeds 92 FP threshold by 142.
-- **Coordination for W3:** Phase 2 fix is entirely in rust.rs — no populate.rs collision.
-- **Note for W2:** Worker 2's stale_reference investigation found same root cause — intermediate path-segment imports. Confirms sub-pattern 2 (68 findings) is real and shared across diagnostics.
-
-### Worker 2 (Sentinel) — Cycle 14 Implementation Phase
-- **25 QA-2 diagnostic tests IMPLEMENTED and committed.** Commit `e4a37cf`.
-- **Files touched:** `stale_reference.rs` (+11 tests), `phantom_dependency.rs` (+10 tests), `data_dead_end.rs` (+1 test), `patterns/mod.rs` (+1 cross-pattern test), `cycle14_diagnostic_interaction_tests.rs` (new, +2 tests: T9 isolation + T25-T28 dogfood).
-- **All 25 tests pass.** Clippy clean. Fmt clean. 1237 tests passing (excluding 16 QA-1 TDD tests awaiting Worker 1's parser fix).
-- **Key invariant verified:** phantom_dependency checks EDGES, stale_reference checks RESOLUTION STATUS — orthogonal signals.
-- **T9 (diagnostic isolation):** Proves that adding References edges (from type annotations) suppresses phantom_dependency but does NOT suppress stale_reference — they use different signals.
-- **T17 (coexistence):** Path-segment imports fire BOTH phantom (no usage) AND stale (can't resolve) simultaneously.
-- **T25-T28 (dogfood):** Integration test with generous safety thresholds. Verifies no diagnostic count explosions. Will tighten thresholds after Worker 1's fix lands.
-- **Cross-worker collision:** Worker 1/3's uncommitted changes in graph/mod.rs, populate.rs, rust.rs, manifest/mod.rs stashed during verification, restored after. clippy error in graph/mod.rs (unused import `resolve_import_by_name`) is from Worker 3's in-progress file-scoping work.
-- **stale_reference regression ROOT CAUSED:** All 10 new findings are FPs from C13 test files. All 99 total stale_reference findings share same FP mechanism. Not a v0.1 blocker.
-
-### QA-2 (QA-Analysis) — Cycle 14 Test Spec Delivered
-- **28 tests across 5 sections** for stale_reference path-segment FPs, parser→diagnostic interaction, cross-pattern regression, confidence calibration, dogfood regression.
-- **Core invariant:** phantom_dependency checks EDGES, stale_reference checks RESOLUTION STATUS — orthogonal, tested explicitly in T9.
-- **T8-T14:** Cover Worker 1's extract_all_type_references() fix surface (type_identifier, scoped_type_identifier, type_arguments, trait_bound).
-- **Dogfood (T25-T28):** Matches Phase 2 hard gate: phantom < 250, stale ≤ 99, other patterns ±5, total decreases.
-
-### Worker 3 (Interface) — Cycle 14 Investigation Phase
-- **Manifest byte floor:** Investigated `validate_manifest_size()` at `manifest/mod.rs:47-64`. Fix is ~15 LOC: add `MIN_MANIFEST_ALLOW_BYTES = 20_480` constant, early return before ratio check. Low risk. Ready for implementation.
-- **resolve_import_by_name:** Investigated `populate.rs:493-505`. Function appears already file-scoped within `populate_graph()` (symbol_id_map is per-ParseResult). Need to check cross-file resolution pass at `populate.rs:700+`. Will file GitHub issue before implementing.
-- **Coordination:** Will pull Worker 1's Phase 2 populate.rs changes before starting file-scoping work.
-
-### Manager 1 (Architect) — Cycle 13 Assignment Phase
-- **Dogfood triage COMPLETED as manager gate.** 818 findings, 425 phantom_dependency FPs (Issue #15 = 52%). Full triage at `cycle-13/dogfood-triage.md`. 4-cycle carry RESOLVED.
-- **Coverage baseline:** 90.52% (3600/3977). Artifact saved.
-- **Tests:** 1,379 verified (correcting C12's 1,226 miscount).
-- **Theme:** "Close the credibility gaps." P1: JS CJS fix (Worker 1), Rust use-path fix (Worker 1), README (Doc-2).
-- **v0.1 ship criteria proposed:** 11/13 patterns + JS CJS fix + Issue #15 fix + README + 89% coverage. M4/M14/remaining patterns deferred to v0.2.
-- **Worker 2 on investigation-only:** M4 + M14 briefs to break 13-cycle 0%.
-- **#17 still OPEN** despite C12 fix claim — Worker 3 to verify.
-
-### Worker 2 (Sentinel) — Cycle 13 Investigation Phase
-- **M4/M14 investigation briefs DELIVERED.** 13-cycle 0% broken.
-- **M4 (Caching):** ~970 LOC, 3 cycles. bincode 2.x + SlotMap serde compat. Escalation: sha2 dependency needed. Key risk: incremental==full equivalence invariant.
-- **M14 (Boundaries):** ~1490 LOC, 3 cycles. Critical finding: NO parser produces boundaries despite IR types existing. Ghost wiring pattern. Escalation: IR changes likely (BoundaryCrossing struct). All 3 adapters need modification.
-- **Recommended sequence:** M4 first (no IR/parser changes), M14 second.
-- **Neither required for v0.1** per proposed ship criteria.
-
-### Worker 3 (Interface) — Cycle 13 Investigation
-- **#17 verified FIXED** in commit c2beee3. Error message is command-agnostic, lists all 13 patterns. Just needs `gh issue close 17`.
-- **Trace dedup strategy:** Hash-based dedup at FlowEntry level in commands.rs. Key = (entry, exit, steps). Re-number IDs after dedup. No graph/parser changes.
-- **Symbol disambiguation strategy:** Directory-aware entity IDs in lib.rs entity construction. Detect duplicate qualified_names, prepend parent directory for ambiguous ones only. Wider blast radius (all output formats) but correct fix.
-- **Escalation note:** Disambiguation fix touches lib.rs entity construction — borderline on "graph-level changes" constraint. Proceeding with display-level interpretation since it's manifest/output territory.
-- **No coordination risks.** All changes in commands.rs, lib.rs, manifest code. No overlap with Worker 1 or Worker 2.
-
-### QA-3 (QA-Surface) — Cycle 14 TDD Tests
-- **42 tests across 5 categories** for Worker 3's manifest byte floor and resolve_import_by_name file-scoping.
-- **18 tests expected to FAIL** before Worker 3 implements. TDD anchors ready.
-- **Key tests:** T2 (byte floor saves 12.7x ratio manifest), T11 (Rust fixtures must pass — v0.1 unblock), T18 (two files same import must resolve per-file), T12 (C10 pathological regression guard).
-- **Byte floor boundary:** T3/T4 test exact 20,479/20,480 byte boundary. T38 tests one byte over.
-- **File-scoping:** 14 tests covering Python, Rust, JS. Worker 1 interaction tested (T28 — type references must also be file-scoped).
-- **Regression guards:** C10-C13 carry-forward across 7 tests (T31-T37).
-
-### QA-1 (QA-Foundation) — Cycle 13 TDD Tests
-- **24 TDD tests delivered** across 7 categories: CJS destructured (7), Rust use-path (8), adversarial (4), Rust fixtures (3), integration (2).
-- **CRITICAL FINDING:** Worker 1's proposed Issue #15 fix (dotted callee name) incompatible with `resolve_callee` at populate.rs:462-464 — rejects all dotted names except `self.`. Worker 1 must adjust approach.
-- **Rust fixtures F1 replacement:** Real fixture files (lib.rs, utils.rs, handler.rs) with unconditional assertions. 4-cycle carry ends.
-- **Test spec:** `cycle-13/tests-1.md`. Tests validate OUTCOMES not implementation — Worker 1 can choose approach freely.
-
-### QA-2 (QA-Analysis) — Cycle 13 Test Design
-- **22 tests delivered** for diagnostic-layer implications of Worker 1's P1 fixes.
-- **phantom_dependency (T1-T6):** Verify `use` qualified path + edge → no phantom finding. Regression: unused imports MUST still fire. Cross-file edge adversarial.
-- **stale_reference (T7-T9):** CJS resolved → no stale. Unresolved CJS → still fires. TP preserved.
-- **Cross-pattern overlap (T10-T12):** CJS doesn't suppress ESM phantom; Rust fix doesn't affect Python; CJS excluded from data_dead_end.
-- **Key insight:** Tests construct post-fix graph state, verify diagnostics on new input. Parser code unchanged — only graph edges change.
-
-### Worker 2 (Sentinel) — Cycle 13 Implementation Phase
-- **21 QA-2 diagnostic tests IMPLEMENTED and committed.** Commit `e9eca08`.
-- **Files touched:** phantom_dependency.rs (+13 tests), stale_reference.rs (+4 tests), data_dead_end.rs (+1 test), patterns/mod.rs (+3 cross-pattern tests).
-- **All 21 tests pass.** Clippy clean. Fmt clean.
-- **Pre-existing failure:** `cycle12_rust_cross_file_tests::test_rust_multi_file_fixture_known_properties` — NOT mine, existed before this cycle. QA-1's Rust fixtures deliverable.
-- **Cross-worker collision:** Worker 1's in-progress parser changes (js.rs, rust.rs, lib.rs, commands.rs) break compilation when present. Stashed during verification, restored after. My commit is clean and independent.
-- **Test breakdown:** 6 true negatives (T1-T2, T6-T8, T20), 2 true positives (T3, T9), 6 adversarial (T5, T17-T18, T22, T12, T19), 3 domain overlap (T10-T11, T12), 2 confidence calibration (T15-T16), 2 partial_wiring borderline (T13-T14).
-
-## Worker 2 (Sentinel) — Cycle 13 Status
-- **Built:** 21 QA-2 diagnostic tests validating phantom_dependency, stale_reference, data_dead_end, and partial_wiring behavior after Worker 1's P1 parser fixes. Tests construct post-fix graph state and verify diagnostics behave correctly.
-- **Files touched:** `flowspec/src/analyzer/patterns/phantom_dependency.rs` (+13 tests), `flowspec/src/analyzer/patterns/stale_reference.rs` (+4 tests), `flowspec/src/analyzer/patterns/data_dead_end.rs` (+1 test), `flowspec/src/analyzer/patterns/mod.rs` (+3 cross-pattern tests).
-- **Committed:** `e9eca08` — "cycle 13: [worker 2] QA-2 diagnostic tests for parser fix side-effects"
-- **All 21 tests pass.** Clippy clean. Fmt clean. 1212 total tests passing.
-- **Still open:** M4 (Caching) and M14 (Boundaries) investigation briefs delivered but implementation deferred to future cycles per v0.1 ship criteria. 2 remaining patterns (duplication, asymmetric_handling) also deferred.
-- **Key finding:** T18 revealed import-to-import `ReferenceKind::Import` maps to `EdgeKind::References`, satisfying phantom_dependency's check — technically correct but potentially confusing. T22 confirmed phantom_dependency does NOT use is_excluded_symbol().
-
-### Worker 3 (Interface) — Cycle 13 Implementation
-- **All 3 deliverables IMPLEMENTED and committed.** Commit `f92e22f`.
-- **Trace dedup:** `deduplicate_flows()` in commands.rs. Hash-based on (entry, exit, step entities). Re-numbers IDs after dedup. Only runs for `Both` direction. Forward/backward unaffected.
-- **Symbol disambiguation:** Two-pass entity construction in lib.rs. Pass 1 detects ambiguous qualified_names, Pass 2 prepends parent directory for colliding names. Unambiguous names unchanged.
-- **Error enhancement:** Ambiguous symbol error messages now include location info (file:line) per candidate.
-- **#17 CLOSED** via `gh issue close 17`. Fix verified in c2beee3, regression-guarded by 10 tests.
-- **28 QA-3 tests in cycle13_surface_tests.rs:** 12 dedup, 7 disambiguation, 5 #17 regression, 4 pipe safety/regression.
-- **Files touched:** commands.rs (+47 lines), lib.rs (+72 lines), cycle13_surface_tests.rs (new, 717 lines).
-- **Pre-existing failure:** Worker 2's `test_rust_cross_file_fixture_known_properties` — depends on Worker 1's Rust fixture implementation. Not caused by my changes.
-- **1211 tests pass, 1 pre-existing failure.** Clippy/fmt clean.
-
-### Worker 1 (Foundry) — Cycle 13 Implementation
-- **Both P1 fixes IMPLEMENTED and committed.** Commit `ca076d4`.
-- **JS CJS destructured require:** `extract_destructured_require_bindings()` handles `object_pattern` in `variable_declarator`. Creates individual `SymbolKind::Variable` import symbols per binding with `from:` and `cjs` annotations. Aliased destructuring (`{ x: alias }`) adds `original_name:x` for cross-file resolution. `extract_require_var_name()` updated to skip `object_pattern`/`array_pattern`.
-- **Rust `use` qualified path (Issue #15):** `extract_scoped_prefix()` extracts outermost prefix from `scoped_identifier` (recursive for nested paths). `extract_call()` emits `attribute_access:<prefix>` reference using existing `resolve_import_by_name` path in `insert_references`. Creates `EdgeKind::References` edge from caller to import symbol. No populate.rs changes needed — used existing `attribute_access:` resolution path.
-- **QA-1 CRITICAL FINDING addressed:** Did NOT use dotted callee name approach (which `resolve_callee` rejects). Used `attribute_access:` reference path instead — avoids the `contains('.')` rejection entirely.
-- **24 tests in cycle13_cjs_and_use_path_tests.rs:** D1-D7 (CJS destructured), U1-U8 (Rust use-path), A1-A4 (adversarial), F1-F3 (Rust fixtures), I1-I2 (integration). ALL 24 pass.
-- **Fixtures created:** `tests/fixtures/javascript/cross_file/cjs_destructured/` (app.js, utils.js) and `tests/fixtures/rust/cross_file/` (lib.rs, utils.rs, handler.rs). F1 4-cycle carry resolved.
-- **Files touched:** javascript.rs (+95 lines), rust.rs (+25 lines), cycle13_cjs_and_use_path_tests.rs (new, 742 lines), 5 fixture files.
-- **1212 tests pass, 0 failures.** Clippy/fmt clean.

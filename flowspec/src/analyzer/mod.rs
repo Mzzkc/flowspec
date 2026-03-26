@@ -2,10 +2,15 @@
 
 //! Diagnostic detection, flow tracing, and boundary analysis.
 //!
-//! Each analyzer is a standalone function that queries the graph and
-//! produces diagnostics. No inheritance, no trait objects. The three
-//! cycle-1 patterns are: `isolated_cluster`, `data_dead_end`, and
-//! `phantom_dependency`.
+//! Each analyzer is a standalone function that queries the [`Graph`](crate::graph::Graph)
+//! and produces diagnostics. No inheritance, no trait objects — just functions
+//! that take a graph reference and return `Vec<Diagnostic>`.
+//!
+//! Flowspec ships eleven diagnostic patterns across five severity levels
+//! (Critical, Warning, Info, Style, Note). Pattern implementations live in
+//! [`patterns`], with one module per pattern plus a registry that collects
+//! all detectors. The [`flow`] module provides the DFS-based flow tracing
+//! engine used by patterns that need to follow data through the call graph.
 
 /// Converts raw `Diagnostic` values into `DiagnosticEntry` manifest records.
 pub mod conversion;

@@ -345,7 +345,7 @@ fn t17_file_scoping_single_file_single_import() {
         ),
     ];
     let (syms, map) = build_symbol_map(&mut graph, symbols);
-    let result = resolve_import_by_name("json", &map, &syms);
+    let result = resolve_import_by_name("json", &map, &syms, 100);
     assert_ne!(
         result,
         SymbolId::default(),
@@ -391,14 +391,14 @@ fn t18_file_scoping_two_files_same_import() {
     let (syms_b, map_b) = build_symbol_map(&mut graph, symbols_b);
 
     // Resolve 'os' in File A's context → File A's import
-    let result_a = resolve_import_by_name("os", &map_a, &syms_a);
+    let result_a = resolve_import_by_name("os", &map_a, &syms_a, 100);
     assert_eq!(
         result_a, map_a[0].1,
         "File A's 'os' must resolve to File A's import"
     );
 
     // Resolve 'os' in File B's context → File B's import
-    let result_b = resolve_import_by_name("os", &map_b, &syms_b);
+    let result_b = resolve_import_by_name("os", &map_b, &syms_b, 100);
     assert_eq!(
         result_b, map_b[0].1,
         "File B's 'os' must resolve to File B's import"
@@ -422,8 +422,8 @@ fn t19_file_scoping_different_modules_same_stem() {
     let symbols_b = vec![make_import("utils", "file_b.py", 1)];
     let (syms_b, map_b) = build_symbol_map(&mut graph, symbols_b);
 
-    let result_a = resolve_import_by_name("utils", &map_a, &syms_a);
-    let result_b = resolve_import_by_name("utils", &map_b, &syms_b);
+    let result_a = resolve_import_by_name("utils", &map_a, &syms_a, 100);
+    let result_b = resolve_import_by_name("utils", &map_b, &syms_b, 100);
 
     assert_ne!(
         result_a, result_b,
@@ -445,7 +445,7 @@ fn t20_file_scoping_no_matching_import_returns_default() {
         1,
     )];
     let (syms, map) = build_symbol_map(&mut graph, symbols);
-    let result = resolve_import_by_name("os", &map, &syms);
+    let result = resolve_import_by_name("os", &map, &syms, 100);
     assert_eq!(
         result,
         SymbolId::default(),
@@ -462,10 +462,10 @@ fn t21_file_scoping_aliased_import_matches_alias() {
     let (syms, map) = build_symbol_map(&mut graph, symbols);
 
     // Should match 'j' (the alias name), not 'json'
-    let result = resolve_import_by_name("j", &map, &syms);
+    let result = resolve_import_by_name("j", &map, &syms, 100);
     assert_ne!(result, SymbolId::default(), "Aliased import 'j' must match");
 
-    let result_original = resolve_import_by_name("json", &map, &syms);
+    let result_original = resolve_import_by_name("json", &map, &syms, 100);
     assert_eq!(
         result_original,
         SymbolId::default(),
@@ -484,15 +484,15 @@ fn t22_file_scoping_multiple_imports_correct_match() {
     ];
     let (syms, map) = build_symbol_map(&mut graph, symbols);
 
-    assert_eq!(resolve_import_by_name("os", &map, &syms), map[0].1);
-    assert_eq!(resolve_import_by_name("sys", &map, &syms), map[1].1);
-    assert_eq!(resolve_import_by_name("json", &map, &syms), map[2].1);
+    assert_eq!(resolve_import_by_name("os", &map, &syms, 100), map[0].1);
+    assert_eq!(resolve_import_by_name("sys", &map, &syms, 100), map[1].1);
+    assert_eq!(resolve_import_by_name("json", &map, &syms, 100), map[2].1);
 }
 
 /// T23: Empty symbol_id_map — no panic.
 #[test]
 fn t23_file_scoping_empty_symbol_map_no_panic() {
-    let result = resolve_import_by_name("anything", &[], &[]);
+    let result = resolve_import_by_name("anything", &[], &[], 100);
     assert_eq!(result, SymbolId::default(), "Empty map must return default");
 }
 
@@ -508,7 +508,7 @@ fn t24_file_scoping_non_import_symbol_not_matched() {
         1,
     )];
     let (syms, map) = build_symbol_map(&mut graph, symbols);
-    let result = resolve_import_by_name("os", &map, &syms);
+    let result = resolve_import_by_name("os", &map, &syms, 100);
     assert_eq!(
         result,
         SymbolId::default(),
@@ -561,7 +561,7 @@ fn t26_file_scoping_no_local_match_returns_default() {
     )];
     let (syms_b, map_b) = build_symbol_map(&mut graph, symbols_b);
 
-    let result = resolve_import_by_name("utils", &map_b, &syms_b);
+    let result = resolve_import_by_name("utils", &map_b, &syms_b, 100);
     assert_eq!(
         result,
         SymbolId::default(),
@@ -584,7 +584,7 @@ fn t27_file_scoping_reexport_resolution() {
         ),
     ];
     let (syms, map) = build_symbol_map(&mut graph, symbols);
-    let result = resolve_import_by_name("helper", &map, &syms);
+    let result = resolve_import_by_name("helper", &map, &syms, 100);
     assert_eq!(
         result, map[0].1,
         "Re-export import resolves to local import symbol"
@@ -937,7 +937,7 @@ fn t40_adversarial_unicode_manifest_byte_vs_char_count() {
 }
 
 /// T41: resolve_import_by_name with duplicate import names in same file.
-/// First match wins (linear scan, early return).
+/// Nearest preceding import wins (proximity-based resolution).
 #[test]
 fn t41_adversarial_duplicate_import_names_same_file() {
     let mut graph = Graph::new();
@@ -946,10 +946,17 @@ fn t41_adversarial_duplicate_import_names_same_file() {
         make_import("os", "file.py", 5),
     ];
     let (syms, map) = build_symbol_map(&mut graph, symbols);
-    let result = resolve_import_by_name("os", &map, &syms);
+    // ref_line=3: between line 1 and line 5, so nearest preceding is line 1
+    let result = resolve_import_by_name("os", &map, &syms, 3);
     assert_eq!(
         result, map[0].1,
-        "First matching import wins (deterministic linear scan)"
+        "Nearest preceding import wins (proximity-based resolution)"
+    );
+    // ref_line=100: after both, nearest preceding is line 5
+    let result2 = resolve_import_by_name("os", &map, &syms, 100);
+    assert_eq!(
+        result2, map[1].1,
+        "When ref is after both, nearest preceding (line 5) wins"
     );
 }
 

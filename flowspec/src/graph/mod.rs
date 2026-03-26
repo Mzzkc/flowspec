@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later AND LicenseRef-Commercial
 
-//! Persistent in-memory analysis graph.
+//! Persistent in-memory analysis graph — the central data structure of the
+//! Flowspec pipeline.
 //!
 //! The graph is the source of truth for all analysis. It stores symbols, scopes,
 //! references, and boundaries in flat tables (slotmap arenas) for O(1) lookup
 //! and cache-friendly iteration. Adjacency lists provide bidirectional edge
 //! traversal. File-to-symbols mappings enable incremental updates.
+//!
+//! **Pipeline position:** Parser → Graph → Analyzer → Manifest.
+//! [`populate_graph`] ingests parser IR; [`resolve_cross_file_imports`] links
+//! symbols across files. Analyzers and the manifest exporter query the graph
+//! but never mutate it after population.
 //!
 //! Design follows the ECS-inspired pattern: symbols are IDs, properties are
 //! data alongside, and the graph is a passive data store that analyzers query.

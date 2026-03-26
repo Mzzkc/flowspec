@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later AND LicenseRef-Commercial
 
-//! Tree-sitter parsing and language adapters.
+//! Tree-sitter parsing and language adapters — the first stage of the
+//! Flowspec pipeline.
 //!
-//! Parsers produce language-agnostic IR from source files. The engine
-//! never sees raw AST — only the IR produced here.
+//! Each language adapter translates tree-sitter AST into language-agnostic
+//! IR ([`ir::ParseResult`]) containing symbols, scopes, references, and
+//! boundaries. Downstream stages never see raw AST — only the IR produced
+//! here. The [`ir`] module defines the shared types; each adapter module
+//! (`python`, `javascript`, `rust`) implements [`LanguageAdapter`].
+//!
+//! **Pipeline position:** Parser → Graph → Analyzer → Manifest.
+//! Output flows into [`crate::graph::populate_graph`] which inserts IR
+//! nodes into the persistent analysis graph.
 
 /// Intermediate representation types — `Symbol`, `Scope`, `Reference`, `Boundary`, and their IDs.
 pub mod ir;

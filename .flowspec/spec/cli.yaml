@@ -21,7 +21,7 @@ content:
       description: "Write output to file instead of stdout"
       default: "stdout"
     - flag: "--format, -f <format>"
-      type: "enum: yaml, json, summary"
+      type: "enum: yaml, json, sarif, summary"
       description: "Output format"
       default: "yaml"
     - flag: "--verbose, -v"
@@ -59,6 +59,17 @@ content:
         - flag: "--language, -l <lang>"
           type: "optional, repeatable"
           description: "Restrict analysis to specific language(s). Auto-detected if omitted."
+        - flag: "--checks <patterns>"
+          type: "comma-separated list of diagnostic pattern names"
+          description: "Filter to specific diagnostic patterns"
+        - flag: "--severity <level>"
+          type: "enum: critical, warning, info"
+          description: "Minimum severity to report in diagnostics section"
+          default: "info (show everything)"
+        - flag: "--confidence <level>"
+          type: "enum: high, moderate, low"
+          description: "Minimum confidence to report in diagnostics section"
+          default: "low (show everything)"
       output: "Full manifest (YAML by default) to stdout or --output file"
       exit_codes:
         0: "Analysis completed successfully"
@@ -85,6 +96,9 @@ content:
           type: "enum: high, moderate, low"
           description: "Minimum confidence to report"
           default: "low (show everything)"
+        - flag: "--language, -l <lang>"
+          type: "optional, repeatable"
+          description: "Restrict analysis to specific language(s). Auto-detected if omitted."
       output: "Diagnostics section only (not full manifest)"
       exit_codes:
         0: "No diagnostics at or above specified severity"
@@ -109,11 +123,14 @@ content:
         - flag: "--depth <n>"
           type: "optional integer"
           description: "Maximum traversal depth"
-          default: "unlimited"
+          default: "10"
         - flag: "--direction <dir>"
-          type: "enum: both, forward, backward"
-          default: "both"
+          type: "enum: forward, backward, both"
+          default: "forward"
           description: "Trace callers (backward), callees (forward), or both"
+        - flag: "--language, -l <lang>"
+          type: "optional, repeatable"
+          description: "Restrict analysis to specific language(s). Auto-detected if omitted."
       output: |
         Complete flow trace for the symbol: everything it touches,
         everything that touches it, boundary crossings, transformations.
@@ -206,7 +223,7 @@ data:
 
   output_default: "stdout"
   log_target: "stderr"
-  formats: ["yaml", "json", "summary"]
+  formats: ["yaml", "json", "sarif", "summary"]
 
   exit_code_convention:
     0: "success"
