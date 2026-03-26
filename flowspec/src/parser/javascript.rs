@@ -1486,6 +1486,7 @@ fn strip_ts_line_syntax(line: &str) -> String {
         s = strip_leading_modifier(&s, m);
     }
     s = strip_generics(&s);
+    s = strip_implements_clause(&s);
     s = strip_type_annotations(&s);
     s
 }
@@ -1605,6 +1606,43 @@ fn is_generic_open(bytes: &[u8], i: usize) -> bool {
     }
     let p = bytes[j];
     p.is_ascii_alphanumeric() || p == b'_' || p == b'$'
+}
+
+/// Strips `implements <Type>, ...` clauses from a TypeScript class declaration line.
+///
+/// Replaces everything from ` implements ` (with word boundaries) to just before
+/// the opening `{` with spaces, preserving byte offsets for tree-sitter. If no `{`
+/// is found, strips from ` implements ` to the end of the string.
+///
+/// Word-boundary check: requires a space before `implements` to prevent false matches
+/// on identifiers like `implements_count` or `implementsInterface`.
+fn strip_implements_clause(line: &str) -> String {
+    // Search for " implements " with a leading space (word boundary).
+    // We search for " implements " to ensure it's not part of an identifier.
+    let needle = " implements ";
+    let Some(pos) = line.find(needle) else {
+        return line.to_string();
+    };
+
+    // Check that the character after the implements clause isn't alphanumeric/underscore
+    // (already guaranteed by the trailing space in needle, but let's find the brace)
+    let strip_start = pos; // start of " implements "
+    let after_needle = pos + needle.len();
+
+    // Find the opening brace after the implements clause
+    let strip_end = if let Some(brace_offset) = line[after_needle..].find('{') {
+        after_needle + brace_offset
+    } else {
+        // No brace on this line — strip from implements to end
+        line.len()
+    };
+
+    // Build result: keep everything before " implements", fill with spaces, keep rest
+    let mut result = String::with_capacity(line.len());
+    result.push_str(&line[..strip_start]);
+    result.extend(std::iter::repeat_n(' ', strip_end - strip_start));
+    result.push_str(&line[strip_end..]);
+    result
 }
 
 fn strip_type_annotations(line: &str) -> String {
@@ -4389,6 +4427,573 @@ class Controller {
             enums.len(),
             1,
             "const enum should be extracted exactly once"
+        );
+    }
+
+    // =========================================================================
+    // C19 QA-1: implements Clause Stripping + TS Fixture Validation
+    // =========================================================================
+
+    // -----------------------------------------------------------------------
+    // Section 1: strip_implements_clause() Unit Tests (IMP-1 through IMP-10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strip_implements_single_interface() {
+        let input = "class App implements Config {";
+        let result = strip_implements_clause(input);
+        assert!(
+            !result.contains("implements"),
+            "implements keyword must be stripped"
+        );
+        assert!(
+            !result.contains("Config"),
+            "interface name must be stripped from line"
+        );
+        assert!(result.contains("class App"), "class name must survive");
+        assert!(result.contains("{"), "opening brace must survive");
+        assert_eq!(
+            result.len(),
+            input.len(),
+            "byte length must be preserved for offset safety"
+        );
+    }
+
+    #[test]
+    fn strip_implements_multiple_interfaces() {
+        let input = "class App implements Foo, Bar {";
+        let result = strip_implements_clause(input);
+        assert!(!result.contains("implements"));
+        assert!(!result.contains("Foo"));
+        assert!(!result.contains("Bar"));
+        assert!(result.contains("class App"));
+        assert!(result.contains("{"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn strip_implements_preserves_extends() {
+        let input = "class App extends Base implements Config {";
+        let result = strip_implements_clause(input);
+        assert!(!result.contains("implements"));
+        assert!(!result.contains("Config"));
+        assert!(
+            result.contains("extends Base"),
+            "extends clause must survive — it's valid JS syntax"
+        );
+        assert!(result.contains("class App"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn strip_implements_with_export_prefix() {
+        let input = "export class App implements Config {";
+        let result = strip_implements_clause(input);
+        assert!(!result.contains("implements"));
+        assert!(result.contains("export"));
+        assert!(result.contains("class App"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn strip_implements_three_interfaces() {
+        let input = "class Service implements Readable, Writable, Closeable {";
+        let result = strip_implements_clause(input);
+        assert!(!result.contains("implements"));
+        assert!(!result.contains("Readable"));
+        assert!(!result.contains("Writable"));
+        assert!(!result.contains("Closeable"));
+        assert!(result.contains("class Service"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn strip_implements_does_not_touch_variable_name() {
+        let input = "let implements_count = 5;";
+        let result = strip_implements_clause(input);
+        assert_eq!(
+            result, input,
+            "implements_count is a variable name, not a clause — must be unchanged"
+        );
+    }
+
+    #[test]
+    fn strip_implements_does_not_touch_substring() {
+        let input = "const implementsInterface = true;";
+        let result = strip_implements_clause(input);
+        assert_eq!(
+            result, input,
+            "implementsInterface is an identifier, not a clause"
+        );
+    }
+
+    #[test]
+    fn strip_implements_empty_clause() {
+        let input = "class App implements {";
+        let result = strip_implements_clause(input);
+        assert!(result.contains("class App"));
+        assert!(result.contains("{"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn strip_implements_no_brace() {
+        let input = "class App implements Config";
+        let result = strip_implements_clause(input);
+        assert!(!result.contains("implements"));
+        assert!(!result.contains("Config"));
+        assert!(result.contains("class App"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn strip_implements_passthrough_no_clause() {
+        let input = "class App extends Base {";
+        let result = strip_implements_clause(input);
+        assert_eq!(
+            result, input,
+            "Line without implements must be returned unchanged"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 2: strip_ts_line_syntax() Pipeline Integration (PIPE-1 through PIPE-4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pipeline_generics_then_implements() {
+        let input = "class App implements Config<T> {";
+        let result = strip_ts_line_syntax(input);
+        assert!(
+            !result.contains("implements"),
+            "implements must be stripped after generics"
+        );
+        assert!(
+            !result.contains("Config"),
+            "interface name must be stripped"
+        );
+        assert!(result.contains("class App"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn pipeline_abstract_then_implements() {
+        let input = "abstract class Shape implements Drawable {";
+        let result = strip_ts_line_syntax(input);
+        assert!(!result.contains("abstract"), "abstract must be stripped");
+        assert!(
+            !result.contains("implements"),
+            "implements must be stripped"
+        );
+        assert!(!result.contains("Drawable"));
+        assert!(result.contains("class") && result.contains("Shape"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn pipeline_export_declare_implements() {
+        let input = "export class Widget implements Renderable {";
+        let result = strip_ts_line_syntax(input);
+        assert!(!result.contains("implements"));
+        assert!(!result.contains("Renderable"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    #[test]
+    fn pipeline_modifier_then_implements() {
+        let input = "export class Logger implements ILogger {";
+        let result = strip_ts_line_syntax(input);
+        assert!(!result.contains("implements"));
+        assert!(!result.contains("ILogger"));
+        assert_eq!(result.len(), input.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 3: Full Pipeline Entity Extraction (FULL-1 through FULL-5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn full_pipeline_class_implements_correct_name() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("app.ts");
+        let content = "class App implements Config {\n  start() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 1, "Expected exactly 1 class");
+        assert_eq!(
+            classes[0].name, "App",
+            "Class name must be 'App', not the interface name 'Config'"
+        );
+        let methods: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .collect();
+        assert!(
+            methods.iter().any(|m| m.name == "start"),
+            "Method 'start' must be extracted from implements class body"
+        );
+    }
+
+    #[test]
+    fn full_pipeline_multiple_implements_classes() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("services.ts");
+        let content = "\
+class AuthService implements Authenticator {\n  login() {}\n}\n\n\
+class DataService implements Repository {\n  fetch() {}\n}\n\n\
+class PlainClass {\n  run() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 3, "Expected 3 classes");
+        let names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"AuthService"),
+            "Must extract 'AuthService', not 'Authenticator'"
+        );
+        assert!(
+            names.contains(&"DataService"),
+            "Must extract 'DataService', not 'Repository'"
+        );
+        assert!(
+            names.contains(&"PlainClass"),
+            "Regular class must still be extracted"
+        );
+    }
+
+    #[test]
+    fn full_pipeline_implements_same_name_interface() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("mixed.ts");
+        let content = "\
+interface Config {\n  debug: boolean;\n}\n\n\
+class App implements Config {\n  debug: boolean = false;\n  constructor() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let interfaces: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Interface)
+            .collect();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(interfaces.len(), 1, "Expected 1 interface");
+        assert_eq!(interfaces[0].name, "Config");
+        assert_eq!(classes.len(), 1, "Expected 1 class");
+        assert_eq!(
+            classes[0].name, "App",
+            "CRITICAL: Class must be 'App', not 'Config' — this is the reported bug scenario"
+        );
+    }
+
+    #[test]
+    fn full_pipeline_generics_plus_implements() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("generic.ts");
+        let content =
+            "class Container<T> implements Iterable<T> {\n  items: T[] = [];\n  next() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(
+            classes[0].name, "Container",
+            "Generic class with implements must extract base name without type params"
+        );
+    }
+
+    #[test]
+    fn full_pipeline_extends_and_implements() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("derived.ts");
+        let content = "class Admin extends User implements Authorizable {\n  authorize() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(
+            classes[0].name, "Admin",
+            "Extends + implements: class name must be 'Admin'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 4: Adversarial Pipeline Tests (ADV-1 through ADV-5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn adversarial_comment_line_with_implements() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("comments.ts");
+        let content = "// class Foo implements Bar\nfunction realFunction() {}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 0, "Comment-only class must not be extracted");
+        let funcs: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .collect();
+        assert_eq!(funcs.len(), 1, "Real function must still be extracted");
+    }
+
+    #[test]
+    fn adversarial_string_literal_with_implements() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("strings.ts");
+        let content = "const template = \"class Foo implements Bar { }\";\nfunction helper() {}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let funcs: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .collect();
+        assert!(
+            funcs.iter().any(|f| f.name == "helper"),
+            "Real function must be extracted"
+        );
+    }
+
+    #[test]
+    fn adversarial_property_named_implements() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("iface.ts");
+        let content = "interface Foo {\n  implements: string;\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let interfaces: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Interface)
+            .collect();
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(
+            interfaces[0].name, "Foo",
+            "Interface with 'implements' property must still extract correctly"
+        );
+    }
+
+    #[test]
+    fn adversarial_deeply_nested_generics_implements() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("deep.ts");
+        let content =
+            "class Store<K, V> implements Map<K, V> {\n  get(key: K): V { return null as any; }\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(
+            classes[0].name, "Store",
+            "Multi-param generics + implements must extract 'Store'"
+        );
+    }
+
+    #[test]
+    fn adversarial_class_named_implements() {
+        let input = "class implements {";
+        let result = strip_implements_clause(input);
+        // Must not panic, must preserve length
+        assert_eq!(result.len(), input.len(), "Must not panic or change length");
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 5: Fixture File Validation Tests (FIX-1 through FIX-3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fixture_ts_files_parse_successfully() {
+        let adapter = JsAdapter::new();
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/typescript");
+        assert!(
+            fixture_dir.exists(),
+            "tests/fixtures/typescript/ directory must exist"
+        );
+        let entries: Vec<_> = std::fs::read_dir(&fixture_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "ts").unwrap_or(false))
+            .collect();
+        assert!(
+            entries.len() >= 3,
+            "Must have at least 3 .ts fixture files, found {}",
+            entries.len()
+        );
+        for entry in &entries {
+            let path = entry.path();
+            let content = std::fs::read_to_string(&path).unwrap();
+            let result = adapter.parse_file(&path, &content);
+            assert!(
+                result.is_ok(),
+                "Fixture file {:?} must parse without error, got: {:?}",
+                path.file_name(),
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_ts_files_detected_as_typescript() {
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/typescript");
+        assert!(fixture_dir.exists());
+        for entry in std::fs::read_dir(&fixture_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.extension().map(|e| e == "ts").unwrap_or(false) {
+                assert!(
+                    is_typescript_file(&path),
+                    "{:?} must be detected as TypeScript",
+                    path.file_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_classes_ts_entity_extraction() {
+        let adapter = JsAdapter::new();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/typescript/classes.ts");
+        assert!(fixture_path.exists(), "classes.ts fixture must exist");
+        let content = std::fs::read_to_string(&fixture_path).unwrap();
+        let result = adapter.parse_file(&fixture_path, &content).unwrap();
+        let classes: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .collect();
+        assert!(
+            classes.len() >= 2,
+            "classes.ts must contain at least 2 classes (one with implements), found {}",
+            classes.len()
+        );
+        let class_names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+        // Known interface names that should NOT appear as class names
+        let interface_names = ["Config", "Renderable"];
+        for iface in &interface_names {
+            if class_names.contains(iface) {
+                let is_also_interface = result
+                    .symbols
+                    .iter()
+                    .any(|s| s.kind == SymbolKind::Interface && s.name == *iface);
+                if is_also_interface {
+                    panic!(
+                        "Class name '{}' matches interface name — possible implements extraction bug",
+                        iface
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 6: Regression Guards (REG-1 through REG-3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn regression_implements_class_not_duplicated() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("test.ts");
+        let content = "class Foo implements Bar {\n  constructor() {}\n}\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let foos: Vec<_> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class && s.name == "Foo")
+            .collect();
+        assert_eq!(
+            foos.len(),
+            1,
+            "Regression: implements class must not be duplicated by pre-extraction + tree-sitter"
+        );
+    }
+
+    #[test]
+    fn regression_mixed_file_counts_stable() {
+        let adapter = JsAdapter::new();
+        let path = PathBuf::from("mixed.ts");
+        let content = "interface Config {\n  debug: boolean;\n}\n\n\
+                       function setup(cfg: Config): void {\n  console.log(cfg);\n}\n\n\
+                       class App implements Config {\n  debug: boolean = false;\n  constructor() {}\n}\n\n\
+                       enum Mode {\n  Dev,\n  Prod\n}\n\n\
+                       type AppConfig = Config & { mode: Mode };\n";
+        let result = adapter.parse_file(&path, content).unwrap();
+        let interfaces = result
+            .symbols
+            .iter()
+            .filter(|s| {
+                s.kind == SymbolKind::Interface
+                    && !s.annotations.contains(&"type_alias".to_string())
+            })
+            .count();
+        let functions = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Function)
+            .count();
+        let classes = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Class)
+            .count();
+        let enums = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Enum)
+            .count();
+        assert_eq!(interfaces, 1, "Interface count regression");
+        assert_eq!(functions, 1, "Function count regression");
+        assert_eq!(classes, 1, "Class count regression");
+        assert_eq!(enums, 1, "Enum count regression");
+    }
+
+    #[test]
+    fn regression_implements_class_methods_preserved() {
+        let content = "interface Logger {\n    log(message: string): void;\n}\n\n\
+                       class ConsoleLogger implements Logger {\n    log(message: string): void {\n        console.log(message);\n    }\n    error(message: string): void {\n        console.error(message);\n    }\n}\n";
+        let result = parse_js("service.ts", content);
+        let classes = symbols_by_kind(&result, SymbolKind::Class);
+        assert!(
+            classes.iter().any(|s| s.name == "ConsoleLogger"),
+            "Regression: ConsoleLogger must be extracted after implements stripping"
+        );
+        let methods = symbols_by_kind(&result, SymbolKind::Method);
+        assert!(
+            methods.len() >= 2,
+            "Regression: Methods inside implements class must be preserved, found {}",
+            methods.len()
         );
     }
 }
