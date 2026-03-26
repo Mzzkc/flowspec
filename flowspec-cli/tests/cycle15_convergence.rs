@@ -15,12 +15,10 @@ use tempfile::TempDir;
 
 fn flowspec() -> Command {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
-    // Run from workspace root so fixture paths resolve
     cmd.current_dir(workspace_root());
     cmd
 }
 
-/// Workspace root (parent of flowspec-cli/)
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -28,7 +26,6 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Rust fixture project at tests/fixtures/rust/
 fn rust_fixture_path() -> String {
     workspace_root()
         .join("tests/fixtures/rust")
@@ -90,10 +87,8 @@ fn create_minimal_python() -> TempDir {
 
 #[test]
 fn yaml_valid_after_phase1_rust_fixture() {
-    let output = flowspec()
-        .args(["analyze", &rust_fixture_path()])
-        .output()
-        .unwrap();
+    let fixture = rust_fixture_path();
+    let output = flowspec().args(["analyze", &fixture]).output().unwrap();
 
     let code = output.status.code().unwrap();
     assert!(
@@ -114,8 +109,9 @@ fn yaml_valid_after_phase1_rust_fixture() {
 
 #[test]
 fn json_valid_after_phase1_rust_fixture() {
+    let fixture = rust_fixture_path();
     let output = flowspec()
-        .args(["analyze", &rust_fixture_path(), "--format", "json"])
+        .args(["analyze", &fixture, "--format", "json"])
         .output()
         .unwrap();
 
@@ -135,7 +131,6 @@ fn json_valid_after_phase1_rust_fixture() {
         )
     });
 
-    // Must have 8 required sections
     let sections = [
         "metadata",
         "summary",
@@ -157,8 +152,9 @@ fn json_valid_after_phase1_rust_fixture() {
 
 #[test]
 fn sarif_valid_after_phase1_rust_fixture() {
+    let fixture = rust_fixture_path();
     let output = flowspec()
-        .args(["--format", "sarif", "analyze", &rust_fixture_path()])
+        .args(["--format", "sarif", "analyze", &fixture])
         .output()
         .unwrap();
 
@@ -178,7 +174,6 @@ fn sarif_valid_after_phase1_rust_fixture() {
         )
     });
 
-    // SARIF required fields
     let schema = parsed["$schema"].as_str().unwrap_or("");
     assert!(
         schema.contains("sarif"),
@@ -200,8 +195,9 @@ fn sarif_valid_after_phase1_rust_fixture() {
 
 #[test]
 fn summary_valid_after_phase1_rust_fixture() {
+    let fixture = rust_fixture_path();
     let output = flowspec()
-        .args(["analyze", &rust_fixture_path(), "--format", "summary"])
+        .args(["analyze", &fixture, "--format", "summary"])
         .output()
         .unwrap();
 
@@ -218,7 +214,6 @@ fn summary_valid_after_phase1_rust_fixture() {
         "Summary output must not be empty for Rust fixture"
     );
 
-    // Check stderr for panics
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("unreachable") && !stderr.contains("panicked"),
@@ -229,10 +224,8 @@ fn summary_valid_after_phase1_rust_fixture() {
 
 #[test]
 fn diagnose_yaml_rust_fixture() {
-    let output = flowspec()
-        .args(["diagnose", &rust_fixture_path()])
-        .output()
-        .unwrap();
+    let fixture = rust_fixture_path();
+    let output = flowspec().args(["diagnose", &fixture]).output().unwrap();
 
     let code = output.status.code().unwrap();
     assert!(
@@ -253,8 +246,9 @@ fn diagnose_yaml_rust_fixture() {
 
 #[test]
 fn diagnose_json_rust_fixture() {
+    let fixture = rust_fixture_path();
     let output = flowspec()
-        .args(["--format", "json", "diagnose", &rust_fixture_path()])
+        .args(["--format", "json", "diagnose", &fixture])
         .output()
         .unwrap();
 
@@ -274,14 +268,12 @@ fn diagnose_json_rust_fixture() {
         )
     });
 
-    // Diagnose JSON is an array
     assert!(
         parsed.is_array(),
         "Diagnose JSON output must be an array, got: {}",
         parsed
     );
 
-    // If there are entries, each must have pattern/severity/entity
     if let Some(arr) = parsed.as_array() {
         for entry in arr {
             assert!(
@@ -302,8 +294,9 @@ fn diagnose_json_rust_fixture() {
 
 #[test]
 fn diagnose_sarif_rust_fixture() {
+    let fixture = rust_fixture_path();
     let output = flowspec()
-        .args(["--format", "sarif", "diagnose", &rust_fixture_path()])
+        .args(["--format", "sarif", "diagnose", &fixture])
         .output()
         .unwrap();
 
@@ -406,14 +399,11 @@ fn exit_code_1_error_preserved() {
 
 #[test]
 fn yaml_pipe_safe_no_logs() {
-    let output = flowspec()
-        .args(["analyze", &rust_fixture_path()])
-        .output()
-        .unwrap();
+    let fixture = rust_fixture_path();
+    let output = flowspec().args(["analyze", &fixture]).output().unwrap();
 
     let stdout = String::from_utf8(output.stdout).unwrap();
 
-    // Must parse as valid YAML (no log contamination)
     let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&stdout);
     assert!(
         parsed.is_ok(),
@@ -435,8 +425,9 @@ fn yaml_pipe_safe_no_logs() {
 
 #[test]
 fn json_pipe_safe_pure() {
+    let fixture = rust_fixture_path();
     let output = flowspec()
-        .args(["--format", "json", "analyze", &rust_fixture_path()])
+        .args(["--format", "json", "analyze", &fixture])
         .output()
         .unwrap();
 
@@ -477,11 +468,9 @@ fn sarif_pipe_safe_pure() {
 
 #[test]
 fn entity_count_yaml_json_match_rust_fixture() {
-    // YAML run
-    let yaml_output = flowspec()
-        .args(["analyze", &rust_fixture_path()])
-        .output()
-        .unwrap();
+    let fixture = rust_fixture_path();
+
+    let yaml_output = flowspec().args(["analyze", &fixture]).output().unwrap();
     let yaml_stdout = String::from_utf8(yaml_output.stdout).unwrap();
     let yaml_parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_stdout).unwrap();
     let yaml_entities = yaml_parsed["entities"]
@@ -489,9 +478,8 @@ fn entity_count_yaml_json_match_rust_fixture() {
         .map(|s| s.len())
         .unwrap_or(0);
 
-    // JSON run
     let json_output = flowspec()
-        .args(["analyze", &rust_fixture_path(), "--format", "json"])
+        .args(["analyze", &fixture, "--format", "json"])
         .output()
         .unwrap();
     let json_stdout = String::from_utf8(json_output.stdout).unwrap();
@@ -512,7 +500,6 @@ fn entity_count_yaml_json_match_rust_fixture() {
 fn diagnostic_count_yaml_json_match() {
     let project = create_python_with_dead_code();
 
-    // YAML run
     let yaml_output = flowspec()
         .args(["analyze", project.path().to_str().unwrap()])
         .output()
@@ -524,7 +511,6 @@ fn diagnostic_count_yaml_json_match() {
         .map(|s| s.len())
         .unwrap_or(0);
 
-    // JSON run
     let json_output = flowspec()
         .args([
             "analyze",
@@ -697,14 +683,12 @@ fn byte_floor_still_active() {
         code
     );
 
-    // Manifest should be produced (not rejected by size check)
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         !stdout.is_empty(),
         "Byte floor failed — minimal project produced empty output"
     );
 
-    // Verify it's valid YAML
     let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&stdout);
     assert!(
         parsed.is_ok(),

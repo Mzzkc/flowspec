@@ -10,21 +10,22 @@
 - **1623 tests, 0 failures, clippy clean, fmt clean.**
 - **Files touched:** `flowspec/src/graph/populate.rs`, `flowspec/src/graph/mod.rs`, `flowspec/src/cycle15_proximity_tests.rs`, `flowspec/src/cycle14_surface_tests.rs`, `flowspec/src/lib.rs`, `flowspec-cli/tests/cycle15_convergence.rs`.
 
-### Worker 2 (Sentinel) — Cycle 15 Investigation Complete
-- **Dogfood verified:** 652 findings, all 8 pattern counts match C14 exactly. No drift.
-- **Full triage completed:** All 8 categories classified with sampled evidence. ~78% FP rate (508/652).
-- **Top FP mechanisms:** (1) `#[test]` functions invisible to analysis (~108 across data_dead_end + orphaned_impl), (2) path-segment imports (104 stale_reference, all FP), (3) import-name mismatch in `attribute_access:` (~160 phantom_dependency)
-- **TPs confirmed:** circular_dependency (5/5 TP), isolated_cluster (1/1 TP), ~35 data_dead_end TPs, ~25 phantom_dependency TPs
-- **GitHub issue roadmap:** 10 issues identified for FP categories, ready to file in Phase 3
-- **QA-2 brief delivered:** 5 priority reproduction tests + edge cases documented in investigation-2.md
-- **No code changes — investigation and triage only per assignment**
+### Worker 2 (Sentinel) — Cycle 15 Implementation Complete
+- **Commit `92c8e12`:** 34 QA-2 FP triage reproduction tests in `cycle15_fp_triage_tests.rs`.
+- **All 34 tests pass.** 9 sections: phantom_dependency (T1-T6), stale_reference (T7-T10), data_dead_end (T11-T15), missing_reexport (T16-T19), orphaned_impl (T20-T23), circular_dependency (T24-T25), partial_wiring + isolated_cluster (T26-T28), dogfood regression (T29-T31), cross-pattern guards (T32-T34).
+- **Every FP category from investigation-2.md covered** with reproduction tests proving the FP mechanism exists.
+- **Dogfood regression guards:** T29-T31 lock C14 baseline with safety thresholds (generous for concurrent worker changes).
+- **Cross-pattern orthogonality verified:** T32 (phantom/stale independent), T33 (dead_end/orphaned_impl domain boundary), T34 (fix meta-regression guard).
+- **Also ran `cargo fmt`** to fix formatting in Worker 1 and Worker 3's C15 test files (cycle15_proximity_tests.rs, cycle15_convergence.rs).
+- **Files touched:** `flowspec/src/cycle15_fp_triage_tests.rs` (new), `flowspec/src/lib.rs` (module declaration).
+- **1,561+ tests pass across all targets. 0 failures. Clippy clean. Fmt clean.**
 
-### Worker 3 (Interface) — Cycle 15 Investigation Complete
-- **Phase 1 verified:** All 3 uncommitted changesets safe to commit. No file overlaps. 1,543 tests pass.
-- **Commit order confirmed safe:** Doc-1 → Doc-2 → Worker 1. No merge conflicts possible.
-- **Phase 3 ready:** GitHub issue evidence gathered for resolve_import_by_name + attribute_access convention.
-- **Stray file flagged:** `flowspec/src/cycle14_type_reference_tests.rs` untracked — Worker 1 should include or remove.
-- **phantom_dependency count:** Will remain 250 after Doc commits (doc-only changes, no code).
+### Worker 3 (Interface) — Cycle 15 Implementation Complete
+- **22 QA-3 convergence tests implemented** in `flowspec-cli/tests/cycle15_convergence.rs`. All 22 pass.
+- **Coverage:** 7 Rust fixture format validity (YAML/JSON/SARIF/summary for analyze + diagnose), 3 exit code contract (all-format sweep), 3 pipe safety, 2 cross-format consistency (entity/diagnostic count YAML vs JSON), 3 filter flag stability, 4 regression guards (8-section manifest, byte floor, no-unreachable, confidence field).
+- **Key fix:** Tests use `workspace_root()` via `CARGO_MANIFEST_DIR` and `current_dir()` on Command to resolve fixture paths correctly from integration test context.
+- **1,623 tests total, 0 failures, clippy clean, fmt clean.**
+- **Files touched:** `flowspec-cli/tests/cycle15_convergence.rs` (new — 22 tests).
 
 ### QA-1 (QA-Foundation) — C15 Test Spec Delivered
 - **24 TDD tests** across 6 categories for Worker 1's proximity-based `resolve_import_by_name` fix.
