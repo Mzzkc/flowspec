@@ -37,6 +37,42 @@ Investigation brief written to `cycle-19/investigation-3.md`. Mapped 6 diff func
 
 **Coordination note:** 12 dogfood baseline test failures pre-exist from Worker 2's format-aware size limit changes — `data_dead_end` jumped to 311. These are NOT regressions from the implements fix. Worker 2 handles baseline reconciliation.
 
+### Worker 2 (Sentinel) — Cycle 19 Implementation Complete
+**Committed:** `543c09e` — format-aware validate_manifest_size + 17 QA-2 tests + 3 GitHub issues + baseline reconciliation.
+
+**Changes:**
+- `validate_manifest_size` now 3-arg: accepts `format: &str`. Per-format thresholds: YAML=10x, JSON=15x, SARIF=20x, Summary=exempt, unknown=10x.
+- Added `max_ratio_for_format()` helper in `manifest/mod.rs`, `limit: f64` field to `ManifestError::SizeLimit` in `error.rs`.
+- Updated call site in `commands.rs:113` to pass `format_name(format)`.
+- Updated 14 existing test call sites (13 in cycle14_surface_tests, 1 in pipeline_tests).
+- 17 new QA-2 tests: T1-T10 format-aware boundary, T11-T15 dogfood baseline, T16-T17 structural gate.
+- Filed GitHub issues: #24 (implements bug), #25 (declare class dedup), #26 (mixed-language module_map FP). `issues-filed.md` created.
+- Baseline reconciliation across 7 test files: data_dead_end 252→311, total 529→588 (C19 code growth from new test files).
+
+**Files touched:** `flowspec/src/{error.rs, manifest/mod.rs, commands.rs, lib.rs, cycle19_analysis_tests.rs, cycle14_surface_tests.rs, cycle14_diagnostic_interaction_tests.rs, cycle15_fp_triage_tests.rs, cycle16_method_call_tests.rs, cycle16_stale_ref_fix_tests.rs, cycle17_child_module_tests.rs, cycle18_analysis_tests.rs, pipeline_tests.rs}`
+
+**Tests:** 1,654 pass, 0 failures. Clippy clean. Fmt clean.
+
+### Worker 3 (Interface) — Cycle 19 Implementation Complete
+**All 3 phases delivered.** 29 diff unit tests for coverage recovery, README update (init+diff+TS note), VALID_SECTIONS restricted to 2 implemented sections.
+
+**Phase 0 — Coverage Recovery:**
+29 unit tests in `commands.rs mod tests`: compute_diff (8), load_manifest (4), apply_section_filter (4), validate_sections (3), DiffResult serialization (3), format_diff_result (3), regression guards (4). New helpers: `diag_entry()`, `manifest_with()`. All 29 pass first try.
+
+**Phase 1 — README Update:**
+Commands table: 5 rows (added diff + init). Init section (auto-detect, no-overwrite, stdout). Diff section (comparison, --section, exit codes, CI gate). TS preprocessing note in Language Support.
+
+**Phase 2 — VALID_SECTIONS Fix:**
+Restricted from 8 to 2 (`["entities", "diagnostics"]`) with TODO comment. Prevents silent empty output on unimplemented sections.
+
+**Files touched:** `README.md`, `flowspec/src/commands.rs` (tests + VALID_SECTIONS)
+
+**Coordination note:** My commands.rs changes were absorbed into Worker 2's commit (543c09e) due to shared worktree — both edited the same file concurrently. Code is committed and passing. README is my independent commit.
+
+**Tests:** 1,654+ pass, 0 failures. Clippy/fmt clean.
+
+**Dogfood baseline:** data_dead_end=311, total=588.
+
 ### QA-3 (QA-Surface) — Cycle 19 Tests Written
 32 tests (T1-T32) for Worker 3's diff unit tests and README update. T1-T8: compute_diff() (empty, add, remove, change, mixed, critical regression, warning no-regression, resolved). T9-T12: load_manifest() (YAML, JSON, empty, nonexistent). T13-T16: apply_section_filter() (entities-only, diagnostics-only, both, empty). T17-T19: validate_sections(). T20-T22: DiffResult serialization (YAML, empty, JSON round-trip). T23-T25: format_diff_result() (YAML, Summary structure, SARIF not-implemented). T26-T28: README validation (commands table, init section, diff section). T29-T32: regression guards (identical nonempty, unimplemented section gap, redundant condition, all-fields-changed). 91% TDD anchor ratio (29/32). Tests written to `cycle-19/tests-3.md`.
 

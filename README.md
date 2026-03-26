@@ -78,6 +78,8 @@ Top issues:
 | `flowspec analyze [path]` | Full analysis — parse, build graph, produce manifest |
 | `flowspec diagnose [path]` | Run diagnostics only — output structural issues found |
 | `flowspec trace [path] --symbol <id>` | Trace a single symbol's complete flow through the codebase |
+| `flowspec diff <old> <new>` | Compare two manifests — show structural changes |
+| `flowspec init [path]` | Create `.flowspec/config.yaml` for a project |
 
 ### Output Formats
 
@@ -131,6 +133,59 @@ Trace: main.py::main (2 flow(s) matched)
 
 Options: `--depth <n>` to limit traversal depth, `--direction forward|backward|both` to control trace direction.
 
+### Init
+
+Initialize Flowspec configuration for a project:
+
+```bash
+flowspec init .
+```
+
+This creates `.flowspec/config.yaml` with auto-detected language settings. If a config already exists, it prints the existing config and exits without overwriting.
+
+The generated config is printed to stdout (pipe-safe):
+
+```bash
+flowspec init . > my-config.yaml   # Redirect if desired
+```
+
+### Diff
+
+Compare two analysis manifests to detect structural changes:
+
+```bash
+# Generate before and after manifests
+flowspec analyze . --format yaml > before.yaml
+# ... make code changes ...
+flowspec analyze . --format yaml > after.yaml
+
+# Compare them
+flowspec diff before.yaml after.yaml
+```
+
+Filter to specific sections:
+
+```bash
+flowspec diff before.yaml after.yaml --section diagnostics
+flowspec diff before.yaml after.yaml --section entities
+```
+
+Valid sections: `entities`, `diagnostics`.
+
+The diff reports: entities added/removed/changed, new diagnostics, resolved diagnostics, and whether regressions were introduced.
+
+| Exit Code | Meaning |
+|-----------|---------|
+| 0 | Diff completed (no structural regressions) |
+| 1 | Error (invalid manifests) |
+| 2 | Structural regressions found (new critical diagnostics) |
+
+Use exit code 2 as a CI gate to catch regressions:
+
+```bash
+flowspec diff baseline.yaml current.yaml || echo "Regressions detected"
+```
+
 ## Diagnostic Patterns
 
 Flowspec detects 13 structural patterns (11 currently active, 2 in development):
@@ -154,7 +209,7 @@ Flowspec detects 13 structural patterns (11 currently active, 2 in development):
 ## Language Support
 
 - **Python** — full cross-file resolution
-- **JavaScript/TypeScript** — ESM and CommonJS cross-file resolution
+- **JavaScript/TypeScript** — ESM and CommonJS cross-file resolution. TypeScript files (`.ts`, `.tsx`, `.mts`, `.cts`) are preprocessed to strip type annotations before analysis — interfaces, enums, and type aliases are pre-extracted as entities
 - **Rust** — full cross-file resolution including `use` qualified paths
 
 ## CI Integration
