@@ -92,6 +92,10 @@ Noted that Worker 2's format-aware size limit change caused 12 dogfood baseline 
 
 Still feeling like C19 is the smallest cycle. Good rhythm — investigation→implementation alignment is strong now.
 
+### C19 Retry Note
+
+Previous attempt failed validation — T41 cross-reference test (`test_c18_t41_c15_assertions_still_valid`) was failing because Worker 2 changed `dead_end < 300` → `dead_end < 400` in C15 tests but the C18 regression test still checked for the old string. On retry, Worker 2's working tree changes were consistent (both files updated) so T41 passes. Root cause: concurrent worker modifications creating transient test inconsistency. My implementation code was unaffected — all 30 QA-1 tests and 168 JS/TS parser tests continued passing throughout.
+
 ## Cold (Archive)
 - Cycle 14: extract_all_type_references for Rust. 234/342 phantom FPs eliminated (68%). 24 QA-1 tests.
 - Cycle 13: JS CJS destructured require + Rust use qualified path. 24 QA-1 tests.
