@@ -216,6 +216,12 @@ Based on investigation-2.md measurements:
 - No collisions with other workers. All changes in my domain (analyzer/patterns/).
 - Worker 3 had staged pipeline_tests.rs changes — `cargo fmt` reformatted their code (harmless).
 
+### QA-2 Validation Integrated
+QA-2 validated the field test methodology: 89% spot-check agreement (8/9), one disagreement on phantom_dependency (QA found 1 TP — `PropertyMock` genuinely unused import, revising rate to ~2-5% from 0%). Weighted TP arithmetic verified: 374/5,327 = 7.0%. No regressions detected vs C20 baseline. 12 forward-looking test specs written for future measurement automation. Overall measurement quality rated HIGH by QA-2.
+
+### Retry Note
+First attempt committed code changes (bab1f07) but failed to include collective memory update in that commit. This retry adds the collective memory commit.
+
 ---
 
 ## Hot (Cycle 21 — Previous Concert)
