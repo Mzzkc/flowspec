@@ -188,7 +188,7 @@ flowspec diff baseline.yaml current.yaml || echo "Regressions detected"
 
 ## Diagnostic Patterns
 
-Flowspec detects 13 structural patterns (11 currently active, 2 in development):
+Flowspec detects 13 structural patterns (11 active in v1, 2 deferred to v1.1):
 
 | Pattern | Severity | Description |
 |---------|----------|-------------|
@@ -203,14 +203,24 @@ Flowspec detects 13 structural patterns (11 currently active, 2 in development):
 | `stale_reference` | warning | Reference to something that has been moved or renamed |
 | `phantom_dependency` | info | Module imported but nothing from it is used |
 | `missing_reexport` | info | Public symbol in submodule not re-exported through parent |
-| `duplication` | warning | Overlapping logic in multiple places *(in development)* |
-| `asymmetric_handling` | warning | Parallel code paths with inconsistent treatment *(in development)* |
+| `duplication` | warning | Overlapping logic in multiple places *(deferred to v1.1)* |
+| `asymmetric_handling` | warning | Parallel code paths with inconsistent treatment *(deferred to v1.1)* |
 
 ## Language Support
 
-- **Python** — full cross-file resolution
+- **Python** — full cross-file resolution including relative imports (`from .sibling import foo`), type annotation recognition (`def foo(x: Optional[str])` counts `Optional` as used), `__all__` re-export awareness, and `TYPE_CHECKING` block handling
 - **JavaScript/TypeScript** — ESM and CommonJS cross-file resolution. TypeScript files (`.ts`, `.tsx`, `.mts`, `.cts`) are preprocessed to strip type annotations before analysis — interfaces, enums, and type aliases are pre-extracted as entities
 - **Rust** — full cross-file resolution including `use` qualified paths
+
+## Known Limitations
+
+- **Complex generic type annotations** — inner types in generics like `Dict[str, List[int]]` are not extracted; only the root type name (`Dict`) is recognized as a usage reference
+- **Dynamic `__all__` construction** — `__all__` must be a static list literal; computed values (`__all__ = get_exports()`) are not resolved
+- **TypeScript preprocessing** — TS files are preprocessed to strip type annotations rather than using a native tree-sitter-typescript grammar; complex TS patterns (mapped types, conditional types) may not be fully handled
+- **Dynamic JS imports** — `import()` expressions are not tracked
+- **Split Rust impl blocks** — multiple `impl` blocks for the same type do not share scope
+- **Flow type information** — `in_type`/`out_type` fields in flow output are always "unknown"
+- **`duplication` and `asymmetric_handling` patterns** — deferred to v1.1 (require AST-level structural comparison and control flow analysis respectively)
 
 ## CI Integration
 

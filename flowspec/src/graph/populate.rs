@@ -781,9 +781,18 @@ fn resolve_python_relative_import(
 ///
 /// This is the second resolution pass, called after all files are parsed and
 /// `populate_graph()` has been called for each. It iterates import symbols (those
-/// with `"import"` annotation), extracts their `"from:<module>"` annotation, looks
-/// up the module in the provided map, then searches the target file's symbols for
-/// a matching definition.
+/// with `"import"` annotation), extracts their `"from:<module>"` annotation, routes
+/// to the appropriate language-specific resolver, then searches the target file's
+/// symbols for a matching definition.
+///
+/// # Language-specific resolution
+///
+/// Module names are routed based on their prefix format:
+/// - **JS/TS relative** (`./`, `../`): resolved via file-system relative path.
+/// - **Rust paths** (`crate::`, `super::`, `self::`): resolved via Rust module hierarchy.
+/// - **Python relative** (`.b`, `..parent`): dot-prefix converted to package-qualified
+///   module key via [`resolve_python_relative_import`].
+/// - **Absolute**: direct lookup in the module map (with Rust `self::` fallback).
 ///
 /// # Resolution outcomes
 ///
