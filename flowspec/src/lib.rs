@@ -110,6 +110,9 @@ mod cycle21_surface_tests;
 #[cfg(test)]
 mod cycle21_analysis_tests;
 
+#[cfg(test)]
+mod cycle21_qa1_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{

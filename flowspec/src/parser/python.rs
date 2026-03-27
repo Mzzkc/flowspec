@@ -99,6 +99,9 @@ impl LanguageAdapter for PythonAdapter {
         // Extract attribute accesses to track import usage (e.g., os.path.join, sys.argv)
         extract_attribute_accesses(&mut result, content_bytes, path, root, 0);
 
+        // Extract type annotation references (parameter types, return types, annotated assignments)
+        extract_type_annotation_refs(&mut result, content_bytes, path, root, 0);
+
         // Post-processing: annotate imports inside TYPE_CHECKING blocks
         mark_type_checking_imports(&mut result, content_bytes, path, root);
 
@@ -812,6 +815,136 @@ fn extract_assignment(
         scope: ScopeId::default(),
         annotations: vec![],
     });
+}
+
+/// Recursively walks the AST to extract type annotation references.
+///
+/// Visits `function_definition` nodes to find parameter and return type annotations,
+/// and `type` nodes at assignment level for annotated assignments. For each type
+/// annotation found, extracts the root type name and creates a `ReferenceKind::Read`
+/// reference with `ResolutionStatus::Partial("attribute_access:<name>")`.
+///
+/// This piggybacks on the existing `attribute_access:` resolution in `populate_graph`,
+/// creating incoming edges on import symbols so that `phantom_dependency` sees type
+/// annotation imports (like `Optional`, `Dict`, `List`) as used.
+///
+/// The `depth` parameter prevents stack overflow on deeply nested ASTs.
+fn extract_type_annotation_refs(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        return;
+    }
+
+    match node.kind() {
+        "function_definition" => {
+            // Extract parameter type annotations
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for param in params.children(&mut cursor) {
+                    match param.kind() {
+                        "typed_parameter" | "typed_default_parameter" => {
+                            if let Some(type_node) = param.child_by_field_name("type") {
+                                emit_type_annotation_ref(result, content, path, type_node);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Extract return type annotation
+            if let Some(return_type) = node.child_by_field_name("return_type") {
+                emit_type_annotation_ref(result, content, path, return_type);
+            }
+        }
+        "type" => {
+            // Annotated assignments: `x: int = 5` or `name: str = "default"`
+            // The `type` node wraps the annotation in expression_statement → assignment contexts.
+            // We only reach here from general recursion, so this covers module/class-level annotations.
+            emit_type_annotation_ref(result, content, path, node);
+            return; // Don't recurse into the type node's children
+        }
+        "string" | "comment" => {
+            return; // Never extract annotations from strings or comments
+        }
+        _ => {}
+    }
+
+    // Recurse into children
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        extract_type_annotation_refs(result, content, path, child, depth + 1);
+    }
+}
+
+/// Extracts the root type name from a type annotation node and emits a reference.
+///
+/// Given a type annotation expression, extracts the outermost type name:
+/// - `int` → `int` (identifier)
+/// - `Optional[str]` → `Optional` (subscript → value)
+/// - `typing.Optional` → `typing` (attribute → root identifier)
+/// - `None` → `None` (identifier, won't match any import)
+///
+/// Creates an `attribute_access:<name>` reference for each extracted type name.
+fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    if let Some(name) = extract_annotation_root_type(content, node) {
+        result.references.push(Reference {
+            id: ReferenceId::default(),
+            from: SymbolId::default(),
+            to: SymbolId::default(),
+            kind: ReferenceKind::Read,
+            location: node_location(path, node),
+            resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
+        });
+    }
+}
+
+/// Extracts the root type name from a type annotation expression.
+///
+/// Recursively unwraps subscript nodes to find the outermost type name:
+/// - `identifier("int")` → `Some("int")`
+/// - `subscript(value: identifier("Optional"), ...)` → `Some("Optional")`
+/// - `attribute(object: identifier("typing"), ...)` → `Some("typing")`
+/// - `type(child)` → recurses into child
+///
+/// Returns `None` for complex expressions that cannot be resolved to a name.
+fn extract_annotation_root_type(content: &[u8], node: Node) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = node_text(content, node);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        "generic_type" => {
+            // tree-sitter-python: `Optional[str]` → generic_type(identifier("Optional"), type_parameter("[str]"))
+            // First child is the type name identifier (or attribute for `typing.Optional[str]`)
+            let first_child = node.child(0)?;
+            extract_annotation_root_type(content, first_child)
+        }
+        "subscript" => {
+            // Subscript expression: `x[y]` → subscript(value: x, subscript: y)
+            let value = node.child_by_field_name("value")?;
+            extract_annotation_root_type(content, value)
+        }
+        "attribute" => {
+            // `typing.Optional` → extract root identifier ("typing")
+            extract_attribute_root_identifier(content, node)
+        }
+        "type" => {
+            // `type` wrapper node in tree-sitter-python — recurse into first child
+            let child = node.child(0)?;
+            extract_annotation_root_type(content, child)
+        }
+        "none" => Some("None".to_string()),
+        _ => None,
+    }
 }
 
 /// Extracts names from `__all__` assignments at module level.
@@ -2270,6 +2403,431 @@ mod tests {
         assert!(
             names.contains(&"another_valid"),
             "another_valid must survive syntax errors"
+        );
+    }
+
+    // =========================================================================
+    // QA-1 Cycle 21: Type Annotation References
+    // =========================================================================
+
+    // -- Category 1: Basic Parameter (TPARAM-*) --------------------------------
+
+    #[test]
+    fn test_type_annotation_simple_param_creates_reference() {
+        let content = "def foo(x: int):\n    pass\n";
+        let result = parse_fixture_content("type_param.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            r.kind == ReferenceKind::Read
+                && matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        assert!(
+            has_ref,
+            "Simple parameter annotation 'x: int' must create attribute_access:int reference. \
+             References: {:?}",
+            result.references
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_multiple_params_each_create_reference() {
+        let content = "def foo(x: int, y: str):\n    pass\n";
+        let result = parse_fixture_content("multi_param.py", content);
+        let has_int = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        let has_str = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:str")
+        });
+        assert!(
+            has_int,
+            "Parameter 'x: int' must create attribute_access:int reference"
+        );
+        assert!(
+            has_str,
+            "Parameter 'y: str' must create attribute_access:str reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_param_with_default_creates_reference() {
+        let content = "def foo(x: int = 5):\n    pass\n";
+        let result = parse_fixture_content("default_param.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        assert!(
+            has_ref,
+            "typed_default_parameter 'x: int = 5' must create reference. \
+             This is a different AST node from typed_parameter — both must be handled."
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_mixed_typed_untyped_params() {
+        let content = "def foo(a, b: int, c, d: str = \"hi\"):\n    pass\n";
+        let result = parse_fixture_content("mixed_params.py", content);
+        let has_int = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        let has_str = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:str")
+        });
+        assert!(has_int, "Typed parameter 'b: int' must produce reference");
+        assert!(
+            has_str,
+            "Typed default parameter 'd: str' must produce reference"
+        );
+    }
+
+    // -- Category 2: Return Types (TRET-*) ------------------------------------
+
+    #[test]
+    fn test_type_annotation_return_type_creates_reference() {
+        let content = "def foo() -> str:\n    pass\n";
+        let result = parse_fixture_content("return_type.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:str")
+        });
+        assert!(
+            has_ref,
+            "Return annotation '-> str' must create attribute_access:str reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_return_subscript_extracts_root() {
+        let content = "from typing import Optional\ndef foo() -> Optional[str]:\n    pass\n";
+        let result = parse_fixture_content("return_subscript.py", content);
+        let has_optional = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+        });
+        assert!(
+            has_optional,
+            "Return annotation '-> Optional[str]' must extract root type 'Optional'"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_param_and_return_both_create_references() {
+        let content = "def foo(x: int) -> str:\n    return str(x)\n";
+        let result = parse_fixture_content("param_and_return.py", content);
+        let has_int = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        let has_str = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:str")
+        });
+        assert!(has_int, "Parameter annotation must create reference");
+        assert!(has_str, "Return annotation must create reference");
+    }
+
+    // -- Category 3: Subscript/Complex Types (TSUB-*) -------------------------
+
+    #[test]
+    fn test_type_annotation_optional_extracts_root() {
+        let content = "from typing import Optional\ndef foo(x: Optional[str]):\n    pass\n";
+        let result = parse_fixture_content("optional_param.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+        });
+        assert!(
+            has_ref,
+            "Optional[str] must create attribute_access:Optional reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_dict_extracts_root() {
+        let content = "from typing import Dict\ndef foo(d: Dict[str, int]):\n    pass\n";
+        let result = parse_fixture_content("dict_param.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Dict")
+        });
+        assert!(
+            has_ref,
+            "Dict[str, int] must create attribute_access:Dict reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_union_extracts_root() {
+        let content = "from typing import Union\ndef foo(x: Union[str, int]):\n    pass\n";
+        let result = parse_fixture_content("union_param.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Union")
+        });
+        assert!(
+            has_ref,
+            "Union[str, int] must create attribute_access:Union reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_nested_generic_extracts_outermost() {
+        let content =
+            "from typing import Dict, List\ndef foo(d: Dict[str, List[int]]):\n    pass\n";
+        let result = parse_fixture_content("nested_generic.py", content);
+        let has_dict = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Dict")
+        });
+        assert!(
+            has_dict,
+            "Nested generic Dict[str, List[int]] must extract Dict as root"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_attribute_form_extracts_root() {
+        let content = "import typing\ndef foo(x: typing.Optional[str]):\n    pass\n";
+        let result = parse_fixture_content("typing_dot.py", content);
+        let has_typing = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:typing")
+        });
+        assert!(
+            has_typing,
+            "typing.Optional[str] must extract 'typing' as root via attribute root extraction"
+        );
+    }
+
+    // -- Category 4: Adversarial (TADV-*) -------------------------------------
+
+    #[test]
+    fn test_type_annotation_inside_string_no_reference() {
+        let content = "x = \"def foo(x: int): pass\"\n";
+        let result = parse_fixture_content("annotation_in_string.py", content);
+        let has_int_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        assert!(
+            !has_int_ref,
+            "Type annotation inside string literal must NOT create reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_in_comment_no_reference() {
+        let content = "# def foo(x: int): pass\ndef bar():\n    pass\n";
+        let result = parse_fixture_content("annotation_in_comment.py", content);
+        let int_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+            })
+            .collect();
+        assert!(
+            int_refs.is_empty(),
+            "Type annotation inside comment must NOT create reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_same_name_both_annotation_and_code() {
+        let content =
+            "from typing import Optional\nOptional\ndef foo(x: Optional[str]):\n    pass\n";
+        let result = parse_fixture_content("dual_usage.py", content);
+        let optional_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+            })
+            .collect();
+        assert!(
+            optional_refs.len() >= 2,
+            "Optional used in BOTH annotation and normal code must produce multiple references, got {}",
+            optional_refs.len()
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_no_matching_import_no_crash() {
+        let content = "def foo(x: UnknownType):\n    pass\n";
+        let result = parse_fixture_content("unknown_type.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:UnknownType")
+        });
+        assert!(
+            has_ref,
+            "Unknown type annotation must still create reference (resolution is downstream)"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_args_kwargs() {
+        let content = "def foo(*args: int, **kwargs: str):\n    pass\n";
+        let result = parse_fixture_content("args_kwargs.py", content);
+        let has_int = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        let has_str = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:str")
+        });
+        assert!(has_int, "*args: int must create reference");
+        assert!(has_str, "**kwargs: str must create reference");
+    }
+
+    #[test]
+    fn test_type_annotation_no_annotations_no_references() {
+        let content = "def foo():\n    pass\n";
+        let result = parse_fixture_content("no_annotations.py", content);
+        let spurious = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int"
+                || s == "attribute_access:str" || s == "attribute_access:Optional")
+        });
+        assert!(
+            !spurious,
+            "Function with no annotations must not create spurious type references"
+        );
+    }
+
+    // -- Category 5: Integration (TINT-*) -------------------------------------
+
+    #[test]
+    fn test_type_annotation_integration_import_used_in_annotation() {
+        let content = "from typing import Optional\n\ndef foo(x: Optional[str]):\n    pass\n";
+        let result = parse_fixture_content("import_annotation.py", content);
+
+        let import_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Optional" && s.annotations.contains(&"import".to_string()));
+        assert!(
+            import_sym.is_some(),
+            "Import symbol for Optional must exist"
+        );
+
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+        });
+        assert!(
+            has_ref,
+            "Type annotation must create attribute_access:Optional reference. \
+             This is the contract: populate_graph resolves attribute_access:<name> \
+             to matching import symbols, creating incoming edges that suppress phantom_dependency."
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_integration_multiple_typing_imports() {
+        let content = "\
+from typing import Optional, Dict, List
+
+def foo(x: Optional[str]) -> Dict[str, int]:
+    pass
+
+def bar(items: List[int]) -> None:
+    pass
+";
+        let result = parse_fixture_content("multi_typing.py", content);
+        for type_name in &["Optional", "Dict", "List"] {
+            let has_ref = result.references.iter().any(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s == &format!("attribute_access:{}", type_name))
+            });
+            assert!(
+                has_ref,
+                "Import '{}' used in annotation must create attribute_access reference",
+                type_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_type_annotation_method_in_class() {
+        let content = "\
+from typing import Dict, Optional
+
+class Service:
+    def process(self, data: Dict[str, int]) -> Optional[str]:
+        return None
+";
+        let result = parse_fixture_content("method_annotation.py", content);
+        let has_dict = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Dict")
+        });
+        let has_optional = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+        });
+        assert!(
+            has_dict,
+            "Method param annotation Dict must create reference"
+        );
+        assert!(
+            has_optional,
+            "Method return annotation Optional must create reference"
+        );
+    }
+
+    // -- Category 6: Regression (TREG-*) --------------------------------------
+
+    #[test]
+    fn test_type_annotation_regression_empty_file() {
+        let result = parse_fixture("empty.py");
+        assert!(result.symbols.is_empty(), "Empty file must have no symbols");
+        assert!(
+            result.references.is_empty(),
+            "Empty file must have no references"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_regression_syntax_errors() {
+        let result = parse_fixture("syntax_errors.py");
+        assert!(result.scopes.len() >= 1, "Must have at least file scope");
+    }
+
+    #[test]
+    fn test_type_annotation_regression_dunder_all_unaffected() {
+        let result = parse_fixture("dunder_all_basic.py");
+        let has_all_ref = result.references.iter().any(|r| {
+            r.kind == ReferenceKind::Read
+                && matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("attribute_access:helper"))
+        });
+        assert!(
+            has_all_ref,
+            "__all__ attribute_access references must still work after type annotation walk added"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_regression_import_count_stable() {
+        let result = parse_fixture("basic_functions.py");
+        let import_refs = result
+            .references
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Import)
+            .count();
+        assert_eq!(
+            import_refs, 0,
+            "basic_functions.py has no imports — import reference count must be stable at 0"
+        );
+    }
+
+    // -- Category 10: Class Field Annotations (TCLS-*, Stretch) ---------------
+
+    #[test]
+    fn test_type_annotation_class_field_annotation() {
+        let content = "class Foo:\n    name: str = \"default\"\n";
+        let result = parse_fixture_content("class_field.py", content);
+        let has_str = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:str")
+        });
+        assert!(
+            has_str,
+            "Class field annotation 'name: str' should create attribute_access:str reference"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_module_level_annotated_assignment() {
+        let content = "x: int = 42\n";
+        let result = parse_fixture_content("module_annotation.py", content);
+        let has_int = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
+        });
+        assert!(
+            has_int,
+            "Module-level annotated assignment 'x: int = 42' should create reference"
         );
     }
 }
