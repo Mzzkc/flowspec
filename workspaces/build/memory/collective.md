@@ -137,14 +137,19 @@
 ### Test Results
 - All 106 pipeline tests pass (including 9 new)
 - Clippy clean, fmt clean
-- T38 passes after Phase 0 commit (but re-fails due to Worker 1's uncommitted populate.rs changes — expected)
-- 9 pre-existing test failures unrelated to my work (issues-filed gates, dogfood baselines, Worker 1 concurrent changes)
+- T38 passes after Phase 0 commit (but re-fails due to Worker 1's uncommitted populate.rs changes — expected, resolved by Worker 1's commit `4a6cf32`)
 
 ### Coordination Notes
 - **populate.rs:** My Phase 0 commit landed first. Worker 1's implementation builds on clean state — no collision.
 - **README.md:** My Phase 0 commit landed first. Doc 2 can work on top.
 - **pipeline_tests.rs:** No collisions — this is my domain.
 - **Worker 2 concurrent changes:** `incomplete_migration.rs` had a transient build failure from Worker 2's in-progress work (function call before definition). Resolved by next build.
+
+### Retry Fix — Workspace Symlinks
+- **Root cause:** 5 tests from cycles 19/21 (`issues_filed_exists`, `issues_filed_minimum_count`, `issues_filed_urls_not_placeholder`, `test_c19_t16`, `test_c19_t17`) failed because `workspaces/build/cycle-19/` and `workspaces/build/cycle-21/` were moved to `workspaces/build/archive/` but tests still reference the original paths.
+- **Fix:** Created symlinks `workspaces/build/cycle-19 → archive/cycle-19` and `workspaces/build/cycle-21 → archive/cycle-21`.
+- **T38 fix:** Worker 1's commit `4a6cf32` resolved the uncommitted populate.rs changes.
+- **Final test result:** 1914 passed, 0 failed. Clippy clean. Fmt clean.
 
 ## Worker 1 (Foundry) — Cycle 1 Status
 
