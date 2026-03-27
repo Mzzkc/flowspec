@@ -717,6 +717,65 @@ fn is_child_module(
     module_map.contains_key(&child_key)
 }
 
+/// Resolves Python relative imports (`.b`, `..parent`, `...top`) to module map keys.
+///
+/// Python relative imports use leading dots to indicate the package level:
+/// - `.b` (1 dot) = sibling module in the same package
+/// - `..parent` (2 dots) = module in the parent package
+/// - `...top` (3 dots) = module two levels up
+///
+/// The algorithm:
+/// 1. Count leading dots to determine depth
+/// 2. Find the importing file's module key via reverse lookup
+/// 3. Strip `depth` trailing components from the module key to get the base package
+/// 4. Append the dotted name (if any) after the dots
+/// 5. Look up the resolved key in the module map
+fn resolve_python_relative_import(
+    module_name: &str,
+    importing_file: &std::path::Path,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    // Count leading dots
+    let dot_count = module_name.chars().take_while(|&c| c == '.').count();
+    if dot_count == 0 {
+        return None;
+    }
+
+    // Extract the name after the dots (may be empty for `from . import x`)
+    let after_dots = &module_name[dot_count..];
+
+    // Find the importing file's module key
+    let importing_key = find_module_key_for_file(importing_file, module_map)?;
+
+    // Split the importing module key into components
+    let components: Vec<&str> = importing_key.split('.').collect();
+
+    // Remove `dot_count` trailing components:
+    // 1 dot removes the file's own component (going to its package)
+    // 2 dots removes the file + one package level, etc.
+    if dot_count > components.len() {
+        // Can't go above the root package
+        return None;
+    }
+    let base_components = &components[..components.len() - dot_count];
+
+    // Build the resolved key
+    let resolved_key = if after_dots.is_empty() {
+        // `from . import x` — resolve to the package itself
+        base_components.join(".")
+    } else if base_components.is_empty() {
+        after_dots.to_string()
+    } else {
+        format!("{}.{}", base_components.join("."), after_dots)
+    };
+
+    if resolved_key.is_empty() {
+        return None;
+    }
+
+    module_map.get(&resolved_key).cloned()
+}
+
 /// Resolves cross-file import references by matching import symbols to definitions
 /// in other files via a module-to-file mapping.
 ///
@@ -816,6 +875,12 @@ pub fn resolve_cross_file_imports(
             || module_name.starts_with("self::")
         {
             resolve_rust_module_path(module_name, importing_file, module_map)
+        } else if module_name.starts_with('.')
+            && !module_name.starts_with("./")
+            && importing_file.extension().and_then(|e| e.to_str()) == Some("py")
+        {
+            // Python relative import: `.b`, `..parent`, `...top`
+            resolve_python_relative_import(module_name, importing_file, module_map)
         } else {
             let direct = module_map.get(module_name.as_str()).cloned();
             if direct.is_some() {

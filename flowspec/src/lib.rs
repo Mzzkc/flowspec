@@ -104,6 +104,12 @@ mod cycle20_analysis_tests;
 #[cfg(test)]
 mod cycle20_surface_tests;
 
+#[cfg(test)]
+mod cycle21_surface_tests;
+
+#[cfg(test)]
+mod cycle21_analysis_tests;
+
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
 pub use analyzer::flow::{
@@ -195,9 +201,11 @@ pub struct AnalysisResult {
 /// # Parameters
 ///
 /// - `project_path` — root directory (or single file) to analyze. Must exist.
-/// - `_config` — project configuration (reserved for future use).
+/// - `config` — project configuration loaded from `.flowspec/config.yaml`.
+///   Supplies `exclude` patterns for file discovery and `languages` as a
+///   fallback when the CLI `--language` flag is not set.
 /// - `languages` — restrict analysis to these languages (e.g. `["python"]`).
-///   Pass an empty slice to auto-detect from file extensions.
+///   Pass an empty slice to use config languages or auto-detect from extensions.
 ///
 /// # Returns
 ///
@@ -216,7 +224,8 @@ pub struct AnalysisResult {
 /// # Pipeline stages
 ///
 /// 1. **Discover** source files, skipping generated directories
-///    (`target/`, `node_modules/`, `__pycache__/`, etc.).
+///    (`target/`, `node_modules/`, `__pycache__/`, etc.), config `exclude`
+///    patterns, and `.gitignore`-matched paths.
 /// 2. **Parse** each file with the appropriate [`LanguageAdapter`] (Python, JS,
 ///    Rust) via tree-sitter, producing IR and populating the [`Graph`].
 /// 3. **Resolve** cross-file imports by building a module map and linking
@@ -525,6 +534,9 @@ pub fn analyze(
         })
         .collect();
 
+    // Stage 4c: Deduplicate flows — hash-based dedup on (entry, exit, steps)
+    let flows = deduplicate_flows(flows);
+
     // Stage 5: Assemble manifest
     let diagnostic_count = diagnostics.len() as u64;
     let has_critical = diagnostics.iter().any(|d| d.severity == "critical");
@@ -633,6 +645,37 @@ pub fn analyze(
         graph,
         source_bytes,
     })
+}
+
+/// Deduplicate flow entries, preserving first occurrence and re-numbering IDs.
+///
+/// Two flows are considered duplicates if they share the same entry, exit,
+/// and step entity sequence. The dedup key includes steps (not just entry/exit)
+/// to preserve flows with the same endpoints but different intermediate paths.
+pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
+    let mut seen = HashSet::new();
+    let mut unique: Vec<FlowEntry> = Vec::with_capacity(flows.len());
+
+    for flow in flows {
+        let step_entities: String = flow
+            .steps
+            .iter()
+            .map(|s| s.entity.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = format!("{}|{}|{}", flow.entry, flow.exit, step_entities);
+
+        if seen.insert(key) {
+            unique.push(flow);
+        }
+    }
+
+    // Re-number IDs sequentially after dedup
+    for (i, flow) in unique.iter_mut().enumerate() {
+        flow.id = format!("F{:03}", i + 1);
+    }
+
+    unique
 }
 
 /// Run diagnostics on a project, returning filtered diagnostic entries.

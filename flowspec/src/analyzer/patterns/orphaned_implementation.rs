@@ -2,11 +2,11 @@
 
 //! Orphaned implementation detection — methods with zero dispatch points.
 //!
-//! Finds `SymbolKind::Method` symbols that have zero inbound Call edges.
-//! These are implementations that exist but are never dispatched to.
-//! Distinguishes from `data_dead_end` by targeting only methods (not
-//! functions, variables, or constants). Both patterns may fire on the
-//! same method — the messages and suggestions differ.
+//! Finds `SymbolKind::Method` symbols that have zero inbound Call or
+//! References edges. These are implementations that exist but are never
+//! dispatched to. After C20, Methods are exclusively diagnosed by
+//! `orphaned_impl`; `data_dead_end` excludes `SymbolKind::Method` via
+//! its kind filter. The two patterns have zero entity overlap.
 
 use std::collections::HashSet;
 use std::path::Path;
