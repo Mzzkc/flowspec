@@ -48,8 +48,8 @@
   - Massive graph (1000 symbols) partition holds with zero overlap
 - **Fixed:** Stale orphaned_impl doc that claimed "Both patterns may fire on the same method"
 - **Fixed:** clippy collapsible_else_if in populate.rs (Worker 1's resolve_python_relative_import)
-- **Pre-existing failures (NOT from my changes):** Worker 1's 10 type annotation TDD tests, Worker 3's 3 issues-filed/surface tests, C18 stash artifact test
 - **No code changes to pattern detection logic** — investigation confirmed dedup is complete after C20
+- **Post-all-workers verification:** All 2,216 tests pass, 0 failures. Clippy clean. Fmt clean. Build succeeds. All three workers committed: Worker 1 (`c592173`), Worker 2 (`13939fa`), Worker 3 (`1f76b1a`).
 
 ## Worker 3 (Interface) — Cycle 21 Status
 - **Committed:** `1f76b1a` — dedup in analyze() + 29 QA-3 tests + decisions.log v1.1 deferral + 3 GH issues
