@@ -712,15 +712,18 @@ fn test_c15_t19_missing_reexport_inherent_method_is_false_positive() {
     let diagnostics = missing_reexport::detect(&graph, Path::new(""));
 
     // "YamlFormatter" IS re-exported (matched by name in parent imports).
-    // "new" is NOT re-exported — parent has no import matching "new".
+    // "new" is a Method — methods are now correctly excluded from
+    // missing_reexport (Concert 4 fix: methods on classes are never
+    // re-exported through __init__.py or mod.rs).
     let new_findings: Vec<_> = diagnostics
         .iter()
         .filter(|d| d.entity.contains("new"))
         .collect();
     assert!(
-        !new_findings.is_empty(),
-        "T19: missing_reexport MUST fire on 'new' — inherent method not independently re-exported. \
-         Worker 2 found 13 such findings (new/detect methods on re-exported types)."
+        new_findings.is_empty(),
+        "T19: missing_reexport must NOT fire on 'new' — it is a Method, and methods \
+         on classes are never re-exported through parent modules. \
+         Concert 4 fix: Method symbols excluded from re-export candidates."
     );
 }
 

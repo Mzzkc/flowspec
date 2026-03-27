@@ -415,9 +415,11 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
         "data_dead_end ~ 258 (C20 baseline after Method dedup), got {}",
         dead_end
     );
+    // Concert 4: Method symbols excluded from re-export candidates.
+    // Baseline dropped from ~59 to ~48.
     assert!(
-        (missing as i32 - 59).abs() <= 10,
-        "missing_reexport ~ 59, got {}",
+        (missing as i32 - 48).abs() <= 10,
+        "missing_reexport ~ 48 (post-method-exclusion), got {}",
         missing
     );
     assert!(

@@ -664,9 +664,11 @@ fn test_c17_t18_missing_reexport_unchanged() {
         .count();
     eprintln!("T18: missing_reexport = {}", missing);
 
+    // Concert 4: Method symbols excluded from re-export candidates.
+    // Baseline dropped from ~59 to ~48.
     assert!(
-        (missing as i32 - 59).abs() <= 10,
-        "missing_reexport ~59, got {}",
+        (missing as i32 - 48).abs() <= 10,
+        "missing_reexport ~48 (post-method-exclusion), got {}",
         missing
     );
 }

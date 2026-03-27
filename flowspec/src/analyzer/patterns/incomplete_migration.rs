@@ -120,6 +120,46 @@ fn count_production_callers(graph: &Graph, id: SymbolId) -> Vec<SymbolId> {
         .collect()
 }
 
+/// Check if a group of versioned functions forms a sequential migration chain.
+///
+/// A sequential chain is when 3+ versioned functions (e.g., `_migrate_v1` through
+/// `_migrate_v4`) ALL share at least one common production caller. This indicates
+/// an orchestrator function (e.g., `_run_migrations`) that intentionally calls
+/// all versions in sequence — a deliberate pattern, not an incomplete migration.
+fn is_sequential_migration_chain(
+    graph: &Graph,
+    members: &[(SymbolId, String, String, u32, u32)],
+) -> bool {
+    use std::collections::HashSet;
+
+    // Collect production callers for each member
+    let caller_sets: Vec<HashSet<SymbolId>> = members
+        .iter()
+        .map(|(id, _, _, _, _)| count_production_callers(graph, *id).into_iter().collect())
+        .collect();
+
+    // Check if there's at least one caller common to ALL members
+    if let Some(first) = caller_sets.first() {
+        for caller in first {
+            if caller_sets.iter().all(|set| set.contains(caller)) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a sync/async pair represents an intentional wrapper pattern.
+///
+/// When one function in a sync/async pair directly calls the other (e.g.,
+/// `_enforce_size_cap_async` calls `_enforce_size_cap_sync`), it's an
+/// intentional wrapper pattern, not an incomplete migration.
+fn is_sync_async_wrapper_pair(graph: &Graph, id_a: SymbolId, id_b: SymbolId) -> bool {
+    // Check if a calls b or b calls a
+    graph.callers(id_b).contains(&id_a) || graph.callers(id_a).contains(&id_b)
+}
+
 /// Detect incomplete migrations in the analysis graph.
 ///
 /// Scans all Function/Method symbols for naming pairs that indicate old/new
@@ -356,6 +396,13 @@ fn detect_naming_pairs(graph: &Graph, project_root: &Path, diagnostics: &mut Vec
                     continue;
                 }
 
+                // Sync/async wrapper exclusion: if one function directly
+                // calls the other, this is an intentional wrapper pattern
+                // (e.g., async_fetch calls sync_fetch), not an incomplete migration.
+                if is_sync_async_wrapper_pair(graph, old.id, new.id) {
+                    continue;
+                }
+
                 // Both must have ≥1 production caller
                 let old_callers = count_production_callers(graph, old.id);
                 let new_callers = count_production_callers(graph, new.id);
@@ -488,6 +535,14 @@ fn detect_version_pairs(graph: &Graph, project_root: &Path, diagnostics: &mut Ve
 
         // Sort by version number
         members.sort_by_key(|m| m.4);
+
+        // Sequential migration chain detection: if 3+ versioned functions
+        // ALL share a common production caller, this is a deliberate
+        // sequential migration pattern (e.g., _migrate_v1 through _migrate_v4
+        // all called by _run_migrations). Not an incomplete migration.
+        if members.len() >= 3 && is_sequential_migration_chain(graph, &members) {
+            continue;
+        }
 
         // Check all consecutive pairs and non-consecutive pairs
         for i in 0..members.len() {
@@ -1984,6 +2039,251 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "Import symbols should not trigger migration pairs"
+        );
+    }
+
+    // =========================================================================
+    // QA-2 T10: Versioned migration functions with common caller excluded
+    // =========================================================================
+
+    /// Sequential DB migration functions like `_migrate_v1` through `_migrate_v4`
+    /// all called by `_run_migrations` are intentional — not incomplete migrations.
+    #[test]
+    fn versioned_sequential_migration_chain_excluded() {
+        let mut g = Graph::new();
+        let f = "store/base.py";
+
+        // Four sequential migration functions
+        let v1 = g.add_symbol(make_symbol(
+            "_migrate_v1",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            100,
+        ));
+        let v2 = g.add_symbol(make_symbol(
+            "_migrate_v2",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            150,
+        ));
+        let v3 = g.add_symbol(make_symbol(
+            "_migrate_v3",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            200,
+        ));
+        let v4 = g.add_symbol(make_symbol(
+            "_migrate_v4",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            250,
+        ));
+
+        // Single orchestrator calls ALL versions
+        let orchestrator = g.add_symbol(make_symbol(
+            "_run_migrations",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            50,
+        ));
+        add_ref(&mut g, orchestrator, v1, ReferenceKind::Call, f);
+        add_ref(&mut g, orchestrator, v2, ReferenceKind::Call, f);
+        add_ref(&mut g, orchestrator, v3, ReferenceKind::Call, f);
+        add_ref(&mut g, orchestrator, v4, ReferenceKind::Call, f);
+
+        let diagnostics = detect(&g, Path::new(""));
+        let version_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("_migrate_v"))
+            .collect();
+        assert!(
+            version_findings.is_empty(),
+            "Sequential migration chain (_migrate_v1..v4) with common caller \
+             must NOT be flagged. Got {} findings: {:?}",
+            version_findings.len(),
+            version_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Version pairs with DIFFERENT callers (genuine migration split) must
+    /// still be detected even in groups of 3+.
+    #[test]
+    fn versioned_split_callers_still_detected() {
+        let mut g = Graph::new();
+        let f = "api.py";
+
+        // Three versioned functions with different caller groups
+        let v1 = g.add_symbol(make_symbol(
+            "handle_v1",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            5,
+        ));
+        let v2 = g.add_symbol(make_symbol(
+            "handle_v2",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            15,
+        ));
+        let v3 = g.add_symbol(make_symbol(
+            "handle_v3",
+            SymbolKind::Function,
+            Visibility::Public,
+            f,
+            25,
+        ));
+
+        // Different callers per version — no common orchestrator
+        let c1 = g.add_symbol(make_symbol(
+            "old_route",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            50,
+        ));
+        let c2 = g.add_symbol(make_symbol(
+            "mid_route",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            60,
+        ));
+        let c3 = g.add_symbol(make_symbol(
+            "new_route",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            70,
+        ));
+        add_ref(&mut g, c1, v1, ReferenceKind::Call, f);
+        add_ref(&mut g, c2, v2, ReferenceKind::Call, f);
+        add_ref(&mut g, c3, v3, ReferenceKind::Call, f);
+
+        let diagnostics = detect(&g, Path::new(""));
+        assert!(
+            !diagnostics.is_empty(),
+            "Version trio with DIFFERENT callers per version must still be detected"
+        );
+    }
+
+    // =========================================================================
+    // QA-2 T11: Sync/async wrapper pairs excluded
+    // =========================================================================
+
+    /// Sync/async pairs where one wraps the other (async calls sync) are
+    /// intentional, not incomplete migrations.
+    #[test]
+    fn sync_async_wrapper_pair_excluded() {
+        let mut g = Graph::new();
+        let f = "store/base.py";
+
+        let sync_fn = g.add_symbol(make_symbol(
+            "_enforce_size_cap_sync",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            100,
+        ));
+        let async_fn = g.add_symbol(make_symbol(
+            "_enforce_size_cap_async",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            120,
+        ));
+
+        // async wraps sync — async calls sync directly
+        add_ref(&mut g, async_fn, sync_fn, ReferenceKind::Call, f);
+
+        // Both have external callers (the point is: they coexist intentionally)
+        let sync_caller = g.add_symbol(make_symbol(
+            "cleanup_sync",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            200,
+        ));
+        let async_caller = g.add_symbol(make_symbol(
+            "cleanup_async",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            220,
+        ));
+        add_ref(&mut g, sync_caller, sync_fn, ReferenceKind::Call, f);
+        add_ref(&mut g, async_caller, async_fn, ReferenceKind::Call, f);
+
+        let diagnostics = detect(&g, Path::new(""));
+        let sync_async_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("enforce_size_cap"))
+            .collect();
+        assert!(
+            sync_async_findings.is_empty(),
+            "Sync/async wrapper pair where one calls the other must NOT be flagged. \
+             Got: {:?}",
+            sync_async_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Sync/async pair where neither calls the other — genuine incomplete
+    /// migration — must still be detected.
+    #[test]
+    fn sync_async_independent_pair_still_detected() {
+        let mut g = Graph::new();
+        let f = "handler.py";
+
+        let sync_fn = g.add_symbol(make_symbol(
+            "fetch_sync",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            10,
+        ));
+        let async_fn = g.add_symbol(make_symbol(
+            "fetch_async",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            30,
+        ));
+
+        // Independent callers — neither function calls the other
+        let c1 = g.add_symbol(make_symbol(
+            "old_handler",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            50,
+        ));
+        let c2 = g.add_symbol(make_symbol(
+            "new_handler",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            60,
+        ));
+        add_ref(&mut g, c1, sync_fn, ReferenceKind::Call, f);
+        add_ref(&mut g, c2, async_fn, ReferenceKind::Call, f);
+
+        let diagnostics = detect(&g, Path::new(""));
+        assert!(
+            !diagnostics.is_empty(),
+            "Sync/async pair with independent callers (no wrapper pattern) \
+             must still be detected as incomplete migration"
         );
     }
 }

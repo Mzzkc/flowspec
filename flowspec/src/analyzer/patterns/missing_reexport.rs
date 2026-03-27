@@ -175,6 +175,13 @@ fn collect_public_symbols(graph: &Graph, file_path: &Path) -> Vec<(String, Strin
             continue;
         }
 
+        // Skip Method symbols — methods on classes are never re-exported
+        // through `__init__.py` in Python or `mod.rs` in Rust.
+        // Only standalone functions and classes are re-export candidates.
+        if symbol.kind == SymbolKind::Method {
+            continue;
+        }
+
         // Skip import symbols (they're imports, not definitions)
         if symbol.annotations.contains(&"import".to_string()) {
             continue;
@@ -199,4 +206,153 @@ fn collect_public_symbols(graph: &Graph, file_path: &Path) -> Vec<(String, Strin
     }
 
     symbols
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::Graph;
+    use crate::parser::ir::{SymbolKind, Visibility};
+    use crate::test_utils::*;
+
+    // =========================================================================
+    // QA-2 T9: Methods on classes must NOT be flagged for re-export
+    // =========================================================================
+
+    /// Methods are never re-exported through `__init__.py` in Python.
+    /// Only standalone functions and classes are re-export candidates.
+    #[test]
+    fn methods_on_classes_excluded_from_missing_reexport() {
+        let mut g = Graph::new();
+
+        // Parent module (__init__.py)
+        let _init_mod = g.add_symbol(make_symbol(
+            "pkg",
+            SymbolKind::Module,
+            Visibility::Public,
+            "pkg/__init__.py",
+            1,
+        ));
+
+        // Submodule with a public class that has public methods
+        let _sub_mod = g.add_symbol(make_symbol(
+            "manager",
+            SymbolKind::Module,
+            Visibility::Public,
+            "pkg/manager.py",
+            1,
+        ));
+        let _class = g.add_symbol(make_symbol(
+            "SSEManager",
+            SymbolKind::Class,
+            Visibility::Public,
+            "pkg/manager.py",
+            5,
+        ));
+        // Public methods on the class
+        let _method1 = g.add_symbol(make_symbol(
+            "connect",
+            SymbolKind::Method,
+            Visibility::Public,
+            "pkg/manager.py",
+            10,
+        ));
+        let _method2 = g.add_symbol(make_symbol(
+            "disconnect",
+            SymbolKind::Method,
+            Visibility::Public,
+            "pkg/manager.py",
+            20,
+        ));
+        let _method3 = g.add_symbol(make_symbol(
+            "recovery_timeout",
+            SymbolKind::Method,
+            Visibility::Public,
+            "pkg/manager.py",
+            30,
+        ));
+
+        let diagnostics = detect(&g, Path::new(""));
+
+        // Methods must NOT be flagged
+        for d in &diagnostics {
+            assert!(
+                d.entity != "pkg/manager::connect"
+                    && d.entity != "pkg/manager::disconnect"
+                    && d.entity != "pkg/manager::recovery_timeout",
+                "Method '{}' must NOT be flagged as missing re-export — \
+                 methods on classes are never re-exported through __init__.py",
+                d.entity
+            );
+        }
+
+        // But the class itself (SSEManager) SHOULD be flagged since it's
+        // public and not re-exported
+        let class_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("SSEManager"))
+            .collect();
+        assert!(
+            !class_findings.is_empty(),
+            "The class SSEManager should still be flagged as missing re-export"
+        );
+    }
+
+    /// Standalone functions should still be flagged even when methods are excluded.
+    #[test]
+    fn standalone_functions_still_flagged() {
+        let mut g = Graph::new();
+
+        let _init_mod = g.add_symbol(make_symbol(
+            "pkg",
+            SymbolKind::Module,
+            Visibility::Public,
+            "pkg/__init__.py",
+            1,
+        ));
+
+        let _sub_mod = g.add_symbol(make_symbol(
+            "utils",
+            SymbolKind::Module,
+            Visibility::Public,
+            "pkg/utils.py",
+            1,
+        ));
+        let _func = g.add_symbol(make_symbol(
+            "helper_fn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "pkg/utils.py",
+            5,
+        ));
+        let _method = g.add_symbol(make_symbol(
+            "internal_method",
+            SymbolKind::Method,
+            Visibility::Public,
+            "pkg/utils.py",
+            10,
+        ));
+
+        let diagnostics = detect(&g, Path::new(""));
+
+        // Function should be flagged
+        let func_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("helper_fn"))
+            .collect();
+        assert!(
+            !func_findings.is_empty(),
+            "Standalone function helper_fn should still be flagged"
+        );
+
+        // Method should NOT be flagged
+        let method_findings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("internal_method"))
+            .collect();
+        assert!(
+            method_findings.is_empty(),
+            "Method internal_method must NOT be flagged as missing re-export"
+        );
+    }
 }
