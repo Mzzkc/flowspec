@@ -310,6 +310,27 @@ fn insert_references(
                 new_ref.to =
                     resolve_callee(callee_name, &new_ref.from, graph, symbol_id_map, symbols);
 
+                // Instance-attribute type resolution fallback:
+                // When self.attr.method() fails normal resolution (because resolve_callee
+                // can't find a method named "attr.method" on the class), try resolving
+                // through instance attribute type annotations from __init__.
+                if new_ref.to == SymbolId::default() {
+                    if let Some(method_part) = callee_name
+                        .strip_prefix("self.")
+                        .or_else(|| callee_name.strip_prefix("this."))
+                    {
+                        if method_part.contains('.') {
+                            new_ref.to = resolve_through_instance_attr(
+                                method_part,
+                                references,
+                                graph,
+                                symbol_id_map,
+                                symbols,
+                            );
+                        }
+                    }
+                }
+
                 // Skip adding unresolved call edges — they create phantom edges to
                 // SymbolId::default() that pollute callees()/callers() results.
                 if new_ref.to == SymbolId::default() {
@@ -498,6 +519,86 @@ fn resolve_callee(
             candidates[0].1
         }
     }
+}
+
+/// Resolves `self.attr.method()` through instance-attribute type annotations.
+///
+/// When `resolve_callee` cannot resolve `self.attr.method()` (because there is no
+/// method named `attr.method` on the class), this function checks whether the
+/// file's `instance_attr_type:` references map `attr` to a known type, then looks
+/// up `method` on that type within the same file.
+///
+/// `dotted_method` is the portion after `self.` — e.g., `_backend.execute`.
+/// Only handles one level of dispatch (`self.attr.method()`). Deeper chains
+/// (`self.a.b.c()`) are not supported in v1.
+///
+/// Returns `SymbolId::default()` if resolution fails (type not annotated, type not
+/// found in same file, or method not found on type). The caller drops the edge
+/// in this case — existing behavior, no crash.
+fn resolve_through_instance_attr(
+    dotted_method: &str,
+    references: &[Reference],
+    graph: &Graph,
+    symbol_id_map: &[(usize, SymbolId)],
+    symbols: &[Symbol],
+) -> SymbolId {
+    let (attr_name, method_name) = match dotted_method.split_once('.') {
+        Some((a, m)) => (a, m),
+        None => return SymbolId::default(),
+    };
+
+    // Search references for instance_attr_type:*.attr_name=TypeName
+    let type_name = references.iter().find_map(|r| {
+        if let ResolutionStatus::Partial(info) = &r.resolution {
+            if let Some(rest) = info.strip_prefix("instance_attr_type:") {
+                // Format: ClassName.attr_name=TypeName
+                if let Some(eq_pos) = rest.rfind('=') {
+                    let attr_part = &rest[..eq_pos];
+                    let type_part = &rest[eq_pos + 1..];
+                    if attr_part.ends_with(&format!(".{}", attr_name)) {
+                        return Some(type_part.to_string());
+                    }
+                }
+            }
+        }
+        None
+    });
+
+    let type_name = match type_name {
+        Some(t) => t,
+        None => return SymbolId::default(),
+    };
+
+    // Find method_name on type_name class in same file
+    for &(idx, real_id) in symbol_id_map {
+        let sym = &symbols[idx];
+        if sym.name == method_name && sym.kind == SymbolKind::Method {
+            // Check if this method belongs to the type's class by looking at
+            // the graph symbol's scope — it should share scope with a class
+            // symbol named type_name
+            if let Some(graph_sym) = graph.get_symbol(real_id) {
+                // Find a class symbol with matching name and scope
+                for &(class_idx, class_id) in symbol_id_map {
+                    let class_sym = &symbols[class_idx];
+                    if class_sym.name == type_name && class_sym.kind == SymbolKind::Class {
+                        if let Some(class_graph_sym) = graph.get_symbol(class_id) {
+                            // The method's scope should match the class's ID scope
+                            // (methods are scoped under their class)
+                            if graph_sym.scope == class_graph_sym.scope
+                                || sym
+                                    .qualified_name
+                                    .contains(&format!("{}::{}", type_name, method_name))
+                            {
+                                return real_id;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    SymbolId::default()
 }
 
 /// Resolves an import symbol by name for attribute access references.

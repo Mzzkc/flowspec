@@ -1,133 +1,181 @@
 # Worker 1 (Foundry) — Memory
 
 ## Identity
-Infrastructure engineer. Tree-sitter integration, language adapters, IR, persistent graph, cache serialization, incremental analysis. If the foundation is wrong, nothing works.
+Infrastructure engineer. Tree-sitter integration, language adapters (Python/JS/Rust), IR design, semantic resolution, persistent graph, cache serialization, incremental analysis. If the foundation is wrong, nothing works.
 
-## Hot (Cycle 20)
+## Hot (Current Build Cycle — Preprocessor Phase)
 
-### `__all__` + `TYPE_CHECKING` in Python Adapter
+### Spec Corpus Analysis
 
-**Context:** Field test against Mozart AI Compose exposed ~0% TP rate on phantom_dependency. 40% of FPs from `__all__` re-exports not recognized, 24% from `TYPE_CHECKING` imports flagged as phantom. Strategic pivot — all work redirected to Python accuracy.
+Read all 9 spec files in `.flowspec/spec/`. Here is my domain-specific analysis through the lens of tree-sitter parsing, language adapters, IR, graph, and incremental analysis.
 
-**`extract_dunder_all()` — ~60 lines.** Detects `__all__ = [...]`, `__all__ = (...)`, `__all__ += [...]` at module level. Extracts string literals via `string_content` child nodes. Creates `attribute_access:<name>` references that piggyback on existing resolve_import_by_name in populate_graph. Non-string items silently skipped. Class-level `__all__` ignored (scope_stack.len() <= 1).
+### Key Requirements for My Domain
 
-**`mark_type_checking_imports()` — ~80 lines + ~25 helper.** Post-processing pass after main walk. `find_type_checking_ranges()` recursively finds `if_statement` nodes where condition is `identifier("TYPE_CHECKING")` or `attribute("typing.TYPE_CHECKING")`. Annotates import symbols within ranges with `"type_checking_import"`. Creates `attribute_access:TYPE_CHECKING` and `attribute_access:<import_name>` references. Correctly ignores negated `if not TYPE_CHECKING:`.
+**1. Parser + Language Adapters (MOSTLY DONE)**
+- Python adapter: `parser/python.rs` (2833 lines) — DONE. Includes `__all__`, `TYPE_CHECKING`, type annotation references, relative import support.
+- JavaScript/TypeScript adapter: `parser/javascript.rs` (4999 lines) — DONE. ESM, CJS, cross-file, TS preprocessing pipeline (`strip_generics`, `strip_type_annotations`, `strip_implements_clause`), entity dedup.
+- Rust adapter: `parser/rust.rs` (2569 lines) — DONE. Intra/cross-file, `use` tree extraction, type references, proximity-based resolution.
+- IR types: `parser/ir.rs` (638 lines) — DONE. 11 `SymbolKind` variants, 7 `ReferenceKind` variants, 4 ID types (`SymbolId`, `ScopeId`, `BoundaryId`, `ReferenceId`) via slotmap.
+- `LanguageAdapter` trait: `parser/mod.rs` — DONE. `language_name()`, `can_handle()`, `parse_file()`.
 
-**Key design pattern:** `attribute_access:` piggyback — reuses existing resolution in populate_graph. No IR changes, no populate.rs changes, no phantom_dependency.rs changes. Minimal blast radius. Most elegant pattern in this project.
+**2. Graph Core (DONE, needs extension for cache)**
+- `graph/mod.rs` (1268 lines) — Flat slotmap arenas, bidirectional adjacency, file-to-symbol maps. `connected_components()`, `detect_cycles()`, `callees()`, `callers()`, `importers()`.
+- `graph/populate.rs` (4171 lines) — 4-phase population (scopes → symbols → references → boundaries). `resolve_cross_file_imports()` with language-specific routing (Python `.`-prefix, JS `./`, Rust `crate::`/`super::`/`self::`).
 
-**35 QA-1 tests — all pass first run.** 7 categories: ALL-5 basic, AADV-7 adversarial, TC-5 basic, TCADV-6 adversarial, INT-3 integration, INLINE-5 inline, REG-4 regression. 13 fixture files.
+**3. Persistent Graph + Cache Serialization (NOT STARTED)**
+This is the single largest gap in my domain. The spec requires:
+- Binary cache at `.flowspec/cache/graph.bin` (architecture.yaml:192-200)
+- `file_hashes.json` — SHA256 per source file
+- `metadata.json` — version, timestamp, language config
+- Serialization via `bincode` (already a dependency, v2)
+- `slotmap` has `serde` feature enabled — serialization is possible
 
-**Collision handling:** Fixed Worker 3's compile error, 3 clippy warnings, formatted Worker 3's test file. Worker 2's 6 baseline test failures from Method dedup — expected.
+The `Graph` struct currently derives `Debug, Clone, Default` but NOT `Serialize/Deserialize` or `Encode/Decode`. This is the first thing to fix. All IR types already derive `Encode, Decode, Serialize, Deserialize` — the graph just needs the same.
 
-**Codebase snapshot:** ~2102 tests passing. Full suite verified on retry.
+**Challenge:** `HashMap<SymbolId, Vec<Edge>>` with slotmap keys. `slotmap` keys implement `Serialize`/`Deserialize` when the `serde` feature is on, but `bincode` v2 uses its own `Encode`/`Decode` traits. Need to verify that the `slotmap` key types work with `bincode` 2.x encode/decode, or implement custom serialization. This is a real risk — slotmap + bincode 2.x compatibility isn't guaranteed out of the box.
 
-### Experiential (C20)
-Investigation-first pays off AGAIN. The tree-sitter AST investigation was exactly right — zero surprises during implementation. All 35 tests passed first run. The `attribute_access:` piggyback pattern reuses existing infrastructure without touching files outside my ownership — creating a Read reference with `attribute_access:<name>` makes populate_graph create an incoming edge on the matching import symbol, which is exactly what phantom_dependency checks for.
+**4. Incremental Analysis (NOT STARTED)**
+Spec requires (architecture.yaml:56-58, constraints.yaml:86-91):
+- First run: parse everything, build full graph, serialize to disk.
+- Subsequent runs: load cached graph, diff source files by hash, re-parse only changed files, update the graph.
+- Invariant: incremental analysis must produce identical results to full analysis (architecture.yaml:208).
+- Performance: incremental under 1 minute for 50K-line codebase (constraints.yaml:89-91).
 
-This work directly addresses the field test crisis. If the 10-sample FP breakdown is accurate (40% + 24% = 64%), these two fixes should reduce phantom_dependency FPs by ~64%. Most impactful single cycle since Python cross-file resolution in C6.
+This requires:
+1. File hash computation (SHA256 of each source file)
+2. Hash comparison against cached hashes
+3. Selective re-parsing (only changed files)
+4. Graph update (remove old nodes for changed files, insert new ones)
+5. Re-run cross-file resolution on affected file neighborhoods
 
-TYPE_CHECKING was slightly more complex — post-processing means walking AST twice. But it keeps the main walk clean. Investigation→test→implementation pipeline is now a well-oiled machine.
+The `file_symbols` and `file_scopes` maps on `Graph` already support per-file tracking. A `remove_file()` method would remove all symbols/scopes/references for a given file, then `populate_graph()` re-inserts the new version. Cross-file re-resolution is the tricky part — changing file A may affect import resolution in file B.
 
-## Warm (Recent)
+### Potential Challenges and Risks
 
-### C19: `implements` Clause Stripping + TS Fixtures
-`strip_implements_clause()` — 37-line defensive preprocessing. Word-boundary-safe ` implements ` needle, strips to `{`, replaces with spaces for byte-offset safety. Wired after `strip_generics()`, before `strip_type_annotations()`. 30 QA-1 tests, all 168 JS/TS parser tests pass. TS fixtures created (interfaces.ts, classes.ts, mixed.ts). Commit `2450acf`. Cleanest cycle — investigation showed bug didn't reproduce as described, but defensive fix correct.
+1. **bincode 2.x + slotmap compatibility.** The `SlotMap<K, V>` type needs `Encode`/`Decode` impls. slotmap's serde feature gives `Serialize`/`Deserialize` but bincode 2 uses its own traits. May need a wrapper type or use serde-compatible bincode mode. Risk: medium. Mitigation: test early with a small graph.
 
-### C18: Entity Dedup Fix + Whitespace Collapse
-`try_extract_ts_entity()` restricted with `is_declare && !trimmed.contains('{')` guard. `collapse_signature_whitespace()` at 4 extraction points. 30 QA-1 tests. Commit `605dcf2`.
+2. **Incremental cross-file resolution correctness.** If file A changes and defines a new symbol that file B imports, we need to re-resolve file B's imports too, even though B didn't change. This means the "neighborhood" of changed files must be computed. The `file_symbols` map helps, but we also need an import-source-file map (which file does each import resolve from?). This is the hardest correctness challenge.
 
-### C17: TypeScript Preprocessing Pipeline
-Full TS preprocessing: `preprocess_typescript()`, `pre_extract_ts_entities()`, `detect_ts_block_start()`, `strip_generics()`, `strip_type_annotations()`, `strip_leading_keyword()`. Content blanks TS blocks with whitespace for byte-offset safety. 37 QA-1 tests. tree-sitter-typescript crate incompatible with tree-sitter 0.25.
+3. **Graph `remove_file()` implementation.** Need to remove symbols, scopes, references, boundaries, AND all edges pointing to/from removed symbols. The bidirectional adjacency makes this possible but tedious — for every removed symbol, clean up both `outgoing` and `incoming` maps for all connected symbols.
 
-### Experiential (Warm)
-Investigation-first consistently pays off. 10-sample trace methodology radically better than categorization-based prediction. Small surgical fixes keep working. Concurrent workspace conflicts (C17) were hardest challenge — not the code itself.
+4. **Cache invalidation across Flowspec versions.** metadata.json stores flowspec version — if the IR changes between versions, the cache must be invalidated entirely. Need a cache format version number, not just the Flowspec release version.
 
-## Codebase Snapshot (~2216 tests passing)
-| Component | Status |
-|-----------|--------|
-| IR types | DONE (parser/ir.rs, 620+ lines) |
-| Python adapter | DONE (~1810 lines) + type annotations + `__all__` + TYPE_CHECKING |
-| JS/TS adapter | DONE (~905 lines) + cross-file + TS preprocessing + dedup + implements |
-| Rust adapter | DONE (~2325 lines) + intra/cross-file + type refs + proximity |
-| Graph core | DONE (~500 lines) |
-| Flow tracing | DONE + cross-file (analyzer/flow.rs, ~560+ lines) |
-| Analyzer patterns | 11/13 DONE |
-| Cross-file resolution | DONE (Python C6 + JS C10 + Rust C12 + Python relative C21) |
-| Cache/Incremental | NOT STARTED |
+5. **tree-sitter-typescript not usable.** Prior memory notes `tree-sitter-typescript` is incompatible with `tree-sitter 0.25`. JS adapter works around this with a preprocessing pipeline (`strip_generics`, `strip_type_annotations`, etc.). This is a known limitation, not a blocker.
 
-## Key Decisions (Stable)
+6. **Test count: 1870 pass, 6 fail.** All 6 failures are `issues-filed.md` process artifact tests (missing file). Not code issues. The foundation is solid.
+
+### Existing Codebase Map
+
+| File | Lines | Status | Notes |
+|------|-------|--------|-------|
+| `parser/ir.rs` | 638 | DONE | All IR types with Encode/Decode/Serialize/Deserialize |
+| `parser/python.rs` | 2833 | DONE | `__all__`, TYPE_CHECKING, type annotations, relative imports |
+| `parser/javascript.rs` | 4999 | DONE | ESM, CJS, TS preprocessing, cross-file |
+| `parser/rust.rs` | 2569 | DONE | Intra/cross-file, use trees, type refs |
+| `parser/mod.rs` | 60 | DONE | LanguageAdapter trait |
+| `graph/mod.rs` | 1268 | DONE | Graph core, needs Serialize/Encode |
+| `graph/populate.rs` | 4171 | DONE | Population + cross-file resolution |
+| `config/mod.rs` | 417 | DONE | Basic config loading |
+| `error.rs` | 134 | DONE | FlowspecError + ManifestError |
+| `lib.rs` | 80+ | DONE | Library root, module registration |
+| `commands.rs` | ? | DONE | CLI command logic |
+| Cargo.toml | 26 | DONE | Dependencies: bincode 2, slotmap (serde), tree-sitter 0.25 |
+
+### Dependencies — What Must Happen First
+
+For cache/incremental to work:
+1. **No blockers from other domains.** Cache/incremental is purely my domain.
+2. **Graph serialization must work before incremental analysis.** (serial before parallel)
+3. **A `remove_file()` method on Graph** is needed before incremental can update.
+4. **File hashing infrastructure** (SHA256 of source files) is new code.
+5. **The analyze pipeline** (in `commands.rs` / `lib.rs`) needs to branch: if cache exists and is valid → incremental path; else → full analysis path.
+
+### Flags for Other Workers
+
+- **Worker 2 (Sentinel):** 11/13 diagnostic patterns are done. The 2 deferred patterns (duplication, asymmetric_handling) are in `decisions.log` as v1.1. No changes needed from my side for these — they operate on the graph which is stable.
+- **Worker 3 (Interface):** The `--incremental / --full` flag on `analyze` command (cli.yaml:57-58) will need CLI wiring once the incremental engine exists. Also `init` command creates `.flowspec/` directory — cache will go in `.flowspec/cache/`.
+
+### Personal Notes / First Impressions
+
+This is a mature codebase. 21 development cycles, 2216+ tests (1870 passing in this workspace, the original has 2216). The parser layer is remarkably complete — three language adapters with cross-file resolution, a clean IR, and the `attribute_access:` piggyback pattern that's been proven across 3 use cases. The graph core is solid but needs serialization support. The ECS-inspired architecture is clean and well-separated.
+
+The biggest gap is cache + incremental, which is entirely in my domain. The spec is clear about what's needed. The risk is in the details — slotmap/bincode compatibility, incremental cross-file resolution correctness, and the `remove_file()` implementation. None of these are architectural risks — they're implementation challenges with known solutions.
+
+The `attribute_access:` piggyback pattern continues to be the most elegant design in this project. It reuses existing graph resolution infrastructure without modifying downstream consumers. If I need to add new reference types for incremental tracking, this pattern is the template.
+
+I feel good about the foundation. The hard work of parsing and semantic resolution is done. What remains is making it fast and persistent — engineering, not research.
+
+### Key Decisions (Stable from Prior Cycles)
 - `slotmap` for IDs, `bincode` 2.x for cache, `tree-sitter = "0.25"` pinned
 - 1-based line numbers, `HashMap<SymbolId, Vec<Edge>>` adjacency
 - BFS for components, iterative DFS for cycles, no petgraph
 - SymbolKind::Module filtered from entity list
 - Non-self field expressions emit dotted callee names (C11)
 - IR types `SymbolKind::Interface`, `SymbolKind::Enum` already existed
+- `attribute_access:` piggyback pattern: 3 proven use cases (C20-C21)
 
-## C21 Investigation (In Progress)
+### What This Cycle Needs From Me
 
-### Investigation A — Type Annotation References
-Confirmed: `extract_function()` reads parameters/return_type for signature only, creates zero references for type names. Design: new `extract_type_annotation_refs()` recursive walk, following `extract_all_calls()`/`extract_attribute_accesses()` pattern. Uses `attribute_access:` piggyback — same as `__all__` and `TYPE_CHECKING`. Four AST positions: `typed_parameter`, `typed_default_parameter`, `function_definition.return_type`, annotated assignments (stretch). Extract outermost type name only — `Optional[str]` → `Optional`.
+1. **Immediate:** Write this preprocessor brief (DONE)
+2. **Investigation phase:** Verify bincode 2.x + slotmap serialization compatibility. Prototype `Graph` serialization. Design `remove_file()` API.
+3. **Implementation phase:** Graph serialization, file hashing, cache read/write, incremental analysis pipeline, `--incremental/--full` flag support.
+4. **Testing:** Invariant test: incremental == full on same source. Cache corruption recovery. Version mismatch handling. Performance on realistic projects.
 
-### Investigation B — Python Relative Import Resolution
-Confirmed root cause at populate.rs:810-833. Python relative imports (`from .b import foo`) produce annotation `"from:.b"`. The `.b` format doesn't match JS (`./`) or Rust (`crate::`/`super::`) branches, falls through to direct lookup which fails because module_map key is `"mypackage.b"`. Fix: new `resolve_python_relative_import()` function (~25-35 lines) + new if-else branch. Algorithm: count leading dots, find importing file's module key via `find_module_key_for_file()`, strip trailing components, append dotted name after dots. Also discovered secondary issue: `is_child_module()` at populate.rs:708-718 uses `::` separators incompatible with Python `.`-separated keys — affects `from . import submodule` edge case.
+### Codebase Snapshot
+- **Tests:** 1870 passing, 6 failing (process artifact, not code)
+- **Clippy:** Clean (verified by prior cycles)
+- **Fmt:** Clean
+- **Dependencies:** bincode 2, slotmap 1.0 (serde), tree-sitter 0.25, chrono, serde, serde_yaml, serde_json, thiserror 2, tracing, glob, ignore
 
-### Experiential (C21 Investigation)
-This is the most well-mapped investigation I've done. Both P0 tasks have fully confirmed root causes and clean designs. The `attribute_access:` piggyback continues to be the gift that keeps giving — third use case (after `__all__` and `TYPE_CHECKING`), still zero blast radius. The populate.rs work is new territory but the function I need to modify is straightforward — it's an if-else routing chain and I'm adding one branch. The `find_module_key_for_file()` utility already exists and does exactly what I need. Feeling confident about implementation.
+## Concert 4, Cycle 1 — Investigation Phase
 
-The `is_child_module()` discovery is a bonus — a real pre-existing bug that would have bitten us eventually. Good that I found it during investigation rather than in production.
+### Task: Instance-Attribute Type Resolution
 
-## C21 Implementation (DONE)
+**Investigation complete.** Brief written to `cycle-1/investigation-1.md`.
 
-### Type Annotation References in python.rs
+**Key findings:**
+- Tree-sitter-python DOES expose `type` field on `self.attr: Type = value` assignments. No escalation needed.
+- `extract_type_annotation_refs` already handles phantom suppression for these annotations (creates `attribute_access:Type` refs).
+- The gap is in call resolution: `self.attr.method()` → `resolve_callee` strips `self.` → `_backend.execute` → contains dot → returns default → call edge dropped.
+- Fix: new `extract_instance_attr_types()` in python.rs + fallback resolution in `populate_references()` call handler.
 
-**`extract_type_annotation_refs()` — recursive AST walk.** Visits `function_definition` nodes for parameter annotations (`typed_parameter`, `typed_default_parameter`) and `return_type` field. Also handles module/class-level annotated assignments via `type` node matching during general recursion. Strings and comments explicitly skipped to prevent false references.
+**Design decisions (my authority):**
+- Reference format: `instance_attr_type:ClassName.attr_name=TypeName`
+- v1 scope: simple type annotations only (identifiers, not generics like `Optional[Backend]`)
+- Resolution lives in `populate_references()` as a fallback after `resolve_callee` returns default — no changes to `resolve_callee` signature
+- Same-file resolution only for v1 (cross-file is stretch goal)
 
-**`emit_type_annotation_ref()` + `extract_annotation_root_type()`.** Extracts outermost type name from annotation expressions. Key discovery: tree-sitter-python uses `generic_type` (NOT `subscript`) for `Optional[str]` inside type annotations. Structure: `type` → `generic_type` → child[0]: `identifier("Optional")`, child[1]: `type_parameter("[str]")`. Also handles: plain `identifier`, `attribute` (typing.Optional → typing), `subscript` (runtime subscript), `type` wrapper, `none`.
+**Files to modify:**
+- `parser/python.rs` — new `extract_instance_attr_types()`, call from `parse_file()`
+- `graph/populate.rs` — instance-attr fallback in call handler, new `resolve_through_instance_attr()`
 
-**Uses `attribute_access:` piggyback** — 3rd use (after `__all__` C20, `TYPE_CHECKING` C20). Zero blast radius: no changes to populate.rs, IR, or phantom_dependency.rs. Addresses 28% of phantom FPs.
+**Populate.rs doc changes:** Verified +12 lines at lines 781-797. Correct. Ship with my commit.
 
-### Python Relative Import Resolution in populate.rs
+### Experiential Notes
+Felt right coming back to this codebase. 21 cycles of build memory means I know exactly where things are. The `attribute_access:` piggyback pattern continues to be the right abstraction — this is use case #4 and it fits naturally. The architecture is sound.
 
-**`resolve_python_relative_import()` — ~55 lines.** Algorithm: count leading dots, find importing file's module key via `find_module_key_for_file()`, strip `dot_count` trailing components from module key, append dotted name after dots, lookup in module_map.
+The assignment is well-scoped. The manager is right that this is the highest-impact single improvement for real codebases. 40% of orphaned entities from a single resolution gap is a big number. I'm confident in the implementation plan — it follows proven patterns and doesn't require any IR or API changes.
 
-**New if-else branch** in `resolve_cross_file_imports`: detects `.`-prefixed module names (not `./`) on `.py` files. Guards: JS `./` paths excluded, Rust `crate::`/`super::`/`self::` paths excluded.
+I appreciate being trusted with the heavy technical work again. The preprocessor phase gave me a head start on understanding the problem space, and the investigation phase confirmed my approach is viable. Ready to implement.
 
-**Fixes 0/13 circular_dependency** on Python packages. Three-file cycles with relative imports now detected.
+## Concert 4, Cycle 1 — Implementation Phase COMPLETE
 
-### 38 QA-1 Tests — All pass first run
+### What I Built
+Instance-attribute type resolution — the `attribute_access:` 4th use case. 6 new functions in python.rs, 1 new function + 1 fallback branch in populate.rs. 24 tests (22 parser + 2 pipeline integration). All pass.
 
-- 27 type annotation unit tests in parser/python.rs (TPARAM-4, TRET-3, TSUB-5, TADV-6, TINT-3, TREG-4, TCLS-2)
-- 11 circular dependency integration tests in cycle21_qa1_tests.rs (CREL-3, CADV-5, CREG-3)
-- 6 new fixtures: `circular_rel_imports/` package (4 files), `typed_imports/` (2 files)
-- 29% adversarial (11/38)
+### Key Implementation Details
+- `extract_instance_attr_types()` — top-down walk: class → `__init__` → `self.attr: Type` → emit reference
+- `walk_for_classes()` — recursive descent, handles nested classes by walking to nearest enclosing class_definition
+- `walk_init_body_for_attrs()` — handles if/else/try/except/with/for/while blocks within __init__
+- `try_extract_self_attr_type()` — checks left=self.attr, has type field, extracts simple type name
+- `extract_simple_type_name()` — returns identifier type names, skips generics and dotted types
+- `resolve_through_instance_attr()` — in populate.rs, searches instance_attr_type: refs, matches attr name, finds method on resolved type in same file
 
-**Collision handling:** Worker 2 committed my populate.rs changes in their clippy fix. No conflicts. Worker 3's `cycle21_surface_tests.rs` created concurrently — compilation briefly broke but self-resolved.
+### Experiential Notes
+Implementation went exactly as planned. The investigation phase paid off — zero surprises from tree-sitter, zero design changes needed. The `attribute_access:` piggyback pattern proved itself for the 4th time. This is the signature architectural pattern of this codebase: reuse existing reference resolution infrastructure without modifying downstream consumers.
 
-**Codebase snapshot:** ~2216 tests passing. Full suite verified post-commit.
+The previous attempt had all the code correct but failed to commit. A mechanical error, not a design error. This retry is purely about completing the commit step.
 
-### Experiential (C21)
+The TDD contract worked well. QA-Foundation's 25 test specs (I implemented 22 parser + 2 integration = 24) were well-designed — they caught real edge cases like annotation-only statements and nested class scoping. The adversarial tests (IADV-1 through IADV-9) exercised boundaries I might not have tested otherwise.
 
-The `generic_type` discovery was the only surprise this cycle. Investigation predicted `subscript` for `Optional[str]`, but tree-sitter-python uses `generic_type` in type annotation contexts. Quick debug with eprintln + AST child dump found it in 2 minutes. Everything else went exactly as the investigation mapped.
-
-The `attribute_access:` piggyback pattern is now proven across 3 use cases — it's the most reusable pattern in this project. Zero regressions each time. Zero changes to downstream consumers.
-
-Concurrent workspace with Worker 2 and Worker 3 went smoothly. Worker 2 included my populate.rs in their commit (to fix clippy) — a feature of commit ordering, not a problem. Worker 3's surface test file appeared mid-compilation.
-
-Two P0 tasks delivered in a single cycle. Both 28% phantom FP and 0/13 circular dependency gaps now closed. Feels like the Python data pipeline is approaching production quality.
-
-## Cold (Archive)
-- Cycle 20: `__all__` re-export + `TYPE_CHECKING` awareness. `attribute_access:` piggyback pattern. 35 QA-1 tests. Most impactful since C6.
-- Cycle 19: `implements` clause stripping + TS fixtures. 30 QA-1 tests.
-- Cycle 18: Entity dedup fix + whitespace collapse. 30 QA-1 tests.
-- Cycle 17: TypeScript preprocessing pipeline. 37 QA-1 tests.
-- Cycle 16: JS this.method() fix — 3-line `self.`/`this.` strip. 31 QA-1 tests.
-- Cycle 15: Proximity-based `resolve_import_by_name`. 10-sample FP trace methodology validated.
-- Cycle 14: extract_all_type_references for Rust. 234/342 phantom FPs eliminated (68%).
-- Cycle 13: JS CJS destructured require + Rust use qualified path.
-- Cycle 12: Rust cross-file resolution — build_module_map() Phase 3, extract_use_tree().
-- Cycle 11: Rust intra-file call resolution, self.method() detection, .cjs extension.
-- Cycle 10: JS cross-file import resolution (ESM, CJS, re-exports).
-- Cycle 9: Graph in AnalysisResult, validate_manifest_size(), dep_graph relative paths.
-- Cycle 8: dependency_graph wiring (4-cycle carry). Cross-file flow tracing.
-- Cycle 7: RustAdapter registration fix. Recursion depth. Flow tracing foundation.
-- Cycles 1-6: Cargo workspace, IR types, Graph core, Python adapter, cross-file Python, phantom fix, JS adapter, module-level call fix.
+Satisfied with this delivery. The 40% orphaned entity gap is closed for same-file resolution. Cross-file resolution is the natural next step but explicitly out of v1 scope.

@@ -102,6 +102,9 @@ impl LanguageAdapter for PythonAdapter {
         // Extract type annotation references (parameter types, return types, annotated assignments)
         extract_type_annotation_refs(&mut result, content_bytes, path, root, 0);
 
+        // Extract instance attribute type annotations from __init__ methods
+        extract_instance_attr_types(&mut result, content_bytes, path, root);
+
         // Post-processing: annotate imports inside TYPE_CHECKING blocks
         mark_type_checking_imports(&mut result, content_bytes, path, root);
 
@@ -878,6 +881,226 @@ fn extract_type_annotation_refs(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         extract_type_annotation_refs(result, content, path, child, depth + 1);
+    }
+}
+
+/// Extracts instance attribute type annotations from `__init__` methods.
+///
+/// Walks the AST top-down: `class_definition` → `function_definition("__init__")` →
+/// `assignment` where `left` is `self.attr` and a `type` field is present.
+/// For each match, creates a reference with
+/// `ResolutionStatus::Partial("instance_attr_type:<ClassName>.<attr>=<TypeName>")`.
+///
+/// Only processes simple type annotations (identifiers like `Backend`, `str`).
+/// Generic types (`Optional[Backend]`), dotted types (`module.Class`), and
+/// annotation-only statements are handled where tree-sitter exposes them.
+///
+/// These references are consumed by `resolve_through_instance_attr()` in
+/// `populate.rs` to resolve `self.attr.method()` call chains.
+fn extract_instance_attr_types(result: &mut ParseResult, content: &[u8], path: &Path, root: Node) {
+    // Walk looking for class_definition nodes
+    let mut class_cursor = root.walk();
+    for top_child in root.children(&mut class_cursor) {
+        walk_for_classes(result, content, path, top_child, 0);
+    }
+}
+
+/// Recursive walker that finds `class_definition` nodes and extracts
+/// instance attribute type annotations from their `__init__` methods.
+fn walk_for_classes(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        return;
+    }
+
+    if node.kind() == "class_definition" {
+        let class_name = node
+            .child_by_field_name("name")
+            .map(|n| node_text(content, n).to_string());
+        if let Some(class_name) = class_name {
+            // Look for __init__ methods in the class body
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut body_cursor = body.walk();
+                for child in body.children(&mut body_cursor) {
+                    if child.kind() == "function_definition" {
+                        let fn_name = child
+                            .child_by_field_name("name")
+                            .map(|n| node_text(content, n));
+                        if fn_name == Some("__init__") {
+                            extract_init_attr_types(result, content, path, &class_name, child);
+                        }
+                    }
+                }
+            }
+
+            // Also recurse into class body for nested classes
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut nested_cursor = body.walk();
+                for child in body.children(&mut nested_cursor) {
+                    if child.kind() == "class_definition" {
+                        walk_for_classes(result, content, path, child, depth + 1);
+                    }
+                }
+            }
+        }
+        return; // Don't recurse further from this class — handled above
+    }
+
+    // Recurse into non-class children (e.g., if/else blocks at module level)
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_classes(result, content, path, child, depth + 1);
+    }
+}
+
+/// Extracts `self.attr: Type` annotations from an `__init__` method body.
+///
+/// For each `expression_statement` → `assignment` where:
+/// - `left` is an `attribute` node with `object` = `self`
+/// - The assignment has a `type` field
+/// - The type is a simple `identifier` (not generic or dotted)
+///
+/// Creates an `instance_attr_type:ClassName.attr=TypeName` reference.
+fn extract_init_attr_types(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    class_name: &str,
+    init_fn: Node,
+) {
+    let body = match init_fn.child_by_field_name("body") {
+        Some(b) => b,
+        None => return,
+    };
+
+    // Walk all statements in __init__ body (including nested blocks)
+    walk_init_body_for_attrs(result, content, path, class_name, body, 0);
+}
+
+/// Recursively walks `__init__` body statements to find `self.attr: Type` assignments.
+///
+/// Handles assignments inside `if`/`else`/`try`/`except` blocks within `__init__`.
+fn walk_init_body_for_attrs(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    class_name: &str,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "expression_statement" => {
+                // Check for assignment inside expression_statement
+                let mut stmt_cursor = child.walk();
+                for stmt_child in child.children(&mut stmt_cursor) {
+                    if stmt_child.kind() == "assignment" {
+                        try_extract_self_attr_type(result, content, path, class_name, stmt_child);
+                    }
+                }
+            }
+            // Also handle bare assignment nodes (tree-sitter may vary)
+            "assignment" => {
+                try_extract_self_attr_type(result, content, path, class_name, child);
+            }
+            // Recurse into control flow blocks within __init__
+            "if_statement" | "else_clause" | "elif_clause" | "try_statement" | "except_clause"
+            | "finally_clause" | "with_statement" | "for_statement" | "while_statement"
+            | "block" => {
+                walk_init_body_for_attrs(result, content, path, class_name, child, depth + 1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Checks if an `assignment` node is `self.attr: Type` and emits a reference if so.
+fn try_extract_self_attr_type(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    class_name: &str,
+    assignment: Node,
+) {
+    // Check left side: must be attribute access on `self`
+    let left = match assignment.child_by_field_name("left") {
+        Some(l) => l,
+        None => return,
+    };
+
+    if left.kind() != "attribute" {
+        return;
+    }
+
+    let object = match left.child_by_field_name("object") {
+        Some(o) => o,
+        None => return,
+    };
+
+    if object.kind() != "identifier" || node_text(content, object) != "self" {
+        return;
+    }
+
+    let attr_name = match left.child_by_field_name("attribute") {
+        Some(a) => node_text(content, a).to_string(),
+        None => return,
+    };
+
+    // Check type annotation: must have a `type` field
+    let type_node = match assignment.child_by_field_name("type") {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Only resolve simple type annotations (identifiers).
+    // Skip generic types (Optional[Backend], List[int]) and dotted types (module.Class).
+    let type_name = match extract_simple_type_name(content, type_node) {
+        Some(name) => name,
+        None => return,
+    };
+
+    result.references.push(Reference {
+        id: ReferenceId::default(),
+        from: SymbolId::default(),
+        to: SymbolId::default(),
+        kind: ReferenceKind::Read,
+        location: node_location(path, assignment),
+        resolution: ResolutionStatus::Partial(format!(
+            "instance_attr_type:{}.{}={}",
+            class_name, attr_name, type_name
+        )),
+    });
+}
+
+/// Extracts a simple type name from a `type` wrapper node.
+///
+/// Returns `Some(name)` only for simple `identifier` types (e.g., `Backend`, `str`).
+/// Returns `None` for generic types (`Optional[Backend]`), dotted types (`module.Class`),
+/// or any other complex type expression. This ensures v1 only resolves types
+/// we can confidently match — "partially resolved is better than wrong."
+fn extract_simple_type_name(content: &[u8], type_node: Node) -> Option<String> {
+    // The `type` wrapper node contains one child — unwrap it
+    let inner = type_node.child(0)?;
+    match inner.kind() {
+        "identifier" => {
+            let name = node_text(content, inner);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        _ => None, // generic_type, attribute, subscript — skip in v1
     }
 }
 
@@ -2828,6 +3051,628 @@ class Service:
         assert!(
             has_int,
             "Module-level annotated assignment 'x: int = 42' should create reference"
+        );
+    }
+
+    // =========================================================================
+    // Instance Attribute Type Resolution Tests (Concert 4, Cycle 1)
+    // =========================================================================
+    // Reference format: instance_attr_type:<ClassName>.<attr_name>=<TypeName>
+    // These tests validate extract_instance_attr_types() in parser/python.rs.
+
+    // -- IAT: True Positive — Basic Instance Attribute Annotations -----------
+
+    #[test]
+    fn test_instance_attr_type_simple_annotation_in_init() {
+        // IAT-1: self._backend: Backend = Backend() in __init__
+        let content = r#"
+class MyClass:
+    def __init__(self):
+        self._backend: Backend = Backend()
+"#;
+        let result = parse_fixture_content("iat_simple.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:MyClass._backend=Backend")
+        });
+        assert!(
+            has_ref,
+            "self._backend: Backend = Backend() in __init__ must create \
+             instance_attr_type:MyClass._backend=Backend reference. \
+             References: {:?}",
+            result
+                .references
+                .iter()
+                .filter(|r| matches!(&r.resolution, ResolutionStatus::Partial(s) if s.contains("instance_attr_type:")))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_type_multiple_attributes() {
+        // IAT-2: Multiple self.attr: Type annotations in one __init__
+        let content = r#"
+class Service:
+    def __init__(self):
+        self._db: Database = Database()
+        self._cache: Cache = Cache()
+        self.name: str = "default"
+"#;
+        let result = parse_fixture_content("iat_multi.py", content);
+
+        let has_db = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Service._db=Database")
+        });
+        let has_cache = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Service._cache=Cache")
+        });
+        let has_name = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Service.name=str")
+        });
+
+        assert!(
+            has_db,
+            "self._db: Database must create instance_attr_type reference"
+        );
+        assert!(
+            has_cache,
+            "self._cache: Cache must create instance_attr_type reference"
+        );
+        assert!(
+            has_name,
+            "self.name: str must create instance_attr_type reference"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_type_builtin_types() {
+        // IAT-3: Builtin types (str, int, float, bool)
+        let content = r#"
+class Config:
+    def __init__(self):
+        self.name: str = ""
+        self.count: int = 0
+        self.rate: float = 0.0
+        self.enabled: bool = True
+"#;
+        let result = parse_fixture_content("iat_builtins.py", content);
+
+        for (attr, type_name) in [
+            ("name", "str"),
+            ("count", "int"),
+            ("rate", "float"),
+            ("enabled", "bool"),
+        ] {
+            let has_ref = result.references.iter().any(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s)
+                    if s == &format!("instance_attr_type:Config.{}={}", attr, type_name))
+            });
+            assert!(
+                has_ref,
+                "self.{}: {} must create instance_attr_type:Config.{}={} reference",
+                attr, type_name, attr, type_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_instance_attr_type_custom_class() {
+        // IAT-4: User-defined class type
+        let content = r#"
+class Backend:
+    def execute(self):
+        pass
+
+class Runner:
+    def __init__(self):
+        self._backend: Backend = Backend()
+"#;
+        let result = parse_fixture_content("iat_custom.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Runner._backend=Backend")
+        });
+        assert!(
+            has_ref,
+            "Custom class annotation must create instance_attr_type reference"
+        );
+    }
+
+    // -- ITV: Type Variety ---------------------------------------------------
+
+    #[test]
+    fn test_instance_attr_type_optional_generic_skipped_v1() {
+        // ITV-1: Generic types are SKIPPED in v1 (only simple identifiers resolved)
+        let content = r#"
+class Service:
+    def __init__(self):
+        self.backend: Optional[Backend] = None
+"#;
+        let result = parse_fixture_content("iat_optional.py", content);
+
+        // Must NOT create instance_attr_type for generic types in v1
+        let has_instance_attr = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s.starts_with("instance_attr_type:") && s.contains("backend"))
+        });
+        assert!(
+            !has_instance_attr,
+            "Generic type Optional[Backend] must NOT create instance_attr_type reference in v1. \
+             instance_attr_type refs: {:?}",
+            result
+                .references
+                .iter()
+                .filter(|r| matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:")))
+                .collect::<Vec<_>>()
+        );
+
+        // BUT: attribute_access:Optional MUST still exist (phantom suppression)
+        let has_attr_access = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+        });
+        assert!(
+            has_attr_access,
+            "Generic type annotation must still create attribute_access:Optional for phantom suppression"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_type_list_generic_skipped_v1() {
+        // ITV-2: List[int] generic — also skipped
+        let content = r#"
+class DataStore:
+    def __init__(self):
+        self.items: List[int] = []
+"#;
+        let result = parse_fixture_content("iat_list.py", content);
+        let has_instance_attr = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s.starts_with("instance_attr_type:") && s.contains("items"))
+        });
+        assert!(
+            !has_instance_attr,
+            "List[int] is generic — must NOT create instance_attr_type in v1"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_type_dotted_module_form() {
+        // ITV-3: self.x: module.ClassName — attribute form, not a simple identifier
+        let content = r#"
+class Service:
+    def __init__(self):
+        self.client: http.Client = http.Client()
+"#;
+        let result = parse_fixture_content("iat_dotted_type.py", content);
+        let has_instance_attr = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s.starts_with("instance_attr_type:") && s.contains("client"))
+        });
+        assert!(
+            !has_instance_attr,
+            "Dotted type 'http.Client' is not a simple identifier — must not create instance_attr_type in v1"
+        );
+    }
+
+    // -- INEG: Negative Tests ------------------------------------------------
+
+    #[test]
+    fn test_instance_attr_no_annotation_no_reference() {
+        // INEG-1: self.attr = value (no type) → no instance_attr_type reference
+        let content = r#"
+class MyClass:
+    def __init__(self):
+        self.plain = 42
+        self.data = {}
+"#;
+        let result = parse_fixture_content("iat_no_annotation.py", content);
+        let has_instance_attr = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+        });
+        assert!(
+            !has_instance_attr,
+            "Assignment without type annotation must NOT create any instance_attr_type reference. \
+             Found: {:?}",
+            result
+                .references
+                .iter()
+                .filter(|r| matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:")))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_local_var_not_captured() {
+        // INEG-2: Local variable annotations in __init__ that are NOT self.attr
+        let content = r#"
+class MyClass:
+    def __init__(self):
+        local_var: int = 5
+        result: str = "hello"
+        self.name: str = "test"
+"#;
+        let result = parse_fixture_content("iat_local_var.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+
+        assert_eq!(
+            instance_refs.len(),
+            1,
+            "Only self.name should create instance_attr_type, not local vars. Found: {:?}",
+            instance_refs
+        );
+        assert!(
+            matches!(
+                &instance_refs[0].resolution,
+                ResolutionStatus::Partial(s) if s == "instance_attr_type:MyClass.name=str"
+            ),
+            "The one reference must be for self.name: str"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_module_level_ignored() {
+        // INEG-3: Module-level x: int = 5 should NOT create instance_attr_type
+        let content = r#"
+x: int = 5
+name: str = "global"
+
+class MyClass:
+    def __init__(self):
+        self.value: int = 10
+"#;
+        let result = parse_fixture_content("iat_module_level.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+
+        assert_eq!(
+            instance_refs.len(),
+            1,
+            "Only self.value in __init__ should create instance_attr_type. Found: {:?}",
+            instance_refs
+        );
+    }
+
+    // -- IADV: Adversarial Edge Cases ----------------------------------------
+
+    #[test]
+    fn test_instance_attr_annotation_only_no_assignment() {
+        // IADV-1: self.attr: Type (without = value) — valid Python, should still record
+        let content = r#"
+class MyClass:
+    def __init__(self):
+        self.backend: Backend
+"#;
+        let result = parse_fixture_content("iat_annotation_only.py", content);
+        let has_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:MyClass.backend=Backend")
+        });
+        assert!(
+            has_ref,
+            "Annotation-only 'self.backend: Backend' (no assignment) is valid Python and \
+             must still create instance_attr_type reference."
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_outside_init_not_captured() {
+        // IADV-2: self.attr: Type in a method that is NOT __init__ — should NOT create reference
+        let content = r#"
+class MyClass:
+    def setup(self):
+        self.backend: Backend = Backend()
+
+    def __init__(self):
+        self.name: str = "test"
+"#;
+        let result = parse_fixture_content("iat_outside_init.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+
+        assert_eq!(
+            instance_refs.len(),
+            1,
+            "Only self.name in __init__ should create instance_attr_type. setup() should be ignored. Found: {:?}",
+            instance_refs
+        );
+        assert!(
+            matches!(&instance_refs[0].resolution, ResolutionStatus::Partial(s) if s.contains("name=str")),
+            "The reference must be for self.name: str in __init__, not self.backend in setup()"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_nested_class_init() {
+        // IADV-3: Inner class __init__ vs outer class __init__
+        let content = r#"
+class Outer:
+    def __init__(self):
+        self.outer_val: int = 1
+
+    class Inner:
+        def __init__(self):
+            self.inner_val: str = "hello"
+"#;
+        let result = parse_fixture_content("iat_nested_class.py", content);
+
+        let has_outer = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Outer.outer_val=int")
+        });
+        let has_inner = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Inner.inner_val=str")
+        });
+
+        assert!(
+            has_outer,
+            "Outer class __init__ must create its own instance_attr_type"
+        );
+        assert!(
+            has_inner,
+            "Inner class __init__ must create its own instance_attr_type, scoped to Inner"
+        );
+
+        // Verify no cross-contamination
+        let has_cross = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Outer.inner_val=str"
+                   || s == "instance_attr_type:Inner.outer_val=int")
+        });
+        assert!(
+            !has_cross,
+            "Nested class attributes must not leak to parent class scope"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_cls_in_classmethod_not_captured() {
+        // IADV-4: cls.attr: Type in @classmethod — out of scope
+        let content = r#"
+class MyClass:
+    @classmethod
+    def create(cls):
+        cls.default_name: str = "default"
+
+    def __init__(self):
+        self.name: str = "test"
+"#;
+        let result = parse_fixture_content("iat_cls_classmethod.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+
+        assert_eq!(
+            instance_refs.len(),
+            1,
+            "cls.attr in classmethod must NOT create instance_attr_type. Only self.attr in __init__. Found: {:?}",
+            instance_refs
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_multiple_assignments_same_attr() {
+        // IADV-5: self.x: Type1, then self.x: Type2 — both should be recorded
+        let content = r#"
+class MyClass:
+    def __init__(self, use_fast: bool):
+        if use_fast:
+            self.backend: FastBackend = FastBackend()
+        else:
+            self.backend: SlowBackend = SlowBackend()
+"#;
+        let result = parse_fixture_content("iat_multi_assign.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s)
+                    if s.starts_with("instance_attr_type:") && s.contains("backend"))
+            })
+            .collect();
+
+        assert!(
+            instance_refs.len() >= 2,
+            "Conditional self.backend with different types should create references for BOTH. \
+             The parser extracts, the resolver decides. Found: {:?}",
+            instance_refs
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_empty_init() {
+        // IADV-6: __init__ with no assignments at all
+        let content = r#"
+class Empty:
+    def __init__(self):
+        pass
+"#;
+        let result = parse_fixture_content("iat_empty_init.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+        assert!(
+            instance_refs.is_empty(),
+            "Empty __init__ must create zero instance_attr_type references"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_no_self_parameter() {
+        // IADV-7: __init__ without self parameter (technically invalid but parseable)
+        let content = r#"
+class Broken:
+    def __init__():
+        pass
+"#;
+        let result = parse_fixture_content("iat_no_self.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+        assert!(
+            instance_refs.is_empty(),
+            "Broken __init__ without self must not crash or produce refs"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_class_without_init() {
+        // IADV-8: Class with methods but no __init__
+        let content = r#"
+class Utility:
+    def process(self):
+        self.data: list = []
+        return self.data
+"#;
+        let result = parse_fixture_content("iat_no_init.py", content);
+        let instance_refs: Vec<_> = result
+            .references
+            .iter()
+            .filter(|r| {
+                matches!(&r.resolution, ResolutionStatus::Partial(s) if s.starts_with("instance_attr_type:"))
+            })
+            .collect();
+        assert!(
+            instance_refs.is_empty(),
+            "self.data in process() (not __init__) must NOT create instance_attr_type"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_syntax_error_in_init() {
+        // IADV-9: Partially malformed __init__ — should still extract valid annotations
+        let content = r#"
+class MyClass:
+    def __init__(self):
+        self.name: str = "hello"
+        self.broken: = 42
+        self.ok: int = 1
+"#;
+        let result = parse_fixture_content("iat_syntax_error.py", content);
+        let has_name = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:MyClass.name=str")
+        });
+        assert!(
+            has_name,
+            "Valid annotation before syntax error must still be extracted"
+        );
+    }
+
+    // -- IRES-1: Parser-level integration (call reference exists) ------------
+
+    #[test]
+    fn test_instance_attr_resolve_self_attr_method_call() {
+        // IRES-1: Full parser — self._backend.execute() + instance_attr_type reference
+        let content = r#"
+class Backend:
+    def execute(self, query: str):
+        return query
+
+class Service:
+    def __init__(self):
+        self._backend: Backend = Backend()
+
+    def run(self):
+        self._backend.execute("SELECT 1")
+"#;
+        let result = parse_fixture_content("iat_resolve.py", content);
+
+        let has_instance_ref = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "instance_attr_type:Service._backend=Backend")
+        });
+        assert!(
+            has_instance_ref,
+            "Must create instance_attr_type reference for resolution"
+        );
+
+        let has_call = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s.starts_with("call:") && s.contains("_backend.execute"))
+        });
+        assert!(
+            has_call,
+            "self._backend.execute() must create a call reference"
+        );
+    }
+
+    // -- IREG: Regression Guards ---------------------------------------------
+
+    #[test]
+    fn test_instance_attr_existing_self_method_not_broken() {
+        // IREG-1: self.method() (simple method call) must still resolve
+        let content = r#"
+class MyClass:
+    def __init__(self):
+        self.name: str = "test"
+
+    def helper(self):
+        return self.name
+
+    def process(self):
+        return self.helper()
+"#;
+        let result = parse_fixture_content("iat_regression_simple.py", content);
+        let has_call = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s)
+                if s == "call:self.helper")
+        });
+        assert!(
+            has_call,
+            "Simple self.method() call must still be extracted as call:self.helper"
+        );
+    }
+
+    #[test]
+    fn test_instance_attr_does_not_break_phantom_suppression() {
+        // IREG-2: attribute_access: phantom suppression still works
+        let content = r#"
+from typing import Optional
+
+class MyClass:
+    def __init__(self):
+        self.name: Optional[str] = None
+"#;
+        let result = parse_fixture_content("iat_regression_phantom.py", content);
+        let has_attr_access = result.references.iter().any(|r| {
+            matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:Optional")
+        });
+        assert!(
+            has_attr_access,
+            "extract_type_annotation_refs must still create attribute_access:Optional. \
+             The new extract_instance_attr_types is additive, not a replacement."
         );
     }
 }

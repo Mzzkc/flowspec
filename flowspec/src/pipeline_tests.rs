@@ -3421,10 +3421,11 @@ class Service:
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    let orphaned_execute = result.manifest.diagnostics.iter().any(|d| {
-        d.pattern == crate::DiagnosticPattern::OrphanedImplementation
-            && d.entity.contains("execute")
-    });
+    let orphaned_execute = result
+        .manifest
+        .diagnostics
+        .iter()
+        .any(|d| d.pattern == "orphaned_impl" && d.entity.contains("execute"));
     assert!(
         !orphaned_execute,
         "Backend.execute() must NOT be orphaned_impl when called through self._backend.execute(). \
