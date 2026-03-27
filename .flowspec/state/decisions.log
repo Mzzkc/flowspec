@@ -184,3 +184,30 @@ rationale: |
   For a 50K-line codebase. Under 7 minutes ideal for first run, 10
   pushes it. Under 1 minute for incremental. Under 5 seconds for
   single-symbol trace from cached graph.
+
+---
+decision: "Defer duplication and asymmetric_handling diagnostics to v1.1"
+date: 2026-03-27
+area: diagnostics
+rationale: |
+  Both patterns have been carried for 10+ development cycles without progress.
+  duplication (detecting repeated code patterns, near-duplicates, copy-paste)
+  requires AST-level structural comparison — tree hashing and normalized
+  subtree matching. The current graph architecture stores symbols and edges
+  but not AST structure. Would require either storing normalized AST subtrees
+  in the graph or re-parsing during analysis, neither of which fits the
+  parse-once-query-many architecture.
+
+  asymmetric_handling (detecting inconsistent error handling, missing cleanup
+  paths, unbalanced resource management) requires control flow analysis —
+  CFG construction and path enumeration. The current graph has call edges
+  and reference edges but no control flow edges. Would require a new edge
+  type or a separate CFG structure.
+
+  Both remain on the roadmap as post-v1 work items. They are not removed —
+  just explicitly deferred with documented rationale. v1 ships with 11
+  active diagnostic patterns out of the original 13.
+alternatives_considered:
+  - "Implement partial detection with heuristics (rejected — high FP risk, violates confidence-scored diagnostics principle)"
+  - "Remove from roadmap entirely (rejected — both are valuable patterns, just need infrastructure that v1 doesn't have)"
+  - "Defer to v1.1 with documented rationale (chosen)"

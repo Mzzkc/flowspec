@@ -15,7 +15,10 @@ use crate::error::{FlowspecError, ManifestError};
 use crate::manifest::types::{DiagnosticEntry, FlowEntry, Manifest};
 use crate::manifest::{validate_manifest_size, OutputFormatter};
 use crate::parser::ir::SymbolId;
-use crate::{Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter, YamlFormatter};
+use crate::{
+    deduplicate_flows, Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter,
+    YamlFormatter,
+};
 
 /// Valid diagnostic pattern names for `--checks` validation.
 const VALID_PATTERNS: &[&str] = &[
@@ -375,37 +378,6 @@ pub fn flow_paths_to_entries(
             }
         })
         .collect()
-}
-
-/// Deduplicate flow entries, preserving first occurrence and re-numbering IDs.
-///
-/// Two flows are considered duplicates if they share the same entry, exit,
-/// and step entity sequence. The dedup key includes steps (not just entry/exit)
-/// to preserve flows with the same endpoints but different intermediate paths.
-pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
-    let mut seen = HashSet::new();
-    let mut unique: Vec<FlowEntry> = Vec::with_capacity(flows.len());
-
-    for flow in flows {
-        let step_entities: String = flow
-            .steps
-            .iter()
-            .map(|s| s.entity.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        let key = format!("{}|{}|{}", flow.entry, flow.exit, step_entities);
-
-        if seen.insert(key) {
-            unique.push(flow);
-        }
-    }
-
-    // Re-number IDs sequentially after dedup
-    for (i, flow) in unique.iter_mut().enumerate() {
-        flow.id = format!("F{:03}", i + 1);
-    }
-
-    unique
 }
 
 /// Valid manifest section names for `--section` validation in `diff`.

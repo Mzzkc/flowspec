@@ -4,7 +4,8 @@
 
 use std::collections::HashSet;
 
-use crate::commands::{deduplicate_flows, find_matching_symbol, validate_check_patterns};
+use crate::commands::{find_matching_symbol, validate_check_patterns};
+use crate::deduplicate_flows;
 use crate::manifest::types::{EntityEntry, FlowEntry, FlowStep};
 use crate::manifest::OutputFormatter;
 use crate::test_utils::{add_ref, make_symbol};

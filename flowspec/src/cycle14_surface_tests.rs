@@ -798,7 +798,7 @@ fn t34_regression_c12_diagnostic_summary_recomputed() {
 /// T35: C13 trace dedup preserved.
 #[test]
 fn t35_regression_c13_trace_dedup_not_broken() {
-    use crate::commands::deduplicate_flows;
+    use crate::deduplicate_flows;
     use crate::manifest::types::{FlowEntry, FlowStep};
 
     let flow1 = FlowEntry {
