@@ -3006,3 +3006,461 @@ fn test_stale_reference_pipeline_evidence_quality() {
         );
     }
 }
+
+// =========================================================================
+// Phantom Suppression Pipeline Tests (C21 carry — Concert 4, Cycle 1)
+//
+// These tests prove that type annotation references created by
+// extract_type_annotation_refs() (parser) propagate through
+// populate_graph() (graph) and suppress phantom_dependency findings
+// (analyzer). Every test runs real Python through analyze() — no mock
+// graphs.
+// =========================================================================
+
+#[test]
+fn test_pipeline_phantom_suppression_annotation_only_import() {
+    // C21 fix: extract_type_annotation_refs() creates attribute_access:Optional
+    // reference -> populate_graph() resolves to References edge ->
+    // phantom_dependency sees same-file edge -> suppressed.
+    // This proves all THREE layers work together.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("unused_import.py"),
+        include_str!("../../tests/fixtures/python/unused_import.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_findings: Vec<&_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .collect();
+
+    // Annotation-only usage MUST suppress phantom
+    assert!(
+        !phantom_findings
+            .iter()
+            .any(|d| d.entity.contains("Optional")),
+        "Optional used in type annotation must NOT trigger phantom_dependency. \
+         attribute_access:Optional reference must propagate through populate_graph(). \
+         If this fails, the C21 parser fix doesn't reach the detection layer. \
+         Phantom findings: {:?}",
+        phantom_findings
+            .iter()
+            .map(|d| &d.entity)
+            .collect::<Vec<_>>()
+    );
+
+    // Runtime usage suppresses phantom (pre-existing behavior)
+    assert!(
+        !phantom_findings.iter().any(|d| d.entity.contains("Path")),
+        "Path used in runtime call Path(name) must NOT trigger phantom_dependency"
+    );
+    assert!(
+        !phantom_findings.iter().any(|d| d.entity.contains("sys")),
+        "sys used via sys.argv must NOT trigger phantom_dependency"
+    );
+
+    // Genuinely unused imports MUST still trigger phantom
+    assert!(
+        phantom_findings.iter().any(|d| d.entity.contains("os")),
+        "os is genuinely unused — phantom_dependency MUST fire. \
+         If this fails, phantom_dependency is completely broken, not just over-suppressed. \
+         Total phantom findings: {}",
+        phantom_findings.len()
+    );
+    assert!(
+        phantom_findings
+            .iter()
+            .any(|d| d.entity.contains("OrderedDict")),
+        "OrderedDict is genuinely unused — phantom_dependency MUST fire"
+    );
+}
+
+#[test]
+fn test_pipeline_import_symbols_have_import_annotation() {
+    // Regression gate: C12-era bug was PythonAdapter not creating import symbols
+    // with "import" annotation. If phantom_dependency fires on ANY import,
+    // the adapter is correctly annotating import symbols.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("unused_import.py"),
+        include_str!("../../tests/fixtures/python/unused_import.py"),
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_count = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .count();
+
+    // If phantom_dependency fires on ANY import, the adapter creates import symbols.
+    // We expect at least 2 (os, OrderedDict).
+    assert!(
+        phantom_count >= 2,
+        "phantom_dependency must fire on at least 2 genuinely unused imports \
+         (os, OrderedDict). Got {} phantom findings. If 0, PythonAdapter may not \
+         be creating import symbols with 'import' annotation (C12-era regression).",
+        phantom_count
+    );
+}
+
+#[test]
+fn test_pipeline_phantom_selective_mixed_annotation_and_unused() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("mixed.py"),
+        r#"from typing import Optional, List
+import json
+import re
+
+def search(pattern: str, items: List[str]) -> Optional[str]:
+    for item in items:
+        if re.match(pattern, item):
+            return item
+    return None
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_findings: Vec<&_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .collect();
+
+    let phantom_entities: Vec<&str> = phantom_findings.iter().map(|d| d.entity.as_str()).collect();
+
+    assert!(
+        !phantom_entities.iter().any(|e| e.contains("Optional")),
+        "Optional used in annotation must be suppressed. Phantom entities: {:?}",
+        phantom_entities
+    );
+    assert!(
+        !phantom_entities.iter().any(|e| e.contains("List")),
+        "List used in annotation must be suppressed. Phantom entities: {:?}",
+        phantom_entities
+    );
+    assert!(
+        !phantom_entities.iter().any(|e| e.contains("re")),
+        "re used in runtime re.match() must be suppressed. Phantom entities: {:?}",
+        phantom_entities
+    );
+    assert!(
+        phantom_entities.iter().any(|e| e.contains("json")),
+        "json is genuinely unused — must trigger phantom. Phantom entities: {:?}",
+        phantom_entities
+    );
+}
+
+#[test]
+fn test_pipeline_phantom_multiple_typing_imports_all_suppressed() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("multi_typing.py"),
+        // Every typing import must appear as the OUTERMOST annotation type
+        // at least once. Inner generics are not extracted (Known Limitation).
+        r#"from typing import Optional, List, Dict, Tuple
+
+def transform(data: Dict[str, List[int]]) -> Optional[str]:
+    if not data:
+        return None
+    first_key = next(iter(data))
+    return first_key
+
+def aggregate(items: List[str]) -> Dict[str, int]:
+    result = {}
+    for item in items:
+        result[item] = len(item)
+    return result
+
+def pair(a: str, b: int) -> Tuple[str, int]:
+    return (a, b)
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_findings: Vec<&_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .collect();
+
+    for type_name in &["Optional", "List", "Dict", "Tuple"] {
+        assert!(
+            !phantom_findings
+                .iter()
+                .any(|d| d.entity.contains(type_name)),
+            "{} used in type annotations must NOT trigger phantom_dependency. \
+             Phantom entities: {:?}",
+            type_name,
+            phantom_findings
+                .iter()
+                .map(|d| &d.entity)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn test_pipeline_phantom_import_used_in_annotation_and_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("both_usage.py"),
+        r#"from pathlib import Path
+
+def resolve(name: str) -> Path:
+    return Path(name)
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_findings: Vec<&_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .collect();
+
+    assert!(
+        !phantom_findings.iter().any(|d| d.entity.contains("Path")),
+        "Path used in BOTH annotation and runtime must NOT trigger phantom. \
+         Dual usage should be at least as suppressive as either alone. \
+         Phantom entities: {:?}",
+        phantom_findings
+            .iter()
+            .map(|d| &d.entity)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_pipeline_phantom_non_typing_import_annotation_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("non_typing_annot.py"),
+        r#"from pathlib import Path
+import os
+
+def validate(p: Path) -> None:
+    """Path used ONLY in type annotation, never called."""
+    pass
+
+def do_nothing():
+    pass
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_findings: Vec<&_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .collect();
+
+    let phantom_entities: Vec<&str> = phantom_findings.iter().map(|d| d.entity.as_str()).collect();
+
+    // attribute_access mechanism is NOT typing-specific — Path annotation
+    // should create the same attribute_access:Path reference as Optional does
+    assert!(
+        !phantom_entities.iter().any(|e| e.contains("Path")),
+        "Non-typing import (pathlib.Path) used only in annotation should also \
+         be suppressed by attribute_access mechanism. If this fails, the mechanism \
+         is typing-module-specific rather than type-name-generic. \
+         Phantom entities: {:?}",
+        phantom_entities
+    );
+
+    assert!(
+        phantom_entities.iter().any(|e| e.contains("os")),
+        "os genuinely unused — must trigger phantom. Phantom entities: {:?}",
+        phantom_entities
+    );
+}
+
+#[test]
+fn test_pipeline_phantom_imports_only_no_functions() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("imports_only.py"),
+        r#"import os
+import sys
+from collections import OrderedDict
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_count = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .count();
+
+    // No functions means no type annotations means no attribute_access references.
+    // ALL imports must be phantom. If any are suppressed, something is wrong.
+    assert!(
+        phantom_count >= 3,
+        "File with only imports and no functions should have ALL imports as phantom. \
+         Expected >= 3 phantom findings, got {}. If lower, imports are being \
+         incorrectly suppressed without any annotation references.",
+        phantom_count
+    );
+}
+
+#[test]
+fn test_pipeline_phantom_generic_type_root_extraction() {
+    // Tests that ONLY the outermost (root) type in a generic annotation is
+    // extracted for phantom suppression. Inner generic types are NOT extracted
+    // — this is a documented Known Limitation in README.md.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("generic_nested.py"),
+        r#"from typing import Optional
+from pathlib import Path
+import json
+
+def find_config(name: str) -> Optional[Path]:
+    """Optional is the root type, Path is inside the generic."""
+    return None
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let phantom_findings: Vec<&_> = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "phantom_dependency")
+        .collect();
+
+    let phantom_entities: Vec<&str> = phantom_findings.iter().map(|d| d.entity.as_str()).collect();
+
+    // Outermost type in annotation is suppressed
+    assert!(
+        !phantom_entities.iter().any(|e| e.contains("Optional")),
+        "Optional (outermost annotation type) must be suppressed. Phantom: {:?}",
+        phantom_entities
+    );
+
+    // Inner generic type Path in Optional[Path] is NOT extracted —
+    // known limitation. Path triggers phantom because only root type names
+    // are recognized. This test documents and guards the current behavior.
+    assert!(
+        phantom_entities.iter().any(|e| e.contains("Path")),
+        "Path (inner generic in Optional[Path]) should trigger phantom — \
+         only root type names are extracted (Known Limitation). \
+         If this starts passing, inner generic extraction was implemented. \
+         Phantom: {:?}",
+        phantom_entities
+    );
+
+    assert!(
+        phantom_entities.iter().any(|e| e.contains("json")),
+        "json genuinely unused — must fire. Phantom: {:?}",
+        phantom_entities
+    );
+}
+
+// =========================================================================
+// Instance Attribute Type Resolution — Pipeline Integration (C4-C1)
+// =========================================================================
+
+/// IRES-2: Full pipeline — Backend.execute should NOT be orphaned_impl
+/// when called through self._backend.execute() with type annotation.
+#[test]
+fn test_pipeline_instance_attr_method_resolution() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("service.py"),
+        r#"
+class Backend:
+    def execute(self, query):
+        return query
+
+class Service:
+    def __init__(self):
+        self._backend: Backend = Backend()
+
+    def run(self):
+        return self._backend.execute("SELECT 1")
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
+
+    let orphaned_execute = result.manifest.diagnostics.iter().any(|d| {
+        d.pattern == crate::DiagnosticPattern::OrphanedImplementation
+            && d.entity.contains("execute")
+    });
+    assert!(
+        !orphaned_execute,
+        "Backend.execute() must NOT be orphaned_impl when called through self._backend.execute(). \
+         Instance-attribute type resolution should create the call edge. \
+         Diagnostics: {:?}",
+        result
+            .manifest
+            .diagnostics
+            .iter()
+            .filter(|d| d.entity.contains("execute") || d.entity.contains("Backend"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// IRES-3: Unresolved instance attr method — graceful fallback, no crash.
+#[test]
+fn test_pipeline_instance_attr_unresolved_no_crash() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("service.py"),
+        r#"
+class Service:
+    def __init__(self):
+        self.client: ExternalClient = ExternalClient()
+
+    def call_api(self):
+        return self.client.fetch("/data")
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path(), None).unwrap();
+    // Must not panic — unresolved types are expected for cross-file imports
+    let result = analyze(tmp.path(), &config, &["python".to_string()]);
+    assert!(
+        result.is_ok(),
+        "Unresolved instance attr type must not crash analyze()"
+    );
+}
