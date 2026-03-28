@@ -7,12 +7,16 @@
 //! severity/confidence/pattern-name filters for the `--checks`, `--severity`,
 //! and `--confidence` CLI flags.
 
+/// Parallel functions with inconsistent treatment (missing consensus callees).
+pub mod asymmetric_handling;
 /// Cycles in the module dependency graph.
 pub mod circular_dependency;
 /// Interface says one thing, implementation says another (decorators, cross-file arity).
 pub mod contract_mismatch;
 /// Symbols defined but never consumed downstream.
 pub mod data_dead_end;
+/// Structural similarity in IR — callees-set Jaccard overlap.
+pub mod duplication;
 /// Shared exclusion logic — path relativization and symbol filtering helpers.
 pub mod exclusion;
 /// Old/new patterns coexisting with split callers.
@@ -113,7 +117,14 @@ pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) 
             DiagnosticPattern::PartialWiring,
             partial_wiring::detect(graph, project_root),
         ),
-        // Unimplemented patterns return empty Vec (registered but inactive)
+        (
+            DiagnosticPattern::Duplication,
+            duplication::detect(graph, project_root),
+        ),
+        (
+            DiagnosticPattern::AsymmetricHandling,
+            asymmetric_handling::detect(graph, project_root),
+        ),
     ];
 
     for (_pattern, diagnostics) in pattern_results {
@@ -142,6 +153,7 @@ pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ir::{ReferenceKind, SymbolKind, Visibility};
     use crate::test_utils::*;
 
     // =========================================================================
@@ -180,21 +192,21 @@ mod tests {
     }
 
     #[test]
-    fn test_unimplemented_patterns_return_empty() {
+    fn test_no_duplication_or_asymmetric_on_fixtures() {
         let graph = build_all_fixtures_graph();
         let diagnostics = run_all_patterns(&graph, Path::new(""));
-        // Duplication and AsymmetricHandling are not implemented — should never appear
+        // The fixture graph has no planted duplication or asymmetric handling scenarios
         assert!(
             !diagnostics
                 .iter()
                 .any(|d| d.pattern == DiagnosticPattern::Duplication),
-            "Unimplemented pattern Duplication should not produce diagnostics"
+            "Fixture graph should not trigger Duplication (no planted duplicates)"
         );
         assert!(
             !diagnostics
                 .iter()
                 .any(|d| d.pattern == DiagnosticPattern::AsymmetricHandling),
-            "Unimplemented pattern AsymmetricHandling should not produce diagnostics"
+            "Fixture graph should not trigger AsymmetricHandling (no planted asymmetry)"
         );
     }
 
@@ -3527,5 +3539,249 @@ mod tests {
         assert_eq!(phantom_entity.entity, stale_entity.entity);
         assert_eq!(phantom_entity.pattern, DiagnosticPattern::PhantomDependency);
         assert_eq!(stale_entity.pattern, DiagnosticPattern::StaleReference);
+    }
+
+    // =========================================================================
+    // Pattern Registration Tests (from QA 2 spec §3)
+    // =========================================================================
+
+    #[test]
+    fn test_registry_includes_duplication_and_asymmetric() {
+        // Build a graph with planted duplication AND asymmetry
+        let mut g = Graph::new();
+        let f = "handlers.py";
+        let validate = g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            1,
+        ));
+        let save = g.add_symbol(make_symbol(
+            "save",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            2,
+        ));
+        let notify = g.add_symbol(make_symbol(
+            "notify",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            3,
+        ));
+        let respond = g.add_symbol(make_symbol(
+            "respond",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            4,
+        ));
+
+        // Duplication: two functions with identical callees and matching arity
+        let mut dup_a = make_symbol("dup_a", SymbolKind::Function, Visibility::Public, f, 10);
+        dup_a.signature = Some("(x: int) -> None".to_string());
+        let da_id = g.add_symbol(dup_a);
+        let mut dup_b = make_symbol("dup_b", SymbolKind::Function, Visibility::Public, f, 20);
+        dup_b.signature = Some("(y: int) -> None".to_string());
+        let db_id = g.add_symbol(dup_b);
+        for caller in [da_id, db_id] {
+            add_ref(&mut g, caller, validate, ReferenceKind::Call, f);
+            add_ref(&mut g, caller, save, ReferenceKind::Call, f);
+        }
+
+        // Asymmetric: 3 siblings, one missing a consensus callee
+        let mut h1 = make_symbol("handler_1", SymbolKind::Function, Visibility::Public, f, 30);
+        h1.signature = Some("(req: R, ctx: C) -> Resp".to_string());
+        let h1_id = g.add_symbol(h1);
+        let mut h2 = make_symbol("handler_2", SymbolKind::Function, Visibility::Public, f, 40);
+        h2.signature = Some("(req: R, ctx: C) -> Resp".to_string());
+        let h2_id = g.add_symbol(h2);
+        let mut h3 = make_symbol("handler_3", SymbolKind::Function, Visibility::Public, f, 50);
+        h3.signature = Some("(req: R, ctx: C) -> Resp".to_string());
+        let h3_id = g.add_symbol(h3);
+
+        for id in [h1_id, h2_id] {
+            add_ref(&mut g, id, validate, ReferenceKind::Call, f);
+            add_ref(&mut g, id, notify, ReferenceKind::Call, f);
+            add_ref(&mut g, id, respond, ReferenceKind::Call, f);
+        }
+        // h3 is missing validate
+        add_ref(&mut g, h3_id, notify, ReferenceKind::Call, f);
+        add_ref(&mut g, h3_id, respond, ReferenceKind::Call, f);
+
+        let results = run_all_patterns(&g, Path::new(""));
+        let patterns: Vec<DiagnosticPattern> = results.iter().map(|d| d.pattern).collect();
+        assert!(
+            patterns.contains(&DiagnosticPattern::Duplication),
+            "Registry should include Duplication findings"
+        );
+        assert!(
+            patterns.contains(&DiagnosticPattern::AsymmetricHandling),
+            "Registry should include AsymmetricHandling findings"
+        );
+    }
+
+    #[test]
+    fn test_filter_includes_new_patterns() {
+        let mut g = Graph::new();
+        let f = "handlers.py";
+        let validate = g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            1,
+        ));
+        let save = g.add_symbol(make_symbol(
+            "save",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            2,
+        ));
+
+        let mut dup_a = make_symbol("dup_a", SymbolKind::Function, Visibility::Public, f, 10);
+        dup_a.signature = Some("(x: int) -> None".to_string());
+        let da_id = g.add_symbol(dup_a);
+        let mut dup_b = make_symbol("dup_b", SymbolKind::Function, Visibility::Public, f, 20);
+        dup_b.signature = Some("(y: int) -> None".to_string());
+        let db_id = g.add_symbol(dup_b);
+        for caller in [da_id, db_id] {
+            add_ref(&mut g, caller, validate, ReferenceKind::Call, f);
+            add_ref(&mut g, caller, save, ReferenceKind::Call, f);
+        }
+
+        // Filter to only Duplication
+        let filter = PatternFilter {
+            patterns: Some(vec![DiagnosticPattern::Duplication]),
+            ..Default::default()
+        };
+        let results = run_patterns(&g, &filter, Path::new(""));
+        assert!(results
+            .iter()
+            .all(|d| d.pattern == DiagnosticPattern::Duplication));
+        assert!(!results
+            .iter()
+            .any(|d| d.pattern == DiagnosticPattern::AsymmetricHandling));
+    }
+
+    // =========================================================================
+    // Integration: Clean Code Graph (from QA 2 spec §9)
+    // =========================================================================
+
+    #[test]
+    fn test_clean_code_no_new_pattern_findings() {
+        let graph = build_clean_code_graph();
+        let results = run_all_patterns(&graph, Path::new(""));
+        assert!(
+            !results
+                .iter()
+                .any(|d| d.pattern == DiagnosticPattern::Duplication),
+            "Clean code should produce zero Duplication findings"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|d| d.pattern == DiagnosticPattern::AsymmetricHandling),
+            "Clean code should produce zero AsymmetricHandling findings"
+        );
+    }
+
+    // =========================================================================
+    // Confidence Calibration (from QA 2 spec §8)
+    // =========================================================================
+
+    #[test]
+    fn test_new_patterns_confidence_is_moderate() {
+        let mut g = Graph::new();
+        let f = "handlers.py";
+        let validate = g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            1,
+        ));
+        let save = g.add_symbol(make_symbol(
+            "save",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            2,
+        ));
+
+        let mut a = make_symbol("func_a", SymbolKind::Function, Visibility::Public, f, 10);
+        a.signature = Some("(x: int) -> None".to_string());
+        let a_id = g.add_symbol(a);
+        let mut b = make_symbol("func_b", SymbolKind::Function, Visibility::Public, f, 20);
+        b.signature = Some("(y: int) -> None".to_string());
+        let b_id = g.add_symbol(b);
+        for id in [a_id, b_id] {
+            add_ref(&mut g, id, validate, ReferenceKind::Call, f);
+            add_ref(&mut g, id, save, ReferenceKind::Call, f);
+        }
+
+        let results = run_all_patterns(&g, Path::new(""));
+        let dup_findings: Vec<_> = results
+            .iter()
+            .filter(|d| d.pattern == DiagnosticPattern::Duplication)
+            .collect();
+        for d in &dup_findings {
+            assert_eq!(
+                d.confidence,
+                Confidence::Moderate,
+                "Duplication should always be Moderate confidence"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_patterns_evidence_is_concrete() {
+        let mut g = Graph::new();
+        let f = "handlers.py";
+        let validate = g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            1,
+        ));
+        let save = g.add_symbol(make_symbol(
+            "save",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            2,
+        ));
+
+        let mut a = make_symbol("func_a", SymbolKind::Function, Visibility::Public, f, 10);
+        a.signature = Some("(x: int) -> None".to_string());
+        let a_id = g.add_symbol(a);
+        let mut b = make_symbol("func_b", SymbolKind::Function, Visibility::Public, f, 20);
+        b.signature = Some("(y: int) -> None".to_string());
+        let b_id = g.add_symbol(b);
+        for id in [a_id, b_id] {
+            add_ref(&mut g, id, validate, ReferenceKind::Call, f);
+            add_ref(&mut g, id, save, ReferenceKind::Call, f);
+        }
+
+        let results = run_all_patterns(&g, Path::new(""));
+        for d in results
+            .iter()
+            .filter(|d| d.pattern == DiagnosticPattern::Duplication)
+        {
+            assert!(
+                !d.evidence.is_empty(),
+                "Every finding must have at least one evidence item"
+            );
+            for e in &d.evidence {
+                assert!(
+                    !e.observation.is_empty(),
+                    "Evidence observation must be non-empty"
+                );
+            }
+        }
     }
 }

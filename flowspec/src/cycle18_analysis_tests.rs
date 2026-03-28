@@ -494,9 +494,8 @@ fn test_c18_t17_no_unknown_pattern_types() {
 #[test]
 fn test_c18_t18_zero_patterns_remain_zero() {
     let results = run_dogfood();
+    // duplication and asymmetric_handling are now implemented (cycle 1) — removed from zero list
     let must_be_zero = [
-        "duplication",
-        "asymmetric_handling",
         "contract_mismatch",
         "incomplete_migration",
         "layer_violation",

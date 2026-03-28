@@ -22,6 +22,10 @@ use crate::parser::ir::{SymbolId, SymbolKind};
 /// Minimum Jaccard similarity threshold for reporting duplication.
 const JACCARD_THRESHOLD: f64 = 0.7;
 
+/// Minimum number of callees in the union set for a meaningful comparison.
+/// Below this, shared callees are likely coincidental API usage.
+const MIN_CALLEES_FOR_COMPARISON: usize = 3;
+
 /// Detect structural duplication between functions in the analysis graph.
 ///
 /// Two functions are considered structurally duplicated when:
@@ -746,6 +750,13 @@ mod tests {
             f,
             2,
         ));
+        let emit = g.add_symbol(make_symbol(
+            "emit",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            3,
+        ));
 
         let mut traverse = make_symbol("traverse", SymbolKind::Function, Visibility::Public, f, 10);
         traverse.signature = Some("(node) -> None".to_string());
@@ -755,17 +766,19 @@ mod tests {
         handle.signature = Some("(item) -> None".to_string());
         let ha_id = g.add_symbol(handle);
 
-        // traverse calls itself + process + validate
+        // traverse calls itself + process + validate + emit
         add_ref(&mut g, tr_id, tr_id, ReferenceKind::Call, f);
         add_ref(&mut g, tr_id, process, ReferenceKind::Call, f);
         add_ref(&mut g, tr_id, validate, ReferenceKind::Call, f);
+        add_ref(&mut g, tr_id, emit, ReferenceKind::Call, f);
 
-        // handle calls process + validate
+        // handle calls process + validate + emit
         add_ref(&mut g, ha_id, process, ReferenceKind::Call, f);
         add_ref(&mut g, ha_id, validate, ReferenceKind::Call, f);
+        add_ref(&mut g, ha_id, emit, ReferenceKind::Call, f);
 
-        // With self-call excluded: traverse callees = {process, validate}, handle callees = {process, validate}
-        // Jaccard = 1.0 — should trigger
+        // With self-call excluded: traverse callees = {process, validate, emit}, handle callees = {process, validate, emit}
+        // Jaccard = 1.0, union = 3 (meets min threshold) — should trigger
         let root = PathBuf::from("/project");
         let results = detect(&g, &root);
         assert!(
@@ -776,10 +789,10 @@ mod tests {
         );
     }
 
-    // -- 1.8 True Positive: Single shared callee --
+    // -- 1.8 True Positive: Shared callees with matching arity --
 
     #[test]
-    fn test_duplication_true_positive_single_callee_match() {
+    fn test_duplication_true_positive_shared_callees_match() {
         let mut g = Graph::new();
         let f = "serializers.py";
 
@@ -789,6 +802,20 @@ mod tests {
             Visibility::Private,
             f,
             1,
+        ));
+        let validate = g.add_symbol(make_symbol(
+            "validate",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            2,
+        ));
+        let format_output = g.add_symbol(make_symbol(
+            "format_output",
+            SymbolKind::Function,
+            Visibility::Private,
+            f,
+            3,
         ));
 
         let mut serialize_user = make_symbol(
@@ -811,8 +838,10 @@ mod tests {
         serialize_order.signature = Some("(order) -> str".to_string());
         let so_id = g.add_symbol(serialize_order);
 
-        add_ref(&mut g, su_id, to_json, ReferenceKind::Call, f);
-        add_ref(&mut g, so_id, to_json, ReferenceKind::Call, f);
+        for callee in [to_json, validate, format_output] {
+            add_ref(&mut g, su_id, callee, ReferenceKind::Call, f);
+            add_ref(&mut g, so_id, callee, ReferenceKind::Call, f);
+        }
 
         let root = PathBuf::from("/project");
         let results = detect(&g, &root);
@@ -820,7 +849,7 @@ mod tests {
             results
                 .iter()
                 .any(|d| d.pattern == DiagnosticPattern::Duplication),
-            "Single-callee match with matching arity should trigger"
+            "Shared callees (>=3) with matching arity should trigger"
         );
     }
 

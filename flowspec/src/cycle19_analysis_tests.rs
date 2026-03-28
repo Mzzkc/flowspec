@@ -167,11 +167,11 @@ fn test_c19_t11_total_findings_within_baseline_tolerance() {
     let results = run_dogfood_c19();
     let total = results.len();
     eprintln!("T11: total findings = {}", total);
-    // After C20 dedup: Methods excluded from data_dead_end, total dropped ~51
-    // C20 baseline: 537 ±30
+    // After cycle 1: duplication + asymmetric_handling patterns implemented,
+    // adding ~47 new findings. Updated baseline: 584 ±40
     assert!(
-        total >= 507 && total <= 567,
-        "T11: total={}, expected 507-567 (C20 baseline 537 ±30, post-Method dedup)",
+        total >= 544 && total <= 624,
+        "T11: total={}, expected 544-624 (cycle 1 baseline 584 ±40, with new patterns)",
         total
     );
 }

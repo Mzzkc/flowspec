@@ -293,16 +293,14 @@ pub fn extract_boundaries(
 
                 // Only count cross-file edges as boundary crossings
                 if source_file != target_file {
-                    let rel_from =
-                        crate::analyzer::patterns::exclusion::relativize_path(
-                            &symbol.location.file,
-                            project_root,
-                        );
-                    let rel_to =
-                        crate::analyzer::patterns::exclusion::relativize_path(
-                            &target_sym.location.file,
-                            project_root,
-                        );
+                    let rel_from = crate::analyzer::patterns::exclusion::relativize_path(
+                        &symbol.location.file,
+                        project_root,
+                    );
+                    let rel_to = crate::analyzer::patterns::exclusion::relativize_path(
+                        &target_sym.location.file,
+                        project_root,
+                    );
 
                     // Canonical key: lexicographically smaller path first
                     let key = if rel_from <= rel_to {
@@ -313,11 +311,7 @@ pub fn extract_boundaries(
 
                     let crossing = CrossingPoint {
                         func: symbol.qualified_name.clone(),
-                        data_in: symbol
-                            .signature
-                            .as_deref()
-                            .unwrap_or("unknown")
-                            .to_string(),
+                        data_in: symbol.signature.as_deref().unwrap_or("unknown").to_string(),
                         data_out: target_sym
                             .signature
                             .as_deref()
