@@ -586,7 +586,12 @@ pub fn analyze(
     // Key flows: top 5 flows by step count (most significant data flow paths)
     let key_flows: Vec<KeyFlow> = {
         let mut flow_refs: Vec<&FlowEntry> = flows.iter().collect();
-        flow_refs.sort_by(|a, b| b.steps.len().cmp(&a.steps.len()).then(a.entry.cmp(&b.entry)));
+        flow_refs.sort_by(|a, b| {
+            b.steps
+                .len()
+                .cmp(&a.steps.len())
+                .then(a.entry.cmp(&b.entry))
+        });
         flow_refs
             .into_iter()
             .take(5)
@@ -706,9 +711,7 @@ fn extract_flow_types(signature: &str) -> (String, String) {
 
     // Extract parameter types from "(param: Type, param2: Type2)"
     let in_type = if params_part.starts_with('(') && params_part.contains(':') {
-        let inner = params_part
-            .trim_start_matches('(')
-            .trim_end_matches(')');
+        let inner = params_part.trim_start_matches('(').trim_end_matches(')');
         let types: Vec<&str> = inner
             .split(',')
             .filter_map(|p| {

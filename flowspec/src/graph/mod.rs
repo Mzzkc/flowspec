@@ -19,7 +19,7 @@
 mod cache;
 mod populate;
 
-pub use cache::{compute_file_hashes, CacheMetadata};
+pub use cache::{compute_file_hashes, load_file_hashes, save_file_hashes, CacheMetadata};
 pub use populate::populate_graph;
 pub use populate::resolve_cross_file_imports;
 #[allow(unused_imports)]
@@ -479,10 +479,7 @@ impl Graph {
     /// If the file path is not in the graph, this is a no-op.
     pub fn remove_file(&mut self, path: &Path) {
         // Collect symbol IDs for the file
-        let symbol_ids: Vec<SymbolId> = self
-            .file_symbols
-            .remove(path)
-            .unwrap_or_default();
+        let symbol_ids: Vec<SymbolId> = self.file_symbols.remove(path).unwrap_or_default();
 
         if symbol_ids.is_empty() && !self.file_scopes.contains_key(path) {
             return; // No-op for unknown files
@@ -498,15 +495,11 @@ impl Graph {
         // Clean up orphaned Reference entries in the references SlotMap.
         // remove_symbol() cleans adjacency edges but does NOT remove Reference
         // entries — we do it here to prevent garbage accumulation.
-        self.references.retain(|_id, r| {
-            !symbol_set.contains(&r.from) && !symbol_set.contains(&r.to)
-        });
+        self.references
+            .retain(|_id, r| !symbol_set.contains(&r.from) && !symbol_set.contains(&r.to));
 
         // Collect scope IDs for the file
-        let scope_ids: Vec<ScopeId> = self
-            .file_scopes
-            .remove(path)
-            .unwrap_or_default();
+        let scope_ids: Vec<ScopeId> = self.file_scopes.remove(path).unwrap_or_default();
 
         let scope_set: HashSet<ScopeId> = scope_ids.iter().copied().collect();
 
