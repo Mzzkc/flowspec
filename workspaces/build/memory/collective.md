@@ -404,3 +404,15 @@
 **Notable:** Duplicate `extract_arity()` in duplication.rs and asymmetric_handling.rs — private, identical logic, documented independently. Future consolidation candidate.
 
 **Gaps for post-loop docs pipeline:** Architecture guide for lib.rs orchestration, diagnostic pattern catalog, cache invalidation strategy docs.
+
+## Doc-Usage (Doc 2) — Cycle 1 Status
+
+**Report:** `cycle-1/doc-updates-2.md`
+
+**README updated:** 4 edits removing stale "deferred to v1.1" claims for duplication and asymmetric_handling patterns. Flow type limitation updated to reflect Worker 2's signature threading. Pattern descriptions expanded in table.
+
+**CLI help verified:** All 6 commands match `cli.yaml` spec. No substantive discrepancies. Minor gaps: `--incremental` default not shown (irrelevant until caching wired), `init` inherits unused `--format` global flag.
+
+**New pattern docs written:** Full diagnostic explanations for duplication (Jaccard similarity, threshold 0.7, min-union 3) and asymmetric_handling (sibling grouping, N-1 consensus, min-group 3). Both include detection logic, evidence format, expected confidence, and dogfood verification.
+
+**Committed:** README.md changes + workspace report.

@@ -188,7 +188,7 @@ flowspec diff baseline.yaml current.yaml || echo "Regressions detected"
 
 ## Diagnostic Patterns
 
-Flowspec detects 13 structural patterns (11 active in v1, 2 deferred to v1.1):
+Flowspec detects 13 structural patterns:
 
 | Pattern | Severity | Description |
 |---------|----------|-------------|
@@ -203,8 +203,8 @@ Flowspec detects 13 structural patterns (11 active in v1, 2 deferred to v1.1):
 | `stale_reference` | warning | Reference to something that has been moved or renamed |
 | `phantom_dependency` | info | Module imported but nothing from it is used |
 | `missing_reexport` | info | Public symbol in submodule not re-exported through parent |
-| `duplication` | warning | Overlapping logic in multiple places *(deferred to v1.1)* |
-| `asymmetric_handling` | warning | Parallel code paths with inconsistent treatment *(deferred to v1.1)* |
+| `duplication` | warning | Overlapping logic in multiple places — structural similarity via callees-set comparison |
+| `asymmetric_handling` | warning | Parallel code paths with inconsistent treatment — sibling functions missing consensus callees |
 
 ## Language Support
 
@@ -219,10 +219,11 @@ Flowspec detects 13 structural patterns (11 active in v1, 2 deferred to v1.1):
 - **TypeScript preprocessing** — TS files are preprocessed to strip type annotations rather than using a native tree-sitter-typescript grammar; complex TS patterns (mapped types, conditional types) may not be fully handled
 - **Dynamic JS imports** — `import()` expressions are not tracked
 - **Split Rust impl blocks** — multiple `impl` blocks for the same type do not share scope
-- **Flow type information** — `in_type`/`out_type` fields in flow output are always "unknown"
+- **Flow type information** — `in_type`/`out_type` fields in flow output are populated from function signatures when available, but may show "unknown" for functions without parsed signatures
 - **Cross-file flow tracing** — import resolution creates graph edges, but the flow tracing engine does not yet follow these edges across module boundaries; cross-module data flows are largely untracked
 - **Instance-method dispatch** — `self.method()` calls resolve to the method on the same class, but `self.attr.method()` requires instance-attribute type resolution to connect the call to the correct target class; partial support added in v1 for simple typed attributes in `__init__`
-- **`duplication` and `asymmetric_handling` patterns** — deferred to v1.1 (require AST-level structural comparison and control flow analysis respectively)
+- **`duplication` detection** — uses Jaccard similarity on callees sets (structural, not textual); functions sharing common utility calls may trigger false positives. Minimum union size of 3 callees required.
+- **`asymmetric_handling` detection** — groups functions by file, kind, and similar arity; consensus threshold is strict (N-1 of N), but groups of functions with legitimately different responsibilities may be incorrectly grouped
 
 ## Diagnostic Accuracy
 
