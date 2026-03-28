@@ -388,3 +388,19 @@
 - `type_flows` remains `Vec::new()` (stretch goal, deferred — requires type-tracking infrastructure)
 - Duplication produces 6 findings on self-analysis (real structural similarities in pattern detectors)
 - Pre-existing phantom_dependency drift (164 vs baseline 135) — issue #20
+
+## Doc-API (Doc 1) — Cycle 1 Status
+
+**Report:** `cycle-1/doc-updates-1.md`
+
+**Audit result: Zero `///` gaps found.** All 8 audited files have complete documentation coverage. Workers documented their code during implementation — no post-hoc doc pass was needed.
+
+**Files audited:** graph/mod.rs, graph/cache.rs, analyzer/patterns/mod.rs, duplication.rs, asymmetric_handling.rs, manifest/types.rs, analyzer/extraction.rs, error.rs
+
+**Error type audit:** All 12 FlowspecError variants documented. User-facing variants (6 of 12) include actionable fix suggestions. Internal variants correctly omit them.
+
+**Cache format:** Fully documented in cache.rs module docs with ASCII layout diagram. Repeated in Graph::save() doc comment.
+
+**Notable:** Duplicate `extract_arity()` in duplication.rs and asymmetric_handling.rs — private, identical logic, documented independently. Future consolidation candidate.
+
+**Gaps for post-loop docs pipeline:** Architecture guide for lib.rs orchestration, diagnostic pattern catalog, cache invalidation strategy docs.
