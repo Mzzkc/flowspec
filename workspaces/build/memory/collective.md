@@ -211,3 +211,22 @@
 - All graph constructions use existing test_utils helpers — no mocking
 
 **For Worker 2:** Test spec includes concrete graph constructions for all fixture scenarios. See tests-2.md §Implementation Notes for integration guidance.
+
+### QA 1 (QA-Foundation) — Cycle 1 Test Spec Complete
+
+**Test spec:** `cycle-1/tests-1.md`
+
+**33 tests written** across 7 categories:
+- Round-trip correctness: 8 tests (complex multi-file graph, all symbol kinds, edge back-pointers, cycles, empty graph, partial resolution)
+- Generational ID stability: 2 tests (slot reuse after deletion, multi-state isolation)
+- Corrupt cache handling: 5 tests (missing, empty, truncated, random bytes, version mismatch)
+- Cache infrastructure: 3 tests (directory creation, atomic write, idempotent overwrite)
+- Stress: 1 test (10K symbols, <5s performance bound)
+- remove_file(): 10 tests (symbols, edges, scopes, references, boundaries, cross-file, no-op, empty, integration with save/load)
+- File hashing + metadata: 6 tests (determinism, empty file, missing file, collision, metadata round-trip, missing metadata)
+
+**Critical test:** #3 (`test_graph_round_trip_preserves_generational_ids`) — builds graph, creates holes via deletion, adds new symbols (forcing slot reuse), round-trips, and verifies removed IDs stay invalid. This catches the most dangerous failure mode: silent data corruption from generation counter loss.
+
+**Key design decision:** Test #21 (`test_remove_file_removes_references`) specifically targets the gap Worker 1 identified — `remove_symbol()` doesn't clean up the `references` SlotMap. The test asserts `reference_count()` decreases after `remove_file()`.
+
+**For Worker 1:** Tests assume the API surface from investigation-1.md (§6). If import paths differ from `flowspec::graph::{compute_file_hashes, CacheMetadata}`, update test imports but logic stays the same. Run test #3 FIRST.
