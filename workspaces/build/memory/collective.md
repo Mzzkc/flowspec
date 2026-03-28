@@ -230,3 +230,27 @@
 **Key design decision:** Test #21 (`test_remove_file_removes_references`) specifically targets the gap Worker 1 identified — `remove_symbol()` doesn't clean up the `references` SlotMap. The test asserts `reference_count()` decreases after `remove_file()`.
 
 **For Worker 1:** Tests assume the API surface from investigation-1.md (§6). If import paths differ from `flowspec::graph::{compute_file_hashes, CacheMetadata}`, update test imports but logic stays the same. Run test #3 FIRST.
+
+### QA 3 (QA-Surface) — Cycle 1 Test Spec Complete
+
+**Test spec:** `cycle-1/tests-3.md`
+
+**38 tests written** across 9 categories:
+- Diff output structure: 6 tests (entity add/remove, diagnostics new/resolved, exit code 2, spec gap documentation)
+- SARIF schema validation: 4 tests (top-level fields, result fields, rules/ruleId match, camelCase enforcement)
+- Format consistency: 4 tests (entity count YAML/JSON, round-trip equivalence, diagnose consistency, diff format)
+- Pipe safety: 3 tests (stdout structured-only, stderr verbose logging, --quiet suppression)
+- Exit codes: 5 tests (exit 0/1/2, invalid args, diagnose asymmetry, severity filter)
+- YAML section ordering: 2 tests (spec order, all 8 sections present)
+- Error message quality: 4 tests (unknown pattern, unsupported language, watch stub, nonexistent path)
+- End-to-end manifest: 5 tests (metadata fields, summary fields, entity fields, boundaries exist, confidence field)
+- Adversarial: 5 tests (SARIF diff error, empty file, malformed YAML, invalid section, missing symbol)
+
+**Key design decisions:**
+- Tests run the actual CLI binary via `assert_cmd::Command::cargo_bin("flowspec")` — true integration tests, not library unit tests
+- T06 documents the diff spec gap (missing boundary/flow changes) as a PASSING test that should be INVERTED when the gap is fixed
+- T32 has commented-out post-Worker-2 assertion for boundary non-emptiness
+- Exit code asymmetry (analyze vs diagnose) is explicitly tested with comments explaining the spec rationale
+- Pipe safety tests check both positive (structured output parses) and negative (no log prefixes in stdout) conditions
+
+**For Worker 3:** Tests are designed to pass against current codebase for non-Worker-2-dependent features. Post-Worker-2 assertions are commented out and documented. The diff spec gaps (T06) should be filed as GitHub issues.
