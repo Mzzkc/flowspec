@@ -91,6 +91,15 @@ pub enum FlowspecError {
     #[error("empty path provided (fix: provide a valid project path, e.g. 'flowspec analyze .')")]
     EmptyPath,
 
+    /// A cache operation (serialization, hashing, or metadata) failed.
+    #[error("cache error at {path}: {reason}")]
+    Cache {
+        /// Path involved in the failed cache operation.
+        path: PathBuf,
+        /// What went wrong.
+        reason: String,
+    },
+
     /// An operation on the analysis graph failed.
     #[error("graph error: {0}")]
     Graph(String),

@@ -8,6 +8,7 @@ flowspec-build.yaml
 
 # Runtime workspaces (Mozart job artifacts)
 workspaces/
+workspaces/*
 
 # Test temporaries
 tests/temp/

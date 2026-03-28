@@ -16,8 +16,10 @@
 //! Design follows the ECS-inspired pattern: symbols are IDs, properties are
 //! data alongside, and the graph is a passive data store that analyzers query.
 
+mod cache;
 mod populate;
 
+pub use cache::{compute_file_hashes, CacheMetadata};
 pub use populate::populate_graph;
 pub use populate::resolve_cross_file_imports;
 #[allow(unused_imports)]
@@ -27,6 +29,7 @@ pub(crate) use populate::resolve_import_by_name;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
 use crate::parser::ir::*;
@@ -58,7 +61,7 @@ use crate::parser::ir::*;
 /// | [`symbols_in_file()`](Self::symbols_in_file) | All symbols defined in a file |
 /// | [`connected_components()`](Self::connected_components) | Undirected connected components |
 /// | [`detect_cycles()`](Self::detect_cycles) | Directed cycle detection via DFS coloring |
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Graph {
     symbols: SlotMap<SymbolId, Symbol>,
     scopes: SlotMap<ScopeId, Scope>,
@@ -426,6 +429,103 @@ impl Graph {
         }
 
         cycles
+    }
+
+    // -- Persistence ----------------------------------------------------------
+
+    /// Serializes the graph to `cache_dir/graph.bin` using atomic write.
+    ///
+    /// Creates `cache_dir` if it doesn't exist. Uses bincode via serde
+    /// compatibility for compact binary output. A crash mid-write never leaves
+    /// a partial `graph.bin` — only the complete file or the previous version.
+    ///
+    /// # Cache layout
+    ///
+    /// ```text
+    /// cache_dir/
+    /// ├── graph.bin          # this method writes this file
+    /// ├── file_hashes.json   # written by save_file_hashes()
+    /// └── metadata.json      # written by CacheMetadata::save()
+    /// ```
+    pub fn save(&self, cache_dir: &Path) -> Result<(), crate::error::FlowspecError> {
+        cache::save_graph(self, cache_dir)
+    }
+
+    /// Deserializes a graph from `cache_dir/graph.bin`.
+    ///
+    /// Returns `Err` on missing file, corrupt data, or deserialization failure —
+    /// never panics. Callers should fall back to full re-analysis on error.
+    pub fn load(cache_dir: &Path) -> Result<Self, crate::error::FlowspecError> {
+        cache::load_graph(cache_dir)
+    }
+
+    // -- Incremental file removal ---------------------------------------------
+
+    /// Removes all symbols, scopes, references, and boundaries for a file.
+    ///
+    /// This is the batch-removal operation for incremental analysis: when a
+    /// source file changes or is deleted, call this to surgically remove its
+    /// contribution to the graph before re-parsing.
+    ///
+    /// Cleans up:
+    /// - All symbols defined in the file (via `file_symbols`)
+    /// - All edges involving those symbols (outgoing and incoming)
+    /// - All `Reference` entries where `from` or `to` belongs to a removed symbol
+    /// - All scopes defined in the file (via `file_scopes`)
+    /// - All `scope_children` entries referencing removed scopes
+    /// - All boundaries where `from_scope` or `to_scope` belongs to a removed scope
+    /// - The `file_symbols` and `file_scopes` map entries for the path
+    ///
+    /// If the file path is not in the graph, this is a no-op.
+    pub fn remove_file(&mut self, path: &Path) {
+        // Collect symbol IDs for the file
+        let symbol_ids: Vec<SymbolId> = self
+            .file_symbols
+            .remove(path)
+            .unwrap_or_default();
+
+        if symbol_ids.is_empty() && !self.file_scopes.contains_key(path) {
+            return; // No-op for unknown files
+        }
+
+        let symbol_set: HashSet<SymbolId> = symbol_ids.iter().copied().collect();
+
+        // Remove each symbol and its edges via the existing cascade method
+        for &id in &symbol_ids {
+            self.remove_symbol(id);
+        }
+
+        // Clean up orphaned Reference entries in the references SlotMap.
+        // remove_symbol() cleans adjacency edges but does NOT remove Reference
+        // entries — we do it here to prevent garbage accumulation.
+        self.references.retain(|_id, r| {
+            !symbol_set.contains(&r.from) && !symbol_set.contains(&r.to)
+        });
+
+        // Collect scope IDs for the file
+        let scope_ids: Vec<ScopeId> = self
+            .file_scopes
+            .remove(path)
+            .unwrap_or_default();
+
+        let scope_set: HashSet<ScopeId> = scope_ids.iter().copied().collect();
+
+        // Remove scopes from the scopes SlotMap
+        for &scope_id in &scope_ids {
+            self.scopes.remove(scope_id);
+            self.scope_symbols.remove(&scope_id);
+            self.scope_children.remove(&scope_id);
+        }
+
+        // Clean up scope_children entries that reference removed scopes
+        for children in self.scope_children.values_mut() {
+            children.retain(|id| !scope_set.contains(id));
+        }
+
+        // Remove boundaries where either endpoint is a removed scope
+        self.boundaries.retain(|_id, b| {
+            !scope_set.contains(&b.from_scope) && !scope_set.contains(&b.to_scope)
+        });
     }
 }
 

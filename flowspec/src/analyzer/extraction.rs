@@ -260,6 +260,91 @@ pub fn infer_module_role(graph: &Graph, file_path: &Path) -> String {
     "Service module".to_string()
 }
 
+/// Extracts module boundaries from cross-file edges in the graph.
+///
+/// Since language adapters don't yet produce `Boundary` IR objects, this derives
+/// module boundaries from cross-file reference edges: every reference where
+/// `source_file != target_file` represents a module boundary crossing.
+///
+/// Boundaries are deduplicated per file pair, with multiple crossing points
+/// aggregated into a single `BoundaryEntry`. File paths are relativized against
+/// `project_root` for deterministic manifest output.
+pub fn extract_boundaries(
+    graph: &Graph,
+    project_root: &Path,
+) -> Vec<crate::manifest::types::BoundaryEntry> {
+    use crate::manifest::types::{BoundaryEntry, CrossingPoint};
+    use std::collections::BTreeMap;
+
+    // Collect crossing points per (from_file, to_file) pair
+    let mut boundary_map: BTreeMap<(String, String), Vec<CrossingPoint>> = BTreeMap::new();
+
+    for (sym_id, symbol) in graph.all_symbols() {
+        let source_file = symbol.location.file.to_string_lossy().to_string();
+
+        for edge in graph.edges_from(sym_id) {
+            // Skip unresolved edges
+            if edge.target == SymbolId::default() {
+                continue;
+            }
+
+            if let Some(target_sym) = graph.get_symbol(edge.target) {
+                let target_file = target_sym.location.file.to_string_lossy().to_string();
+
+                // Only count cross-file edges as boundary crossings
+                if source_file != target_file {
+                    let rel_from =
+                        crate::analyzer::patterns::exclusion::relativize_path(
+                            &symbol.location.file,
+                            project_root,
+                        );
+                    let rel_to =
+                        crate::analyzer::patterns::exclusion::relativize_path(
+                            &target_sym.location.file,
+                            project_root,
+                        );
+
+                    // Canonical key: lexicographically smaller path first
+                    let key = if rel_from <= rel_to {
+                        (rel_from.clone(), rel_to.clone())
+                    } else {
+                        (rel_to.clone(), rel_from.clone())
+                    };
+
+                    let crossing = CrossingPoint {
+                        func: symbol.qualified_name.clone(),
+                        data_in: symbol
+                            .signature
+                            .as_deref()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        data_out: target_sym
+                            .signature
+                            .as_deref()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    };
+
+                    boundary_map.entry(key).or_default().push(crossing);
+                }
+            }
+        }
+    }
+
+    boundary_map
+        .into_iter()
+        .enumerate()
+        .map(|(i, ((from, to), crossings))| BoundaryEntry {
+            id: format!("B{:03}", i + 1),
+            boundary_type: "module".to_string(),
+            from,
+            to,
+            crossing_points: crossings,
+            issues: Vec::new(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

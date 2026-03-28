@@ -220,7 +220,32 @@ Flowspec detects 13 structural patterns (11 active in v1, 2 deferred to v1.1):
 - **Dynamic JS imports** — `import()` expressions are not tracked
 - **Split Rust impl blocks** — multiple `impl` blocks for the same type do not share scope
 - **Flow type information** — `in_type`/`out_type` fields in flow output are always "unknown"
+- **Cross-file flow tracing** — import resolution creates graph edges, but the flow tracing engine does not yet follow these edges across module boundaries; cross-module data flows are largely untracked
+- **Instance-method dispatch** — `self.method()` calls resolve to the method on the same class, but `self.attr.method()` requires instance-attribute type resolution to connect the call to the correct target class; partial support added in v1 for simple typed attributes in `__init__`
 - **`duplication` and `asymmetric_handling` patterns** — deferred to v1.1 (require AST-level structural comparison and control flow analysis respectively)
+
+## Diagnostic Accuracy
+
+Field-tested against a real-world Python codebase (228 files, 13K+ entities). These are honest numbers — patterns vary widely in reliability:
+
+| Pattern | Findings | TP Rate | Status |
+|---------|----------|---------|--------|
+| `isolated_cluster` | 35 | ~33% | **Most reliable.** Genuinely useful for finding disconnected code clusters. |
+| `data_dead_end` | 562 | ~13% | Improving. Method dedup (C20) helped. Instance-attribute resolution will help more. |
+| `missing_reexport` | 1,595 | ~13% | Python convention mismatch — methods on classes flagged as missing from `__init__.py`. Fix in progress. |
+| `orphaned_impl` | 1,070 | ~7% | Dominated by unresolved instance-method dispatch (`self.attr.method()`). |
+| `contract_mismatch` | 97 | ~7% | Name-based matching across namespaces produces false positives. |
+| `phantom_dependency` | 1,960 | ~0% | **Known broken.** Imports used as call targets (not just name references) are not tracked after resolution. Largest single source of false positives. |
+| `circular_dependency` | 0 | — | Fixed in C21. All previous false positives eliminated. |
+| `incomplete_migration` | 7 | ~0%→100% | Sequential version chains and sync/async wrappers now correctly excluded. |
+| `stale_reference` | 1 | ~0% | Too few findings to assess. Module-level import resolution gap. |
+
+**What this means for consumers:** Use `isolated_cluster` and `data_dead_end` findings with moderate confidence. Treat `phantom_dependency` findings as noise until the name-reference tracking gap is resolved. Filter by `--confidence high` to reduce false positives across all patterns.
+
+**Root causes of false positives (95% explained by three gaps):**
+1. No name-reference tracking after import resolution — imports resolve but downstream usage of imported names is not linked back
+2. No instance-method dispatch resolution — `self.x.method()` calls don't resolve through typed attributes
+3. Python convention mismatch — several patterns apply module-level expectations to class-internal structure
 
 ## CI Integration
 

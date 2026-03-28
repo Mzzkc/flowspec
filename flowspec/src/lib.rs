@@ -133,8 +133,8 @@ use std::path::{Path, PathBuf};
 
 use analyzer::conversion::to_manifest_entries;
 use analyzer::extraction::{
-    extract_called_by, extract_calls, extract_dependency_graph, extract_visibility,
-    infer_module_role,
+    extract_boundaries, extract_called_by, extract_calls, extract_dependency_graph,
+    extract_visibility, infer_module_role,
 };
 use graph::populate_graph;
 use graph::resolve_cross_file_imports;
@@ -507,15 +507,19 @@ pub fn analyze(
                 .steps
                 .iter()
                 .map(|step| {
-                    let entity = graph
-                        .get_symbol(step.symbol)
+                    let sym = graph.get_symbol(step.symbol);
+                    let entity = sym
                         .map(|s| s.qualified_name.clone())
                         .unwrap_or_else(|| "unknown".to_string());
+                    let (in_type, out_type) = sym
+                        .and_then(|s| s.signature.as_ref())
+                        .map(|sig| extract_flow_types(sig))
+                        .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
                     manifest::types::FlowStep {
                         entity,
                         action: "call".to_string(),
-                        in_type: "unknown".to_string(),
-                        out_type: "unknown".to_string(),
+                        in_type,
+                        out_type,
                     }
                 })
                 .collect();
@@ -566,6 +570,38 @@ pub fn analyze(
         .map(|e| e.id.clone())
         .collect();
 
+    // Exit points: public functions/methods with no outgoing call edges (data leaves through them)
+    let exit_points: Vec<String> = graph
+        .all_symbols()
+        .filter(|(id, sym)| {
+            sym.visibility == parser::ir::Visibility::Public
+                && matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
+                && graph.callees(*id).is_empty()
+                && !sym.annotations.contains(&"entry_point".to_string())
+                && !sym.annotations.contains(&"import".to_string())
+        })
+        .map(|(_, sym)| sym.qualified_name.clone())
+        .collect();
+
+    // Key flows: top 5 flows by step count (most significant data flow paths)
+    let key_flows: Vec<KeyFlow> = {
+        let mut flow_refs: Vec<&FlowEntry> = flows.iter().collect();
+        flow_refs.sort_by(|a, b| b.steps.len().cmp(&a.steps.len()).then(a.entry.cmp(&b.entry)));
+        flow_refs
+            .into_iter()
+            .take(5)
+            .map(|f| KeyFlow {
+                name: f.description.clone(),
+                path_summary: f
+                    .steps
+                    .iter()
+                    .map(|s| s.entity.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" → "),
+            })
+            .collect()
+    };
+
     let architecture = if modules.is_empty() {
         "Empty project with no analyzable source files.".to_string()
     } else {
@@ -598,8 +634,8 @@ pub fn analyze(
             architecture,
             modules,
             entry_points,
-            exit_points: Vec::new(),
-            key_flows: Vec::new(),
+            exit_points,
+            key_flows,
             diagnostic_summary: DiagnosticSummary {
                 critical: critical_count,
                 warning: warning_count,
@@ -610,7 +646,7 @@ pub fn analyze(
         diagnostics,
         entities,
         flows,
-        boundaries: Vec::new(),
+        boundaries: extract_boundaries(&graph, project_path),
         dependency_graph: extract_dependency_graph(&graph)
             .into_iter()
             .map(|dep| {
@@ -648,6 +684,55 @@ pub fn analyze(
         graph,
         source_bytes,
     })
+}
+
+/// Extract input and output type strings from a function signature.
+///
+/// Parses signatures in the format `(param: Type, ...) -> ReturnType`.
+/// Returns `("unknown", "unknown")` if the signature cannot be parsed.
+fn extract_flow_types(signature: &str) -> (String, String) {
+    let trimmed = signature.trim();
+    if trimmed.is_empty() {
+        return ("unknown".to_string(), "unknown".to_string());
+    }
+
+    let (params_part, return_part) = if let Some(arrow_pos) = trimmed.rfind("->") {
+        let ret = trimmed[arrow_pos + 2..].trim();
+        let params = trimmed[..arrow_pos].trim();
+        (params, if ret.is_empty() { "unknown" } else { ret })
+    } else {
+        (trimmed, "unknown")
+    };
+
+    // Extract parameter types from "(param: Type, param2: Type2)"
+    let in_type = if params_part.starts_with('(') && params_part.contains(':') {
+        let inner = params_part
+            .trim_start_matches('(')
+            .trim_end_matches(')');
+        let types: Vec<&str> = inner
+            .split(',')
+            .filter_map(|p| {
+                let p = p.trim();
+                if p.is_empty() {
+                    return None;
+                }
+                // "param: Type" -> "Type"
+                p.split(':').nth(1).map(|t| t.trim())
+            })
+            .collect();
+        if types.is_empty() {
+            "unknown".to_string()
+        } else {
+            types.join(", ")
+        }
+    } else if params_part.starts_with('(') {
+        // No type annotations — e.g. "(x, y)" or "()"
+        "unknown".to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    (in_type, return_part.to_string())
 }
 
 /// Deduplicate flow entries, preserving first occurrence and re-numbering IDs.
