@@ -14,6 +14,41 @@ use crate::{analyze, diagnose, Severity};
 // 1. End-to-End Pipeline Tests (P0)
 // =========================================================================
 
+#[ignore = "A1 pinned acceptance criterion (2026-06-15). IMPL (graph/populate.rs): (1) insert_references ~:336 — before dropping a dotted call, if root (before first '.') is an import symbol in-file (symbol_id_map: symbols[idx].name==root && annotations contains 'import'), set new_ref.to=that import id + new_ref.resolution=Partial(\"dotted_import_call:<suffix>\"); (2) resolve_cross_file_imports ~:1014 (Phase 3, after target_file confirmed) — for each resolved import, scan edges_to(import_id) Call refs with that Partial, resolve <suffix> via file_symbols_cache[target_file] (prefer Fn/Method/Class), add a Call reference (mirror Phase 5 add_reference ~:1146). Keep non-import dotted receivers unresolved (canyon hazard). API exists: edges_to/edges_from (graph/mod.rs:300/295), ResolutionStatus::Partial (ir.rs:150); confirm Edge carries resolution. See workspaces/fix-a1/fix-report.md (Forge's plan). Flip #[ignore] off when green."]
+#[test]
+fn test_a1_module_qualified_import_call_creates_cross_file_edge() {
+    // A1 (Canyon's plan / Forge's fix-report): `import helper; helper.build()` must
+    // create a cross-file Calls edge so helper.build's called_by includes main (and
+    // cross-file flow can follow it). Currently FAILS: the dotted call `helper.build`
+    // is dropped in insert_references (resolve_callee bails on dotted names at
+    // populate.rs:491, edge skipped at :336), so no edge reaches helper.build and
+    // Phase 5's transitive-call logic has nothing to resolve.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("main.py"),
+        "import helper\n\ndef main():\n    return helper.build()\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("helper.py"), "def build():\n    return 'ok'\n").unwrap();
+
+    let config = Config::load(root, None).unwrap();
+    let result = analyze(root, &config, &["python".to_string()]).unwrap();
+
+    let build = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("build"))
+        .expect("helper.build entity must exist");
+    assert!(
+        build.called_by.iter().any(|c| c.contains("main")),
+        "A1: `import helper; helper.build()` must create a cross-file call edge — \
+         helper.build.called_by should include main. Got: {:?}",
+        build.called_by
+    );
+}
+
 #[test]
 fn test_pipeline_exclude_directory_excludes_nested_contents() {
     // Reproduces the multi-segment dir-exclude bug (dogfood 2026-06-15): a
