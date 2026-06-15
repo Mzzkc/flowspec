@@ -39,3 +39,7 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.*
+# Coverage reports (regenerable)
+tarpaulin-report.json
+# Empty stderr scratch
+stderr.log
