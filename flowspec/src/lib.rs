@@ -35,6 +35,10 @@ pub mod manifest;
 /// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
 
+/// MCP (Model Context Protocol) server — behind the `mcp` feature flag.
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 #[cfg(test)]
 pub mod test_utils;
 

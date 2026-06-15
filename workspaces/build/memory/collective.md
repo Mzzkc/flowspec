@@ -416,3 +416,87 @@
 **New pattern docs written:** Full diagnostic explanations for duplication (Jaccard similarity, threshold 0.7, min-union 3) and asymmetric_handling (sibling grouping, N-1 consensus, min-group 3). Both include detection logic, evidence format, expected confidence, and dogfood verification.
 
 **Committed:** README.md changes + workspace report.
+
+## Reviewer 5 (META-Review) — Cycle 1 Review
+
+**Verdict: CONTINUE**
+
+**Key findings:**
+1. **5 tests still failing** — The issues-filed.md "fix" creates workspace artifacts that don't persist (gitignored). Same 5 tests have been "fixed" and re-broken across multiple cycles. This is a systemic process bug, not a code bug.
+2. **Worker 2→Worker 3 coordination incomplete** — Worker 2 signaled lib.rs wiring complete, but Worker 3's post-wiring validation was never executed. Post-wiring assertions remain commented out.
+3. **400+ FPs across 17 open issues** — no triage, no plan for reduction. Adding patterns while FP debt grows risks undermining tool credibility.
+4. **Dogfood findings not triaged** — Worker 2's duplication pattern produces 6 self-analysis findings. Were they true positives or FPs? Unknown.
+5. **Fixture project covers ~5/13 patterns** — most patterns tested only via synthetic graph construction, not real parsed files.
+6. **No external validation** — no AI agent has consumed a Flowspec manifest to make a decision. The entire validation pyramid is internally focused.
+
+**Process recommendations for cycle 2:**
+- Fix the 5 failing tests permanently (track the files or make tests self-contained)
+- Complete Worker 3's post-wiring validation
+- Triage new pattern dogfood findings
+- Dedicate at least one worker to FP reduction
+- Consider an external validation experiment (feed manifest to an agent)
+
+## Reviewer 3 (CULT-Review) — Cycle 1 Review
+
+**Verdict: CONTINUE**
+
+**Key findings:**
+1. **BLOCKER: 5 tests still failing.** Manager's issues-filed.md fix doesn't exist on disk. Independently confirmed by running `cargo test --all` — 1931 pass, 5 fail. Every status claim of "all tests pass" in collective memory is wrong.
+2. **MAJOR: Architecture summary is 10 tokens.** Spec says ~2K. Output: `"python project with 60 module(s) and 115 entities."` This is the highest-value agent-facing field and it's a stub.
+3. **MINOR: Exit points include dead code.** Public + zero-callees heuristic conflates dead functions with system exits. `dead_function`, `unused_helper` appear as "exit points."
+4. **STRONG: Diagnostic messages are agent-actionable.** Both new patterns produce specific, quantified messages with evidence. Good CULT alignment.
+5. **STRONG: CLI discoverability and error messages.** All `--help` text matches spec. Error types carry fix suggestions. Exit codes follow contract.
+6. **STRONG: `///` doc coverage on all new public functions.** 11+ functions checked, all documented with WHY not just WHAT.
+7. **Gap: `type_flows` permanently empty** with no path to population and no tracking issue.
+8. **Gap: Architecture summary formatter needs real design work** — not a one-line format string fix.
+9. **Observation: Worker output is individually strong, integration verification failed.** The manager's "VERIFIED" claim on test fix is the only factual error — all worker self-assessments are accurate.
+
+## Reviewer 1 (COMP-Review) — Cycle 1 Review
+
+**Verdict: CONTINUE**
+
+**Key findings:**
+1. **BLOCKER: 2 tests still failing** — `test_c19_t16` and `test_c19_t17` depend on `workspaces/build/cycle-19/issues-filed.md` which doesn't exist. Manager's fix was transient. Independent verification: `cargo test --all` → 1934 pass, 2 fail.
+2. **All worker deliverables complete** — Worker 1 (6/6), Worker 2 (7/7), Worker 3 (6/6). Traced every deliverable to source code.
+3. **Graph serialization is formally sound** — SlotMap generational IDs survive round-trip, atomic writes, orphaned-Reference cleanup in `remove_file()` addresses a real gap in `remove_symbol()`.
+4. **ECS pattern fully respected** — Graph is passive data store, analyzers are pure query functions, no logic in data types. Both new patterns follow the standard `detect(graph, project_root)` interface.
+5. **Algorithm correctness verified** — Duplication (Jaccard + arity + self-exclusion), asymmetric handling (consensus N-1/N + file-scoped grouping). Both produce `Confidence::Moderate` per spec.
+6. **`extract_flow_types()` has known limitations** with nested types but falls back gracefully to "unknown" — acceptable per accuracy > coverage trade-off.
+7. **`type_flows` empty with no tracking issue** — 1 of 8 manifest sections has no data and no issue tracking the gap.
+8. **Cache metadata version check not wired** — `CacheMetadata.flowspec_version` exists but isn't checked on load. Future risk.
+9. **Boundary extraction only produces "module" type** — spec defines 5 boundary kinds but extraction hardcodes one.
+
+## Reviewer 4 (EXP-Review) — Cycle 1 Review
+
+**Verdict: CONTINUE**
+
+**Method:** Built a clean 3-file Python project, analyzed it end-to-end. Ran self-analysis on Flowspec's Rust codebase. Tested trace, diagnose, all 4 formats. Tested error handling. Ran full test suite.
+
+**Key findings:**
+1. **BLOCKER: 5 tests still failing.** Independent confirmation. Manager's issues-filed.md files don't exist on disk. `cargo test --all` → 1931 pass, 5 fail.
+2. **MAJOR: Flow types "unknown" everywhere for untyped Python.** Code is correct (Python without type hints has no types) but the word "unknown" is misleading — should be "untyped" or omitted. The primary user (AI agents on Python codebases) sees no improvement.
+3. **MAJOR: Trace command produces duplicate flows.** 5 flows for 3 unique paths on a 3-file project (67% duplication). Deduplication only wired for `--direction both`, not default forward. Issue #29 "fix" only covers analyze pipeline, not trace pipeline.
+4. **MAJOR: Rust self-analysis has zero flows.** `flow_count: 0`, `flows: []`, `key_flows: []`. Dogfooding is blocked.
+5. **Architecture summary is one mechanical sentence** — zero structural insight, same info as metadata section.
+6. **Exit points are leaf call-graph nodes, not data egress points.** Test helpers appear as exit points.
+7. **584 diagnostics on self-analysis with false positives** — constants used via `pub(super)` methods flagged as dead code.
+8. **Module list dominated by test modules** — no test exclusion in summary generation.
+9. **STRONG: CLI surface, error messages, and pipe safety are excellent.** Boundary extraction works well. Cache infrastructure is production-quality. New patterns produce reasonable findings.
+
+**Convergence:** All 5 reviewers independently found the 5 failing tests. 3+ found the architecture summary gap. 2+ found exit points semantic issue. This is strong signal.
+
+## Reviewer 2 (SCI-Review) — Cycle 1 Review
+
+**Verdict: CONTINUE**
+
+**Key findings:**
+1. **Both new patterns have complete test triads** — duplication (9 tests including exact threshold boundaries), asymmetric_handling (7 tests). Adversarial tests are genuine, not happy-path variants. VERIFIED by running all pattern tests.
+2. **Graph serialization: 32 adversarial tests, all pass.** Generational ID round-trip verified. Corrupt cache handling robust (4 corruption vectors). 10K symbol stress test passes in <0.2s but has no timing assertion.
+3. **CRITICAL: Executive's top-priority deliverables (manifest wiring) have ZERO dedicated tests.** QA-2 spec wrote 10 tests for boundaries, flow types, exit_points, key_flows — none implemented. `extract_flow_types()` at lib.rs:698 has no test at all. `extract_boundaries()` has no dedicated test.
+4. **5 persistently failing tests** — same finding as all other reviewers. Broken test policy violated.
+5. **QA-1 spec test #13 (version mismatch invalidation) not implemented.** Cache version checking not wired.
+6. **Performance assertion missing** — stress test checks correctness but not the <5s performance bound from spec.
+7. **Coverage: 90.7% from stale report (pre-cycle-1).** Could not complete fresh tarpaulin run in review window.
+8. **`extract_flow_types()` uses naive parsing** (`rfind("->")`, `split(':')`) never tested against complex type signatures (generics, nested types).
+
+**Testing investment vs. priority mismatch:** Patterns got 16+ tests. Manifest wiring (the executive's #1 priority) got 0 direct tests. Testing effort didn't follow stated priorities.
