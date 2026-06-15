@@ -699,7 +699,7 @@ fn i3_unused_import_still_detected_as_phantom() {
 
 /// REG1: C13 dotted callee rejection still works.
 #[test]
-fn reg1_dotted_callee_still_rejected() {
+fn reg1_dotted_callee_via_import_now_routes() {
     use crate::graph::populate_graph;
     use std::path::PathBuf;
 
@@ -761,7 +761,11 @@ fn reg1_dotted_callee_still_rejected() {
 
     populate_graph(&mut graph, &result);
 
-    // Dotted call should not create an edge (resolve_callee rejects dotted names)
+    // A1 (inverted from the original dotted-callee rejection): `module.func` where
+    // `module` is an import symbol now ROUTES an edge to the import symbol
+    // (resolution Partial("dotted_import_call:func")), enabling cross-file suffix
+    // resolution in resolve_cross_file_imports. Only arbitrary dotted receivers
+    // (root NOT an import) stay dropped.
     let import_id = graph
         .all_symbols()
         .find(|(_, s)| s.name == "module" && s.annotations.contains(&"import".to_string()))
@@ -770,8 +774,9 @@ fn reg1_dotted_callee_still_rejected() {
     if let Some(id) = import_id {
         let incoming = graph.edges_to(id);
         assert!(
-            incoming.is_empty(),
-            "Dotted callee 'module.func' must NOT create an edge to the import. Got {} edges.",
+            !incoming.is_empty(),
+            "A1: dotted callee 'module.func' (root is import) must route an edge to the \
+             import symbol for cross-file resolution. Got {} edges.",
             incoming.len()
         );
     }

@@ -331,6 +331,29 @@ fn insert_references(
                     }
                 }
 
+                // A1: dotted-call-to-import fallback. If the callee is `<root>.<suffix>`
+                // and `root` is an import symbol defined in THIS file, route the edge to
+                // that import symbol with the suffix encoded in the resolution, so
+                // resolve_cross_file_imports can resolve `<suffix>` in the imported
+                // module. Arbitrary dotted receivers (root not an import) stay
+                // unresolved and are dropped below — no spurious edges.
+                if new_ref.to == SymbolId::default() {
+                    if let Some((root, suffix)) = callee_name.split_once('.') {
+                        let import_id = symbol_id_map
+                            .iter()
+                            .find(|(idx, _)| {
+                                symbols[*idx].name == root
+                                    && symbols[*idx].annotations.contains(&"import".to_string())
+                            })
+                            .map(|(_, id)| *id);
+                        if let Some(import_id) = import_id {
+                            new_ref.to = import_id;
+                            new_ref.resolution =
+                                ResolutionStatus::Partial(format!("dotted_import_call:{}", suffix));
+                        }
+                    }
+                }
+
                 // Skip adding unresolved call edges — they create phantom edges to
                 // SymbolId::default() that pollute callees()/callers() results.
                 if new_ref.to == SymbolId::default() {
@@ -1012,6 +1035,52 @@ pub fn resolve_cross_file_imports(
             // Module not found in map — likely stdlib/third-party. Leave as-is.
             continue;
         };
+
+        // A1: resolve dotted-call-to-import suffixes for THIS import. insert_references
+        // routed `helper.build()` (where `helper` == this import symbol) here with
+        // resolution Partial("dotted_import_call:build"). Resolve `build` against this
+        // module's symbols → a direct Call edge caller→target (cross-file). Only fires
+        // when such an edge exists; named imports / non-dotted calls are unaffected.
+        if let Some(module_syms) = file_symbols_cache.get(target_file) {
+            for edge in graph.edges_to(*import_id) {
+                if edge.kind != EdgeKind::Calls {
+                    continue;
+                }
+                let Some(rid) = edge.reference_id else {
+                    continue;
+                };
+                let Some(r) = graph.get_reference(rid) else {
+                    continue;
+                };
+                let ResolutionStatus::Partial(info) = &r.resolution else {
+                    continue;
+                };
+                let Some(suffix) = info.strip_prefix("dotted_import_call:") else {
+                    continue;
+                };
+                let caller_id = edge.target;
+                let target_id = module_syms
+                    .iter()
+                    .find(|(_, name, kind)| {
+                        name.as_str() == suffix
+                            && matches!(
+                                kind,
+                                SymbolKind::Function | SymbolKind::Method | SymbolKind::Class
+                            )
+                    })
+                    .or_else(|| {
+                        module_syms
+                            .iter()
+                            .find(|(_, name, _)| name.as_str() == suffix)
+                    })
+                    .map(|(id, _, _)| *id);
+                if let Some(target_id) = target_id {
+                    if let Some(caller_sym) = graph.get_symbol(caller_id) {
+                        new_references.push((caller_id, target_id, caller_sym.location.clone()));
+                    }
+                }
+            }
+        }
 
         // Check if this is a star import (name starts with "*:")
         if let Some(symbol) = graph.get_symbol(*import_id) {
