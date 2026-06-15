@@ -5,6 +5,38 @@
 //! correct manifest data. They are the contract that proves the
 //! text scanner has been replaced.
 
+#[test]
+fn test_missing_reexport_glob_reexport_not_flagged() {
+    // `pub use types::*` in the parent re-exports ALL symbols — missing_reexport
+    // must not flag Manifest (it IS re-exported via the glob). Was a false positive.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src").join("manifest")).unwrap();
+    std::fs::write(root.join("src").join("lib.rs"), "pub mod manifest;\n").unwrap();
+    std::fs::write(
+        root.join("src").join("manifest").join("mod.rs"),
+        "pub mod types;\npub use types::*;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("manifest").join("types.rs"),
+        "pub struct Manifest { pub field: i32 }\n",
+    )
+    .unwrap();
+    let config = Config::load(root, None).unwrap();
+    let result = analyze(root, &config, &["rust".to_string()]).unwrap();
+    let flagged = result
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|d| d.pattern == "missing_reexport")
+        .any(|d| d.entity.contains("Manifest"));
+    assert!(
+        !flagged,
+        "missing_reexport must not flag Manifest — re-exported via `pub use types::*`"
+    );
+}
+
 use std::path::PathBuf;
 
 use crate::config::Config;

@@ -56,6 +56,12 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         // Collect names already re-exported by the parent module
         let reexported_names: HashSet<String> = collect_reexported_names(graph, parent_path);
 
+        // A glob re-export (`pub use X::*` in Rust, `from X import *` in Python)
+        // re-exports ALL symbols — don't flag the parent's siblings as missing.
+        if has_glob_reexport(graph, parent_path) {
+            continue;
+        }
+
         // Find sibling files in the same directory
         let siblings: Vec<&PathBuf> = all_files
             .iter()
@@ -125,6 +131,19 @@ fn is_sibling(file: &Path, parent_dir: &Path) -> bool {
 }
 
 /// Collect names of symbols that the parent module re-exports (by import annotation).
+/// Returns true if the parent module has a glob re-export (`pub use X::*` in Rust).
+/// A glob re-exports ALL symbols from the target module, so no sibling symbol
+/// should be flagged as missing. (Python `from X import *` produces a Reference,
+/// not a Symbol — Rust globs are detected via the `use_wildcard` annotation.)
+fn has_glob_reexport(graph: &Graph, parent_path: &Path) -> bool {
+    graph.symbols_in_file(parent_path).iter().any(|id| {
+        graph.get_symbol(*id).is_some_and(|s| {
+            s.annotations.contains(&"import".to_string())
+                && s.annotations.contains(&"use_wildcard".to_string())
+        })
+    })
+}
+
 fn collect_reexported_names(graph: &Graph, parent_path: &Path) -> HashSet<String> {
     let mut names = HashSet::new();
 
