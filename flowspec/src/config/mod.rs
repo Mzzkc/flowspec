@@ -103,6 +103,32 @@ fn read_config_file(path: &Path) -> ConfigFile {
         return ConfigFile::default();
     }
 
+    // Warn on unknown top-level config keys (dogfood 2026-06-15: the silent-drop of
+    // nested analysis.*/diagnostics.* — which ConfigFile doesn't deserialize — caused
+    // the test-pollution pain). Only `languages` + `exclude` are read; surface the rest
+    // loudly so misconfigured keys (e.g. `analysis.ignore` vs top-level `exclude`) aren't
+    // silently ignored.
+    if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&content)
+    {
+        for key in map.keys() {
+            if let Some(k) = key.as_str() {
+                if k != "languages" && k != "exclude" {
+                    let hint = if k == "ignore" {
+                        " (did you mean top-level `exclude`?)"
+                    } else {
+                        ""
+                    };
+                    tracing::warn!(
+                        "Unknown config key `{}` in {} — ignored{} (ConfigFile reads only `languages` + `exclude`)",
+                        k,
+                        path.display(),
+                        hint
+                    );
+                }
+            }
+        }
+    }
+
     match serde_yaml::from_str::<ConfigFile>(&content) {
         Ok(config) => config,
         Err(e) => {
