@@ -925,6 +925,15 @@ fn discover_source_files(
                         false
                     }
                 })
+                // A file is also excluded if any of its ANCESTOR directories
+                // matches an exclude pattern. This is what makes multi-segment
+                // directory excludes (e.g. "tests/fixtures/") actually exclude
+                // the files inside — no single path component equals the
+                // multi-segment pattern, and the glob doesn't match the file
+                // path itself, but it does match the ancestor directory path.
+                || rel_path.ancestors().skip(1).any(|ancestor| {
+                    g.matches(&ancestor.to_string_lossy())
+                })
         });
         if matches_exclude {
             continue;

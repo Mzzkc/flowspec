@@ -664,6 +664,7 @@ fn decisions_log_existing_preserved() {
 // ===========================================================================
 
 /// T27: issues-filed.md exists in cycle-21 directory
+#[ignore = "process gate: depends on gitignored workspaces/build/cycle-*/issues-filed.md (absent in clean checkout/CI); not a flowspec code test — re-home to CI or a committed artifact (Legion 2026-06-15)"]
 #[test]
 fn issues_filed_exists() {
     let path = concat!(
@@ -682,6 +683,7 @@ fn issues_filed_exists() {
 }
 
 /// T28: issues-filed.md contains 3+ GitHub issue URLs
+#[ignore = "process gate: depends on gitignored workspaces/build/cycle-*/issues-filed.md (absent in clean checkout/CI); not a flowspec code test — re-home to CI or a committed artifact (Legion 2026-06-15)"]
 #[test]
 fn issues_filed_minimum_count() {
     let path = concat!(
@@ -701,6 +703,7 @@ fn issues_filed_minimum_count() {
 }
 
 /// T29: issues-filed.md URLs are real (not placeholder)
+#[ignore = "process gate: depends on gitignored workspaces/build/cycle-*/issues-filed.md (absent in clean checkout/CI); not a flowspec code test — re-home to CI or a committed artifact (Legion 2026-06-15)"]
 #[test]
 fn issues_filed_urls_not_placeholder() {
     let path = concat!(

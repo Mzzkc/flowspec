@@ -1,4 +1,14 @@
 # Flowspec configuration for the Flowspec project itself (dogfooding)
+# NOTE (Legion, 2026-06-15, dogfood finding): ConfigFile (config/mod.rs)
+# deserializes ONLY top-level `languages` + `exclude`. The nested
+# analysis.*/diagnostics.* structure below is aspirational and NOT yet wired
+# (serde silently drops unknown fields). These top-level fields are operative
+# until the nested config is implemented (major production-grade workstream,
+# prioritized by dogfooding).
+languages: ["rust"]
+exclude:
+  - "tests/fixtures/"
+  - "flowspec-cli/tests/"
 project:
   name: "flowspec"
   languages: ["rust"]

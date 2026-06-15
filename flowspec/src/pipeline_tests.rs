@@ -15,6 +15,48 @@ use crate::{analyze, diagnose, Severity};
 // =========================================================================
 
 #[test]
+fn test_pipeline_exclude_directory_excludes_nested_contents() {
+    // Reproduces the multi-segment dir-exclude bug (dogfood 2026-06-15): a
+    // pattern like "vendor/lib/" must exclude files UNDER that directory, not
+    // just the literal dir path. Single-segment patterns worked (component
+    // match); multi-segment ones didn't (no component equals "vendor/lib").
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("vendor").join("lib")).unwrap();
+    std::fs::write(
+        root.join("vendor").join("lib").join("secret.rs"),
+        "pub fn secret_function() {}",
+    )
+    .unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn kept_function() {}").unwrap();
+    std::fs::create_dir_all(root.join(".flowspec")).unwrap();
+    std::fs::write(
+        root.join(".flowspec").join("config.yaml"),
+        "exclude:\n  - \"vendor/lib/\"\n",
+    )
+    .unwrap();
+
+    let config = Config::load(root, None).unwrap();
+    let result = analyze(root, &config, &["rust".to_string()]).unwrap();
+    let ids: Vec<&str> = result
+        .manifest
+        .entities
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    assert!(
+        !ids.iter().any(|id| id.contains("secret_function")),
+        "excluded dir (vendor/lib/) contents must NOT be analyzed; got {:?}",
+        ids
+    );
+    assert!(
+        ids.iter().any(|id| id.contains("kept_function")),
+        "non-excluded lib.rs MUST be analyzed; got {:?}",
+        ids
+    );
+}
+
+#[test]
 fn test_pipeline_real_visibility_private_underscore() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
