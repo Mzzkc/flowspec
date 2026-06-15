@@ -331,6 +331,50 @@ fn insert_references(
                     }
                 }
 
+                // A2: cross-file instance-attr fallback. If resolve_through_instance_attr
+                // failed (the type's class is in another file), but the type_name is an
+                // import symbol in this file, route the edge to that import symbol with
+                // the method name encoded. Phase 3 resolves the method on the imported class.
+                if new_ref.to == SymbolId::default() {
+                    if let Some(method_part) = callee_name
+                        .strip_prefix("self.")
+                        .or_else(|| callee_name.strip_prefix("this."))
+                    {
+                        if let Some((attr, method)) = method_part.split_once('.') {
+                            let type_name = references.iter().find_map(|r| {
+                                if let ResolutionStatus::Partial(info) = &r.resolution {
+                                    if let Some(rest) = info.strip_prefix("instance_attr_type:") {
+                                        if let Some(eq) = rest.rfind('=') {
+                                            if rest[..eq].ends_with(&format!(".{}", attr)) {
+                                                return Some(rest[eq + 1..].to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                None
+                            });
+                            if let Some(type_name) = type_name {
+                                let import_id = symbol_id_map
+                                    .iter()
+                                    .find(|(idx, _)| {
+                                        symbols[*idx].name == type_name
+                                            && symbols[*idx]
+                                                .annotations
+                                                .contains(&"import".to_string())
+                                    })
+                                    .map(|(_, id)| *id);
+                                if let Some(import_id) = import_id {
+                                    new_ref.to = import_id;
+                                    new_ref.resolution = ResolutionStatus::Partial(format!(
+                                        "instance_attr_method:{}",
+                                        method
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // A1: dotted-call-to-import fallback. If the callee is `<root>.<suffix>`
                 // and `root` is an import symbol defined in THIS file, route the edge to
                 // that import symbol with the suffix encoded in the resolution, so
@@ -1058,7 +1102,10 @@ pub fn resolve_cross_file_imports(
                 let ResolutionStatus::Partial(info) = &r.resolution else {
                     continue;
                 };
-                let Some(suffix) = info.strip_prefix("dotted_import_call:") else {
+                let suffix = info
+                    .strip_prefix("dotted_import_call:")
+                    .or_else(|| info.strip_prefix("instance_attr_method:"));
+                let Some(suffix) = suffix else {
                     continue;
                 };
                 let caller_id = edge.target;

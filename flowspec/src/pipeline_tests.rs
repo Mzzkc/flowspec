@@ -37,7 +37,6 @@ fn test_missing_reexport_glob_reexport_not_flagged() {
     );
 }
 
-#[ignore = "A2 cross-file instance-attr dispatch (pinned 2026-06-15). IMPL: in resolve_cross_file_imports Phase 3, after resolving imports, for instance_attr_type refs (ClassName.attr=TypeName) where TypeName is a resolved import, resolve the method on the imported class via file_symbols_cache[target_file] then add a Call edge (mirror A1 dotted_calls apply). Keep same-file resolve_through_instance_attr. Flip when green."]
 #[test]
 fn test_a2_cross_file_instance_attr_dispatch() {
     // A2: `from backend import Backend; self.backend: Backend` should resolve
