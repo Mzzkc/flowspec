@@ -997,6 +997,9 @@ pub fn resolve_cross_file_imports(
 
     // Phase 3: Resolve each import.
     let mut new_references: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
+    // CF: A1 dotted-call-to-import resolutions, applied as CALL edges (not Import)
+    // so the flow tracer (resolve_call_targets walks EdgeKind::Calls) traverses them.
+    let mut dotted_calls: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
     let mut resolution_updates: Vec<(SymbolId, ResolutionStatus)> = Vec::new();
 
     for (import_id, module_name, lookup_name, importing_file) in &imports_to_resolve {
@@ -1076,7 +1079,7 @@ pub fn resolve_cross_file_imports(
                     .map(|(id, _, _)| *id);
                 if let Some(target_id) = target_id {
                     if let Some(caller_sym) = graph.get_symbol(caller_id) {
-                        new_references.push((caller_id, target_id, caller_sym.location.clone()));
+                        dotted_calls.push((caller_id, target_id, caller_sym.location.clone()));
                     }
                 }
             }
@@ -1217,6 +1220,19 @@ pub fn resolve_cross_file_imports(
             id: ReferenceId::default(),
             from: caller_id,
             to: def_id,
+            kind: ReferenceKind::Call,
+            location,
+            resolution: ResolutionStatus::Resolved,
+        });
+    }
+
+    // CF: apply A1 dotted-call-to-import resolutions as CALL edges so the flow
+    // tracer traverses them cross-file to the resolved target (main -> helper.build).
+    for (caller_id, target_id, location) in dotted_calls {
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from: caller_id,
+            to: target_id,
             kind: ReferenceKind::Call,
             location,
             resolution: ResolutionStatus::Resolved,

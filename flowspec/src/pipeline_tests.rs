@@ -15,6 +15,34 @@ use crate::{analyze, diagnose, Severity};
 // =========================================================================
 
 #[test]
+fn test_cf_flow_traverses_cross_file_module() {
+    // CF (cross-file flow): `import helper; helper.build()` — the flow must
+    // traverse cross-file from main to helper.build, not stop at the import proxy.
+    // The call edge exists (A1); the flow tracer must FOLLOW it to the target.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("main.py"),
+        "import helper\n\ndef main():\n    return helper.build()\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("helper.py"), "def build():\n    return 'ok'\n").unwrap();
+    let config = Config::load(root, None).unwrap();
+    let result = analyze(root, &config, &["python".to_string()]).unwrap();
+    let steps: Vec<String> = result
+        .manifest
+        .flows
+        .iter()
+        .flat_map(|f| f.steps.iter().map(|s| s.entity.clone()))
+        .collect();
+    assert!(
+        steps.iter().any(|e| e.contains("build")),
+        "CF: flow must traverse cross-file to helper.build, not stop at the import proxy. Steps: {:?}",
+        steps
+    );
+}
+
+#[test]
 fn test_a1_module_qualified_import_call_creates_cross_file_edge() {
     // A1 (Canyon's plan / Forge's fix-report): `import helper; helper.build()` must
     // create a cross-file Calls edge so helper.build's called_by includes main (and
