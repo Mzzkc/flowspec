@@ -72,7 +72,7 @@ fn backward_direction_error_uses_command_not_implemented() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap();
 
     // C11: backward tracing is now implemented — exit 0
@@ -101,7 +101,7 @@ fn both_direction_error_uses_command_not_implemented() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap();
 
     // C11: both tracing is now implemented — exit 0
@@ -121,7 +121,7 @@ fn command_not_implemented_includes_suggestion() {
     for (cmd_name, args) in &[("watch", vec!["watch"])] {
         let output = flowspec().args(args).output().unwrap();
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _stderr = String::from_utf8_lossy(&output.stderr);
 
         // UNCONDITIONAL: must contain "not yet implemented"
         assert!(
@@ -190,7 +190,7 @@ fn analyze_format_summary_produces_output() {
         .unwrap();
 
     let code = output.status.code().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // UNCONDITIONAL: must NOT return FormatNotImplemented
@@ -303,7 +303,7 @@ fn diagnose_format_summary_produces_output() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap();
 
     assert!(
@@ -337,7 +337,7 @@ fn trace_format_summary_produces_output() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code().unwrap();
 
     assert!(
@@ -370,7 +370,7 @@ fn summary_empty_project_no_crash() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("panic"),
         "Empty project must not panic with --format summary.\n{}",

@@ -105,7 +105,7 @@ fn diagnose_no_language_flag_includes_all() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = parsed.as_array().unwrap();
+    let _arr = parsed.as_array().unwrap();
     // Default should include diagnostics from both languages (if any exist)
     // The key assertion: no error, valid output
     assert!(
