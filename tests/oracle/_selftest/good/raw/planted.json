@@ -1,0 +1,24 @@
+[
+  {
+    "id": "D001",
+    "pattern": "data_dead_end",
+    "severity": "warning",
+    "confidence": "high",
+    "entity": "unused_fn",
+    "message": "Function unused_fn is never called",
+    "evidence": [{"observation": "0 callers in 1 analyzed files", "location": "target/src/app.py:6"}],
+    "suggestion": "Remove the function or add a caller.",
+    "loc": "target/src/app.py:6"
+  },
+  {
+    "id": "D002",
+    "pattern": "phantom_dependency",
+    "severity": "info",
+    "confidence": "high",
+    "entity": "os",
+    "message": "Import os is never referenced",
+    "evidence": [{"observation": "0 references to os", "location": "target/src/app.py:1"}],
+    "suggestion": "Remove the unused import.",
+    "loc": "target/src/app.py:1"
+  }
+]

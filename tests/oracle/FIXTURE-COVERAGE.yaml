@@ -1,0 +1,130 @@
+# Fixture coverage manifest — all 13 diagnostic patterns.
+#
+# Status is evidence-driven from the 2026-06-16 recon + a live diagnose run on the
+# fixtures corpus (8 of 13 patterns fire; 5 do not). Wave 1A declares status + planned
+# fixture paths; Wave 1B plants the fixtures and proves positive (100% TP) and
+# adversarial (0 FP) cases. See tests/oracle/README.md §4 and tests/oracle/SCHEMA.md §4.
+#
+# status values:
+#   implemented    — detector active; needs passing positive + adversarial fixtures at release
+#   deferred       — out of v1 scope (README §7); emits nothing by default
+#   off-by-default — implemented but experimental; opt-in, labelled, still fixture-covered
+
+patterns:
+  isolated_cluster:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/isolated_cluster/positive
+    adversarial_fixture: tests/oracle/fixtures/python/isolated_cluster/adversarial
+    notes: >-
+      Fires clean on the fixtures corpus (warning/high). Well-covered by unit tests;
+      needs integration positive (unwired module cluster) + adversarial (re-export-only
+      module must NOT fire).
+
+  data_dead_end:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/data_dead_end/positive
+    adversarial_fixture: tests/oracle/fixtures/python/data_dead_end/adversarial
+    notes: >-
+      Release-blocking noisy detector (104 findings on fixtures, 270+ on self). Needs
+      Python untyped-attribute dispatch (plan #4) + public-API/test/generated policy
+      (plan #3/#5) to reach >=80% reviewed precision at warning default.
+
+  partial_wiring:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/partial_wiring/positive
+    adversarial_fixture: tests/oracle/fixtures/python/partial_wiring/adversarial
+    notes: >-
+      Heuristic-heavy (plan #9); did not fire on the current fixtures corpus. Needs a
+      planted positive (parallel paths, error handling on one branch only) + adversarial
+      (consensus callees present = must not fire). Precision reviewed before warning default.
+
+  orphaned_impl:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/orphaned_impl/positive
+    adversarial_fixture: tests/oracle/fixtures/python/orphaned_impl/adversarial
+    notes: >-
+      Release-blocking noisy detector (29 on fixtures; the orphaned_implementation vs
+      orphaned_impl naming drift is resolved: canonical ID is orphaned_impl). Needs
+      static-dispatch inference (plan #4) so genuinely-wired Protocol/Backend methods
+      stop being high-confidence FPs.
+
+  duplication:
+    status: deferred
+    positive_fixture: none
+    adversarial_fixture: none
+    notes: >-
+      Deferred for v1 — needs AST-subtree hashing (IR-level structural similarity), not
+      textual (README §7; plan RISKS). Emits nothing by default. Do NOT spend v1 time
+      here unless the conductor re-prioritizes.
+
+  contract_mismatch:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/contract_mismatch/positive
+    adversarial_fixture: tests/oracle/fixtures/python/contract_mismatch/adversarial
+    notes: >-
+      Heuristic-heavy (decorators, cross-file arity; plan #9). 5 moderate-confidence
+      findings on fixtures. Needs positive (decorator/arity mismatch) + adversarial
+      (intentional overloads/defaults = must not fire).
+
+  circular_dependency:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/circular_dependency/positive
+    adversarial_fixture: tests/oracle/fixtures/python/circular_dependency/adversarial
+    notes: >-
+      High-precision on fixtures (warning/high). Needs integration positive (two/three
+      module cycle) + adversarial (linear chain, diamond, star, intra-module calls must
+      NOT fire — already covered by unit tests, port to integration fixtures).
+
+  layer_violation:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/layer_violation/positive
+    adversarial_fixture: tests/oracle/fixtures/python/layer_violation/adversarial
+    notes: >-
+      Requires config layer rules (plan #3) to fire at all; did not fire on the current
+      corpus (no layer config wired). Positive fixture needs a .flowspec/config.yaml with
+      layer rules; adversarial = cross-module call that respects the rules (must not fire).
+
+  incomplete_migration:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/incomplete_migration/positive
+    adversarial_fixture: tests/oracle/fixtures/python/incomplete_migration/adversarial
+    notes: >-
+      Heuristic-heavy (plan #9); 2 high-confidence findings on fixtures. Needs positive
+      (old/new patterns coexisting with split callers) + adversarial (unified migration
+      complete = must not fire).
+
+  asymmetric_handling:
+    status: deferred
+    positive_fixture: none
+    adversarial_fixture: none
+    notes: >-
+      Deferred for v1 — needs full CFG (consensus-callee asymmetry across parallel paths),
+      heavier than v1 allows (README §7; plan RISKS). Emits nothing by default.
+
+  stale_reference:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/stale_reference/positive
+    adversarial_fixture: tests/oracle/fixtures/python/stale_reference/adversarial
+    notes: >-
+      3 high-confidence findings on fixtures. Needs positive (import resolving to a
+      re-export/shim/moved definition) + adversarial (direct resolved import = must not fire).
+
+  phantom_dependency:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/phantom_dependency/positive
+    adversarial_fixture: tests/oracle/fixtures/python/phantom_dependency/adversarial
+    notes: >-
+      info-default by design (32 high-confidence info findings on fixtures). Held to the
+      fixture-truth gate but NOT the warning/critical precision gate. Adversarial must
+      cover: prefix usage (sys.argv), type-annotation usage, called imports, re-exports,
+      side-effect imports — all must NOT fire.
+
+  missing_reexport:
+    status: implemented
+    positive_fixture: tests/oracle/fixtures/python/missing_reexport/positive
+    adversarial_fixture: tests/oracle/fixtures/python/missing_reexport/adversarial
+    notes: >-
+      Release-blocking noisy detector per plan #5; did not fire on the current fixtures
+      corpus (needs a multi-module package with public symbols not re-exported through
+      __init__). Positive (public symbol missing from parent __init__) + adversarial
+      (correctly re-exported / private symbol = must not fire).

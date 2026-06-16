@@ -1,0 +1,19 @@
+git:
+  flowspec_sha: TBD-FILL-IN-1B
+  flowspec_status_clean: TBD-FILL-IN-1B
+  flowspec_status_summary: TBD-FILL-IN-1B
+binary:
+  path: TBD-FILL-IN-1B
+  sha256: TBD-FILL-IN-1B
+  mtime: TBD-FILL-IN-1B
+version: TBD-FILL-IN-1B
+commands:
+  diagnose_self: TBD-FILL-IN-1B
+targets:
+  prod:
+    repo_path: TBD-FILL-IN-1B
+    repo_sha: TBD-FILL-IN-1B
+    diagnose_command: TBD-FILL-IN-1B
+    diagnose_exit_code: TBD-FILL-IN-1B
+    raw_findings: TBD-FILL-IN-1B
+    by_pattern: TBD-FILL-IN-1B

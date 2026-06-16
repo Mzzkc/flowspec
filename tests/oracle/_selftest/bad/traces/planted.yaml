@@ -1,0 +1,5 @@
+# Planted-BAD trace — malformed: missing required 'expected_hops' -> traces FAIL.
+name: selftest-bad-trace
+fixture: target
+symbol: unused_fn
+direction: sideways          # DEFECT: not forward/backward

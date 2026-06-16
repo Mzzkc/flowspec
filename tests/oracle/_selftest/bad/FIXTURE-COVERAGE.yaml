@@ -1,0 +1,20 @@
+# Planted-BAD fixture coverage: all patterns are declared, but data_dead_end's
+# positive fixture is executable and intentionally does not fire under --strict-fixtures.
+patterns:
+  isolated_cluster: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  data_dead_end:
+    status: implemented
+    positive_fixture: fixtures/positive_no_fire
+    adversarial_fixture: fixtures/adversarial_no_fire
+    notes: selftest-bad positive intentionally does not fire
+  partial_wiring: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  orphaned_impl: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  duplication: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  contract_mismatch: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  circular_dependency: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  layer_violation: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  incomplete_migration: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  asymmetric_handling: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  stale_reference: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  phantom_dependency: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}
+  missing_reexport: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-bad}

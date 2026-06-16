@@ -1,0 +1,14 @@
+patterns:
+  isolated_cluster: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  data_dead_end: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  partial_wiring: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  orphaned_impl: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  duplication: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  contract_mismatch: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  circular_dependency: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  layer_violation: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  incomplete_migration: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  asymmetric_handling: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  stale_reference: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  phantom_dependency: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}
+  missing_reexport: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: production-bad}

@@ -43,3 +43,4 @@ Thumbs.db
 tarpaulin-report.json
 # Empty stderr scratch
 stderr.log
+__pycache__/

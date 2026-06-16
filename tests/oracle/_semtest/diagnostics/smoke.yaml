@@ -1,0 +1,11 @@
+target: semtest
+target_root: target
+raw_source: live
+binary_provenance:
+  path: target/release/flowspec
+  sha256: semantic-smoke
+  version: semantic-smoke
+  diagnosed_at: "2026-06-16T00:00:00Z"
+reviewed_by: canyon
+review_expires: 2026-09-01
+entries: []

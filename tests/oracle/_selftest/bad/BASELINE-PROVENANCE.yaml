@@ -1,0 +1,18 @@
+# Planted-BAD provenance — structure present (provenance itself passes; other checks fail).
+git:
+  flowspec_sha: selftest-bad
+  flowspec_status_clean: true
+  flowspec_status_summary: ""
+binary:
+  path: planted
+  sha256: selftest-bad
+  mtime: "2026-06-16T00:00:00Z"
+version: flowspec selftest-bad
+commands:
+  diagnose_self: planted
+targets:
+  self:
+    repo_path: .
+    diagnose_command: planted
+    diagnose_exit_code: 2
+    raw_findings: 3

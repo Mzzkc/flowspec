@@ -1,0 +1,43 @@
+# Planted-BAD classification set — contains multiple deliberate defects so the
+# validator MUST FAIL this sample:
+#   - entry A cites line 99 (out of range) -> antifab FAIL
+#   - entry B cites a path that does not exist -> antifab FAIL
+#   - entry B has classification "MAYBE" (invalid enum) -> schema FAIL
+#   - entry B is missing the required `reason` field -> schema FAIL
+#   - the 3rd raw finding (circular_dependency @ app.py:2) is unclassified -> count-equiv FAIL
+#   - two raw stale_reference findings share one classification -> multiset duplicate-collapse FAIL
+target: selftest-bad
+target_root: .
+raw_source: raw/planted.json
+binary_provenance: {path: planted, sha256: n/a, version: self-test, diagnosed_at: "2026-06-16T00:00:00Z"}
+reviewed_by: canyon
+review_expires: 2026-09-01
+
+entries:
+  - pattern: data_dead_end
+    path: target/src/app.py
+    line: 99                 # DEFECT: out of range (file has 8 lines)
+    symbol: unused_fn
+    classification: REAL
+    reason: fabricated line number
+    owner: canyon
+    expires: 2026-09-01
+
+  - pattern: phantom_dependency
+    path: target/src/nonexistent.py   # DEFECT: file does not exist
+    line: 1
+    symbol: os
+    classification: MAYBE   # DEFECT: not a valid classification enum
+    owner: canyon           # DEFECT: missing required `reason` field
+    expires: 2026-09-01
+
+  - pattern: stale_reference
+    path: target/src/app.py
+    line: 2
+    symbol: sys
+    classification: REAL
+    reason: >-
+      Only one duplicate stale_reference is classified while two matching raw findings
+      exist; the validator must use a multiset and reject the collapse.
+    owner: canyon
+    expires: 2026-09-01

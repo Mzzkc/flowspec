@@ -1,0 +1,16 @@
+# Planted-good trace expectation — well-formed (symbol, direction, non-empty hops with
+# entity + edge_kind). The validator MUST pass this sample.
+name: selftest-good-trace
+fixture: target
+symbol: unused_fn
+direction: backward
+command: flowspec trace target -s unused_fn --direction backward -f json -q
+expected_hops:
+  - entity: unused_fn
+    edge_kind: defined_in
+    file: target/src/app.py
+    line: 6
+  - entity: caller
+    edge_kind: called_by
+    file: target/src/app.py
+    line: 5

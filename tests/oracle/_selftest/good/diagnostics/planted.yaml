@@ -1,0 +1,37 @@
+# Planted-good classification set — every entry is valid, every path:line exists on
+# disk, and classified_count == raw_count. The validator MUST pass this sample.
+target: selftest-good
+target_root: .                       # resolves to this selftest dir
+raw_source: raw/planted.json         # planted raw (not the live binary)
+binary_provenance:
+  path: planted
+  sha256: n/a
+  version: self-test
+  diagnosed_at: "2026-06-16T00:00:00Z"
+reviewed_by: canyon
+review_expires: 2026-09-01
+
+entries:
+  - pattern: data_dead_end
+    path: target/src/app.py
+    line: 6
+    symbol: unused_fn
+    classification: REAL
+    reason: >-
+      Nested function unused_fn is never called by any reachable caller and is not a
+      public entry point, test helper, or generated artifact — a genuine dead end.
+    owner: canyon
+    expires: 2026-09-01
+    confidence_at_review: high
+
+  - pattern: phantom_dependency
+    path: target/src/app.py
+    line: 1
+    symbol: os
+    classification: KNOWN_FP
+    reason: >-
+      Planted sample marks this import as a known false positive for the self-test; in
+      the real corpus side-effect imports are reviewed against actual usage.
+    owner: canyon
+    expires: 2026-09-01
+    confidence_at_review: high

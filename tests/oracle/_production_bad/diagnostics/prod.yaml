@@ -1,0 +1,21 @@
+target: production-style-bad
+target_root: target
+raw_source: raw/planted.json
+binary_provenance:
+  path: planted
+  sha256: planted
+  version: planted
+  diagnosed_at: "2026-06-16T00:00:00Z"
+reviewed_by: canyon
+review_expires: 2026-09-01
+entries:
+  - pattern: data_dead_end
+    path: src/app.py
+    line: 1
+    symbol: planted
+    classification: REAL
+    reason: production-style sample with forbidden verified:false and non-live raw source.
+    owner: canyon
+    expires: 2026-09-01
+    verified: false
+    verify_skip_reason: production baselines may not skip anti-fabrication

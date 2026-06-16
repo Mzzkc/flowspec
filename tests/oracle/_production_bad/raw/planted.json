@@ -1,0 +1,13 @@
+[
+  {
+    "id": "P001",
+    "pattern": "data_dead_end",
+    "severity": "warning",
+    "confidence": "high",
+    "entity": "planted",
+    "message": "Planted production-style finding",
+    "evidence": [{"observation": "planted", "location": "src/app.py:1"}],
+    "suggestion": "classify live output instead",
+    "loc": "src/app.py:1"
+  }
+]

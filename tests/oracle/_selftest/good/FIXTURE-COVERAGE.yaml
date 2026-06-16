@@ -1,0 +1,15 @@
+# Planted-good fixture coverage — all 13 patterns present with a valid status.
+patterns:
+  isolated_cluster: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  data_dead_end: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  partial_wiring: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  orphaned_impl: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  duplication: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  contract_mismatch: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  circular_dependency: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  layer_violation: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  incomplete_migration: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  asymmetric_handling: {status: deferred, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  stale_reference: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  phantom_dependency: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
+  missing_reexport: {status: implemented, positive_fixture: none, adversarial_fixture: none, notes: selftest-good}
