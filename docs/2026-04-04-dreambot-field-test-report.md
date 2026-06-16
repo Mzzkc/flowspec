@@ -111,7 +111,7 @@ By reading `record_interaction` (database.py:844-932) and `schema.sql` (lines 51
 
 ### Command 1: Full Analysis (Summary)
 ```bash
-flowspec analyze /home/emzi/Projects/dreambot --format summary
+flowspec analyze ./dreambot --format summary
 ```
 **Purpose:** Get high-level codebase overview.
 **Expected:** File count, module structure, entry points, top diagnostic issues.
@@ -120,7 +120,7 @@ flowspec analyze /home/emzi/Projects/dreambot --format summary
 
 ### Command 2: High-Confidence Diagnostics
 ```bash
-flowspec diagnose /home/emzi/Projects/dreambot --severity warning --confidence high --format summary
+flowspec diagnose ./dreambot --severity warning --confidence high --format summary
 ```
 **Purpose:** Filter to actionable findings only.
 **Expected:** A small set of likely-true findings worth investigating.
@@ -129,7 +129,7 @@ flowspec diagnose /home/emzi/Projects/dreambot --severity warning --confidence h
 
 ### Command 3: Full YAML Manifest
 ```bash
-flowspec analyze /home/emzi/Projects/dreambot --format yaml
+flowspec analyze ./dreambot --format yaml
 ```
 **Purpose:** Get structured machine-readable output for deeper analysis.
 **Expected:** Complete entity/flow/diagnostic data.
@@ -138,7 +138,7 @@ flowspec analyze /home/emzi/Projects/dreambot --format yaml
 
 ### Command 4: Trace main.py Entry Point
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "main.py::main" --format summary
+flowspec trace ./dreambot --symbol "main.py::main" --format summary
 ```
 **Purpose:** Follow the main execution path through the codebase.
 **Expected:** A chain from `main` through `create_bot` into cog loading and event handling.
@@ -147,7 +147,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "main.py::main" --format su
 
 ### Command 5: Trace record_interaction (Ambiguous)
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "record_interaction" --format summary
+flowspec trace ./dreambot --symbol "record_interaction" --format summary
 ```
 **Purpose:** Trace the data recording path.
 **Expected:** Flow from `on_message` through `record_interaction` to database operations.
@@ -156,7 +156,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "record_interaction" --form
 
 ### Command 6: Trace record_interaction (Disambiguated — Module Level)
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "database.py::record_interaction" --format summary
+flowspec trace ./dreambot --symbol "database.py::record_interaction" --format summary
 ```
 **Purpose:** Trace the module-level `record_interaction` wrapper.
 **Expected:** At minimum, a flow showing it delegates to `db.record_interaction(...)`.
@@ -165,7 +165,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "database.py::record_intera
 
 ### Command 7: Trace record_interaction (Disambiguated — Class Method)
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "database.py::BotDatabase::record_interaction" --format summary
+flowspec trace ./dreambot --symbol "database.py::BotDatabase::record_interaction" --format summary
 ```
 **Purpose:** Trace the class method implementation.
 **Expected:** Internal call graph of `record_interaction`.
@@ -174,7 +174,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "database.py::BotDatabase::
 
 ### Command 8: Trace mydata
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "mydata" --format summary
+flowspec trace ./dreambot --symbol "mydata" --format summary
 ```
 **Purpose:** Trace the `!mydata` command handler.
 **Expected:** Flow from the command through `get_user_profile` to response construction.
@@ -183,7 +183,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "mydata" --format summary
 
 ### Command 9: Trace my_data (Correct Symbol)
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "utilities.py::Utilities::my_data" --format summary
+flowspec trace ./dreambot --symbol "utilities.py::Utilities::my_data" --format summary
 ```
 **Purpose:** Trace the `my_data` method after finding the correct symbol name.
 **Expected:** Flow showing data retrieval and response construction.
@@ -192,7 +192,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "utilities.py::Utilities::m
 
 ### Command 10: Trace get_user_profile
 ```bash
-flowspec trace /home/emzi/Projects/dreambot --symbol "database.py::BotDatabase::get_user_profile" --format summary
+flowspec trace ./dreambot --symbol "database.py::BotDatabase::get_user_profile" --format summary
 ```
 **Purpose:** Trace the profile retrieval path that returns empty data.
 **Expected:** Internal logic showing cache check, Supabase query, return paths.
@@ -201,7 +201,7 @@ flowspec trace /home/emzi/Projects/dreambot --symbol "database.py::BotDatabase::
 
 ### Command 11: Contract Mismatch Diagnostics
 ```bash
-flowspec diagnose /home/emzi/Projects/dreambot --checks contract_mismatch --format summary
+flowspec diagnose ./dreambot --checks contract_mismatch --format summary
 ```
 **Purpose:** Examine all contract mismatches to find potential signature bugs.
 **Expected:** A small number of genuine mismatches between function definitions.
@@ -210,7 +210,7 @@ flowspec diagnose /home/emzi/Projects/dreambot --checks contract_mismatch --form
 
 ### Command 12: Manifest Keyword Search
 ```bash
-flowspec analyze /home/emzi/Projects/dreambot --format yaml 2>/dev/null | grep -i "mydata\|my_data\|user_data"
+flowspec analyze ./dreambot --format yaml 2>/dev/null | grep -i "mydata\|my_data\|user_data"
 ```
 **Purpose:** Search the full manifest for data-related entities and diagnostics.
 **Expected:** Entity IDs, flow references, and diagnostics mentioning the data path.
