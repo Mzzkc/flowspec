@@ -1,8 +1,8 @@
 name: semantic-smoke-missing-trace
-fixture: target
+fixture: fixture
 symbol: orphaned_semantic_smoke
 direction: backward
-command: flowspec trace target -s orphaned_semantic_smoke --direction backward -f json -q
+command: flowspec trace fixture -s orphaned_semantic_smoke --direction backward -f json -q
 expected_hops:
   - entity: definitely_missing_start
     edge_kind: defined_in

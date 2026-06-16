@@ -1,5 +1,5 @@
 target: semtest
-target_root: target
+target_root: fixture
 raw_source: live
 binary_provenance:
   path: target/release/flowspec
