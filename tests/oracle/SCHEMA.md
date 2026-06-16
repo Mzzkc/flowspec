@@ -15,9 +15,17 @@
 One file per dogfood target (`self.yaml`, `marianne.yaml`). A target is a repository
 diagnosed by `flowspec diagnose <target_root> -f json -q`.
 
+The required production target set is exactly `self` and `marianne`. Once any
+production classification file exists, both `tests/oracle/diagnostics/self.yaml` and
+`tests/oracle/diagnostics/marianne.yaml` must exist; each file's `target` field must
+match its filename; and `BASELINE-PROVENANCE.yaml` must declare the same target set.
+Unknown classification targets, unknown provenance targets, missing required target
+files, target-root/provenance mismatches, or classification totals that diverge from
+provenance target totals fail the validator's required-target coverage check.
+
 ```yaml
 # ── file header (provenance for this classification set) ──────────────
-target: self                       # "self" | "marianne" | <stable label>
+target: self                       # "self" | "marianne"
 target_root: <flowspec-repo>   # absolute repo root being diagnosed
 raw_source: live                   # "live" = invoke binary; or path to planted raw JSON
 binary_provenance:                 # copied from BASELINE-PROVENANCE.yaml at review time

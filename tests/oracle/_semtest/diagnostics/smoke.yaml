@@ -8,4 +8,49 @@ binary_provenance:
   diagnosed_at: "2026-06-16T00:00:00Z"
 reviewed_by: canyon
 review_expires: 2026-09-01
-entries: []
+detector_fixed: true
+entries:
+  - pattern: data_dead_end
+    path: scratch/smoke.py
+    line: 5
+    symbol: smoke.py::orphaned_semantic_smoke
+    classification: KNOWN_FP
+    reason: >-
+      Semantic smoke plants a warning-default KNOWN_FP so R002 proves precision
+      below threshold when no matching REAL exists.
+    owner: canyon
+    expires: 2026-09-01
+
+  - pattern: data_dead_end
+    path: scratch/smoke.py
+    line: 1
+    symbol: vanished_semantic_smoke
+    classification: REAL
+    reason: >-
+      Semantic smoke plants a vanished REAL classification so R003 proves
+      disappeared REAL findings are rejected.
+    owner: canyon
+    expires: 2026-09-01
+
+  - pattern: phantom_dependency
+    path: scratch/smoke.py
+    line: 2
+    symbol: sys
+    classification: KNOWN_FP
+    reason: >-
+      Semantic smoke plants a high-confidence KNOWN_FP while detector_fixed is true
+      so R004 proves the claimed fix is not accepted silently.
+    owner: canyon
+    expires: 2026-09-01
+    detector_fixed: true
+
+  - pattern: stale_reference
+    path: scratch/smoke.py
+    line: 1
+    symbol: stale_semantic_smoke
+    classification: KNOWN_FP
+    reason: >-
+      Semantic smoke plants a vanished non-REAL classification so R008 proves
+      unreviewed count deltas are rejected.
+    owner: canyon
+    expires: 2026-09-01

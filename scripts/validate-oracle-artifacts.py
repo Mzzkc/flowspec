@@ -39,6 +39,8 @@ CANONICAL_PATTERNS = [
 CANONICAL_SET = frozenset(CANONICAL_PATTERNS)
 
 CLASSIFICATIONS = frozenset({"REAL", "KNOWN_FP", "DEFERRED_BOUNDARY"})
+REQUIRED_TARGETS = ("self", "marianne")
+REQUIRED_TARGET_SET = frozenset(REQUIRED_TARGETS)
 
 CLASSIFICATION_FIELDS = [
     "pattern",
@@ -62,12 +64,14 @@ REQUIRED_RULE_IDS = [
     "R008_COUNT_DELTA_UNREVIEWED",
 ]
 
-SEMANTIC_SMOKE_RULE_IDS = frozenset(
-    {
-        "R001_UNCLASSIFIED_FINDING",
-        "R005_TRACE_MISSING_PATH",
-        "R006_SCRATCH_IN_DIAGNOSTICS",
-    }
+SEMANTIC_SMOKE_RULE_IDS = (
+    "R001_UNCLASSIFIED_FINDING",
+    "R002_PRECISION_BELOW_THRESHOLD",
+    "R003_REAL_DISAPPEARED_UNREVIEWED",
+    "R004_KNOWN_FP_STILL_HIGH_CONF",
+    "R005_TRACE_MISSING_PATH",
+    "R006_SCRATCH_IN_DIAGNOSTICS",
+    "R008_COUNT_DELTA_UNREVIEWED",
 )
 
 VALID_COVERAGE_STATUS = frozenset({"implemented", "deferred", "off-by-default"})
@@ -82,6 +86,7 @@ EXPECTED_SELFTEST_FAILURE_MARKERS = {
         ("strict positive fixture truth", "fixture-coverage", "positive_fixture did NOT fire"),
     ],
     "PROD": [
+        ("required target coverage", "required-target-coverage", "REQUIRED_TARGET_MISSING"),
         ("production non-live raw_source", "count-equiv", "non-live raw_source rejected"),
         ("production verified:false", "antifab", "verified:false is forbidden"),
         ("post-baseline TBD provenance", "provenance", TBD),
@@ -374,6 +379,136 @@ def check_antifabrication(report: Report, files: list[tuple[str, dict[str, Any]]
         report.add("antifab", PASS, f"{checked} cited path:line(s) verified to exist on disk")
     else:
         report.add("antifab", FAIL, f"{bad} fabricated/out-of-range path:line citation(s)")
+
+
+def check_required_target_coverage(report: Report, files: list[tuple[str, dict[str, Any]]], oracle_dir: str) -> None:
+    if not files:
+        report.add("required-target-coverage", SKIP, "no diagnostics/*.yaml yet (baseline not populated)")
+        return
+    if is_selftest_path(oracle_dir):
+        report.add("required-target-coverage", SKIP, "synthetic _selftest samples may use planted targets")
+        return
+
+    bad = 0
+    seen: set[str] = set()
+    entry_counts: dict[str, int] = {}
+    target_roots: dict[str, str] = {}
+    expected_files = [f"{target}.yaml" for target in REQUIRED_TARGETS]
+
+    for path, data in files:
+        name = os.path.basename(path)
+        stem, _ = os.path.splitext(name)
+        if "__parse_error__" in data:
+            report.add("required-target-coverage", FAIL, f"REQUIRED_TARGET_PARSE_ERROR: {name} is unparseable")
+            bad += 1
+            continue
+
+        declared = data.get("target")
+        if stem not in REQUIRED_TARGET_SET:
+            report.add(
+                "required-target-coverage",
+                FAIL,
+                f"REQUIRED_TARGET_UNKNOWN: {name} is not a declared target file; expected {expected_files}",
+            )
+            bad += 1
+        if declared not in REQUIRED_TARGET_SET:
+            report.add(
+                "required-target-coverage",
+                FAIL,
+                f"REQUIRED_TARGET_UNKNOWN: {name} declares target {declared!r}; expected {list(REQUIRED_TARGETS)}",
+            )
+            bad += 1
+            continue
+        if stem != declared:
+            report.add(
+                "required-target-coverage",
+                FAIL,
+                f"REQUIRED_TARGET_MISMATCH: {name} must declare target {stem!r}, got {declared!r}",
+            )
+            bad += 1
+            continue
+
+        seen.add(stem)
+        entries = data.get("entries")
+        entry_counts[stem] = sum(1 for entry in entries if isinstance(entry, dict)) if isinstance(entries, list) else 0
+        target_roots[stem] = resolve_target_root(str(data.get("target_root", ".")), oracle_dir)
+
+    missing_files = [f"{target}.yaml" for target in REQUIRED_TARGETS if target not in seen]
+    if missing_files:
+        report.add(
+            "required-target-coverage",
+            FAIL,
+            f"REQUIRED_TARGET_MISSING: missing required target classification file(s): {missing_files}",
+        )
+        bad += 1
+
+    prov_path = os.path.join(oracle_dir, "BASELINE-PROVENANCE.yaml")
+    if not os.path.isfile(prov_path):
+        report.add("required-target-coverage", FAIL, f"REQUIRED_TARGET_PROVENANCE_MISSING: missing {prov_path}")
+        bad += 1
+    else:
+        try:
+            prov = load_yaml(prov_path)
+        except yaml.YAMLError as exc:
+            report.add(
+                "required-target-coverage",
+                FAIL,
+                f"REQUIRED_TARGET_PROVENANCE_PARSE_ERROR: unparseable BASELINE-PROVENANCE.yaml: {exc}",
+            )
+            bad += 1
+        else:
+            targets = prov.get("targets") if isinstance(prov, dict) else None
+            if not isinstance(targets, dict):
+                report.add("required-target-coverage", FAIL, "REQUIRED_TARGET_PROVENANCE_MISSING: targets is not a mapping")
+                bad += 1
+            else:
+                missing_prov = [target for target in REQUIRED_TARGETS if target not in targets]
+                extra_prov = sorted(set(targets) - REQUIRED_TARGET_SET)
+                if missing_prov:
+                    report.add(
+                        "required-target-coverage",
+                        FAIL,
+                        f"REQUIRED_TARGET_PROVENANCE_MISSING: provenance missing target(s): {missing_prov}",
+                    )
+                    bad += 1
+                if extra_prov:
+                    report.add(
+                        "required-target-coverage",
+                        FAIL,
+                        f"REQUIRED_TARGET_UNKNOWN: provenance declares unknown target(s): {extra_prov}",
+                    )
+                    bad += 1
+                for target in sorted(seen):
+                    info = targets.get(target)
+                    if not isinstance(info, dict):
+                        continue
+                    repo_path = info.get("repo_path")
+                    if isinstance(repo_path, str) and repo_path != TBD and not repo_path.startswith("<"):
+                        expected_root = os.path.normpath(repo_path)
+                        if target_roots.get(target) != expected_root:
+                            report.add(
+                                "required-target-coverage",
+                                FAIL,
+                                f"REQUIRED_TARGET_ROOT_MISMATCH: {target}.yaml target_root "
+                                f"{target_roots.get(target)} != provenance {expected_root}",
+                            )
+                            bad += 1
+                    raw_findings = info.get("raw_findings")
+                    if isinstance(raw_findings, int) and entry_counts.get(target) != raw_findings:
+                        report.add(
+                            "required-target-coverage",
+                            FAIL,
+                            f"REQUIRED_TARGET_COUNT_MISMATCH: {target}.yaml has {entry_counts.get(target)} "
+                            f"classification(s), provenance expects {raw_findings}",
+                        )
+                        bad += 1
+
+    if bad == 0:
+        report.add(
+            "required-target-coverage",
+            PASS,
+            f"required target coverage present for {expected_files}; classification targets align with provenance",
+        )
 
 
 def _raw_findings_live(binary: str, target_root: str) -> tuple[list[dict[str, Any]] | None, str, int]:
@@ -716,7 +851,8 @@ def check_comparator_rules(report: Report, comparator_path: str, binary: str) ->
         report.add("comparator-rules", FAIL, f"semantic comparator smoke did not emit verdict JSON: {exc}")
         return
     got = {v["rule_id"] for v in verdict.get("violations", []) if isinstance(v, dict) and "rule_id" in v}
-    missing_smoke = sorted(SEMANTIC_SMOKE_RULE_IDS - got)
+    required_smoke = set(SEMANTIC_SMOKE_RULE_IDS)
+    missing_smoke = sorted(required_smoke - got)
     if missing_smoke:
         report.add("comparator-rules", FAIL, f"semantic comparator smoke missed rule application(s): {missing_smoke}")
         return
@@ -918,6 +1054,7 @@ def run_all(oracle_dir: str, comparator_path: str, binary: str, strict_fixtures:
     files = load_classification_files(oracle_dir)
     check_schema(report, files)
     check_antifabrication(report, files, oracle_dir)
+    check_required_target_coverage(report, files, oracle_dir)
     check_count_equivalence(report, files, oracle_dir, binary)
     check_fixture_coverage(report, oracle_dir, strict_fixtures, binary)
     check_comparator_rules(report, comparator_path, binary)

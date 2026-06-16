@@ -75,6 +75,21 @@ Every dogfood finding (from diagnosing flowspec itself and marianne-ai-compose) 
 carry exactly one classification. An **unclassified finding is a contract failure**
 (R001). The three classes are mutually exclusive and exhaustive for reviewed findings.
 
+### Required target coverage
+
+Production diagnostics require exactly the declared dogfood target set:
+
+- `tests/oracle/diagnostics/self.yaml` for the flowspec repository itself.
+- `tests/oracle/diagnostics/marianne.yaml` for marianne-ai-compose.
+
+Once any production `diagnostics/*.yaml` file exists, both required target files must
+exist, each file's `target` field must match its filename (`self` or `marianne`), and
+`BASELINE-PROVENANCE.yaml` must declare the same target set. Unknown diagnostic target
+files or unknown provenance targets are contract failures. A partial baseline such as
+`self.yaml` without `marianne.yaml` is rejected as `REQUIRED_TARGET_MISSING`; matching
+the live multiset for one target is not enough to claim the dogfood baseline is
+classified.
+
 ### `REAL` — a true positive that describes a genuine structural defect
 A finding is `REAL` when, after human/Musician review, the symbol or relationship it
 flags is **genuinely** in the failure state the diagnostic claims:
