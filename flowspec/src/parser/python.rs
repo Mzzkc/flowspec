@@ -1024,7 +1024,16 @@ fn walk_init_body_for_attrs(
     }
 }
 
-/// Checks if an `assignment` node is `self.attr: Type` and emits a reference if so.
+/// Checks if an `assignment` node targets `self.attr` and emits a reference if so.
+///
+/// Resolves the attribute's type from one of two sources:
+/// - Annotated: `self.attr: Type = ...` (the `type` field, via
+///   `extract_simple_type_name`).
+/// - Untyped: `self.attr = ClassName(...)` (the constructor call on the RHS,
+///   via `extract_constructor_type_name`).
+///
+/// Both emit `instance_attr_type:<Class>.<attr>=<TypeName>`. Generic, dotted,
+/// and method-call forms are skipped on both paths.
 fn try_extract_self_attr_type(
     result: &mut ParseResult,
     content: &[u8],
@@ -1056,17 +1065,23 @@ fn try_extract_self_attr_type(
         None => return,
     };
 
-    // Check type annotation: must have a `type` field
-    let type_node = match assignment.child_by_field_name("type") {
-        Some(t) => t,
-        None => return,
-    };
-
-    // Only resolve simple type annotations (identifiers).
-    // Skip generic types (Optional[Backend], List[int]) and dotted types (module.Class).
-    let type_name = match extract_simple_type_name(content, type_node) {
-        Some(name) => name,
-        None => return,
+    // Resolve the attribute's type: from an annotation if present, otherwise
+    // from an untyped constructor call (`self.attr = ClassName(...)`). Python's
+    // norm is the untyped form; both paths emit the same reference format.
+    // Only simple identifiers are accepted — generic, dotted, and method-call
+    // forms are skipped (partial resolution is better than wrong).
+    let type_name = if let Some(type_node) = assignment.child_by_field_name("type") {
+        // Annotated: `self.attr: Type = ...`
+        match extract_simple_type_name(content, type_node) {
+            Some(name) => name,
+            None => return,
+        }
+    } else {
+        // Untyped: `self.attr = ClassName(...)` — type from the constructor call.
+        match extract_constructor_type_name(content, assignment) {
+            Some(name) => name,
+            None => return,
+        }
     };
 
     result.references.push(Reference {
@@ -1101,6 +1116,35 @@ fn extract_simple_type_name(content: &[u8], type_node: Node) -> Option<String> {
             }
         }
         _ => None, // generic_type, attribute, subscript — skip in v1
+    }
+}
+
+/// Extracts a simple class name from an untyped `self.attr = ClassName(...)`
+/// assignment — the RHS of an assignment without a type annotation.
+///
+/// Returns `Some(name)` only when the RHS (`right` field) is a `call` whose
+/// `function` is a simple `identifier` (the constructor name). Returns `None`
+/// for method calls (`obj.method()`), dotted constructors (`module.Class()`),
+/// subscript/generic constructors (`Generic[T]()`), or any non-call RHS.
+///
+/// Mirrors `extract_simple_type_name`'s boundaries — only confidently-matchable
+/// simple types. Non-class identifiers (e.g. `self.x = get_thing()`) emit a
+/// reference that simply fails to resolve downstream (no false edge), which is
+/// acceptable: partial resolution is better than wrong.
+fn extract_constructor_type_name(content: &[u8], assignment: Node) -> Option<String> {
+    let right = assignment.child_by_field_name("right")?;
+    if right.kind() != "call" {
+        return None;
+    }
+    let function = right.child_by_field_name("function")?;
+    if function.kind() != "identifier" {
+        return None; // attribute (method call), subscript (generic), etc. — skip
+    }
+    let name = node_text(content, function);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 

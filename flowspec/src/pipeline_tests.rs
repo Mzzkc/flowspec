@@ -68,6 +68,41 @@ fn test_a2_cross_file_instance_attr_dispatch() {
     );
 }
 
+#[test]
+fn test_untyped_instance_attr_dispatch() {
+    // Untyped `self.backend = Backend()` (NO annotation) — Python's norm. The
+    // parser extracts the type from the constructor call's function identifier,
+    // so `self.backend.execute()` resolves to backend.py::Backend.execute
+    // cross-file. A2 covered the annotated form; this covers the untyped form
+    // that real Python __init__ bodies actually write.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("backend.py"),
+        "class Backend:\n    def execute(self):\n        return 'ok'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("service.py"),
+        "from backend import Backend\n\nclass Service:\n    def __init__(self):\n        self.backend = Backend()\n    def run(self):\n        return self.backend.execute()\n",
+    )
+    .unwrap();
+    let config = Config::load(root, None).unwrap();
+    let result = analyze(root, &config, &["python".to_string()]).unwrap();
+    let execute = result
+        .manifest
+        .entities
+        .iter()
+        .find(|e| e.id.contains("execute"))
+        .expect("Backend.execute entity must exist");
+    assert!(
+        execute.called_by.iter().any(|c| c.contains("run")),
+        "untyped self.backend = Backend(): self.backend.execute() should resolve \
+         cross-file — Backend.execute.called_by should include Service.run. Got: {:?}",
+        execute.called_by
+    );
+}
+
 use std::path::PathBuf;
 
 use crate::config::Config;
