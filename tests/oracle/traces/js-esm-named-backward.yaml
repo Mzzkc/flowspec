@@ -1,0 +1,11 @@
+name: js-esm-named-backward
+fixture: fixtures/javascript/trace_esm_named
+symbol: helper
+direction: backward
+command: >
+  target/release/flowspec trace tests/oracle/fixtures/javascript/trace_esm_named -s helper --direction backward -f json -q
+expected_hops:
+  - entity: consumer.js::main
+    edge_kind: called_by
+    file: consumer.js
+    line: 4

@@ -1,0 +1,15 @@
+name: rust-zero-flow-backward-helper
+fixture: fixtures/rust/trace_zero_flow
+symbol: helper
+direction: backward
+command: >
+  target/release/flowspec trace tests/oracle/fixtures/rust/trace_zero_flow -s helper --direction backward -f json -q
+expected_hops:
+  - entity: handler.rs::handle
+    edge_kind: called_by
+    file: handler.rs
+    line: 4
+  - entity: lib.rs::entry_point
+    edge_kind: called_by
+    file: lib.rs
+    line: 5

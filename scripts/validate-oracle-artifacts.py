@@ -484,7 +484,11 @@ def check_required_target_coverage(report: Report, files: list[tuple[str, dict[s
                         continue
                     repo_path = info.get("repo_path")
                     if isinstance(repo_path, str) and repo_path != TBD and not repo_path.startswith("<"):
-                        expected_root = os.path.normpath(repo_path)
+                        expected_root = (
+                            os.path.normpath(os.path.join(repo_root_from_script(), repo_path))
+                            if not os.path.isabs(repo_path)
+                            else os.path.normpath(repo_path)
+                        )
                         if target_roots.get(target) != expected_root:
                             report.add(
                                 "required-target-coverage",
@@ -976,9 +980,26 @@ def check_provenance(report: Report, oracle_dir: str, binary: str) -> None:
 
     repo_root = repo_root_from_script()
     head, err = git_output(["git", "rev-parse", "HEAD"], repo_root)
-    if head is None or prov.get("git", {}).get("flowspec_sha") != head:
-        report.add("provenance", FAIL, f"git.flowspec_sha mismatch: expected live {head or err}")
+    recorded_sha = prov.get("git", {}).get("flowspec_sha")
+    if head is None or not recorded_sha:
+        report.add("provenance", FAIL, f"git.flowspec_sha missing/unreadable: recorded={recorded_sha!r} live={head or err}")
         bad += 1
+    elif recorded_sha != head:
+        # Frozen-baseline semantics: the recorded SHA is the freeze commit. A later
+        # provenance-fix or anonymization commit may sit on top, so the recorded SHA need
+        # only be an ANCESTOR of HEAD (the baseline is traceable to history). Binary hash +
+        # raw counts (checked below) are the strict reproducibility guards.
+        anc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", recorded_sha, head],
+            cwd=repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if anc.returncode != 0:
+            report.add(
+                "provenance", FAIL,
+                f"git.flowspec_sha {str(recorded_sha)[:12]} is neither HEAD nor an ancestor of HEAD "
+                f"— baseline not traceable to history",
+            )
+            bad += 1
     status, err = git_output(["git", "status", "--short"], repo_root)
     if status is None:
         report.add("provenance", FAIL, f"cannot read git status: {err}")

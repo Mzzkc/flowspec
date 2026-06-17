@@ -1,0 +1,15 @@
+name: rust-zero-flow-forward-entry-point
+fixture: fixtures/rust/trace_zero_flow
+symbol: entry_point
+direction: forward
+command: >
+  target/release/flowspec trace tests/oracle/fixtures/rust/trace_zero_flow -s entry_point --direction forward -f json -q
+expected_hops:
+  - entity: handler.rs::handle
+    edge_kind: calls
+    file: handler.rs
+    line: 4
+  - entity: utils.rs::helper
+    edge_kind: calls
+    file: utils.rs
+    line: 1

@@ -1,0 +1,15 @@
+name: python-untyped-attr-forward
+fixture: fixtures/python/trace_untyped_attr
+symbol: run
+direction: forward
+command: >
+  target/release/flowspec trace tests/oracle/fixtures/python/trace_untyped_attr -s run --direction forward -f json -q
+expected_hops:
+  - entity: worker.py::Worker
+    edge_kind: calls
+    file: worker.py
+    line: 1
+  - entity: worker.py::Worker::do_job
+    edge_kind: calls
+    file: worker.py
+    line: 2
