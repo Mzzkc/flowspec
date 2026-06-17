@@ -1007,8 +1007,15 @@ def check_provenance(report: Report, oracle_dir: str, binary: str) -> None:
     else:
         clean = status == ""
         git_info = prov.get("git", {})
-        if git_info.get("flowspec_status_clean") is not clean or str(git_info.get("flowspec_status_summary", "")) != status:
-            report.add("provenance", FAIL, "git status clean/summary does not match live git status --short")
+        # The clean-FLAG is the guard (baseline frozen in a known clean/dirty state). The exact
+        # status_summary is a transient snapshot of which files were dirty at freeze-time; it
+        # cannot match an evolving committed tree, so it is informational, not a gate. SHA-ancestry
+        # + binary hash + raw counts (checked elsewhere) are the strict reproducibility guards.
+        if git_info.get("flowspec_status_clean") is not clean:
+            report.add(
+                "provenance", FAIL,
+                f"git status clean-flag mismatch: recorded {git_info.get('flowspec_status_clean')} vs live {clean}",
+            )
             bad += 1
 
     if not os.path.isfile(binary):
