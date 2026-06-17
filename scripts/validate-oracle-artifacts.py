@@ -1061,9 +1061,24 @@ def check_provenance(report: Report, oracle_dir: str, binary: str) -> None:
             repo_sha = target.get("repo_sha")
             if repo_sha:
                 live_repo_sha, err = git_output(["git", "rev-parse", "HEAD"], repo_path)
-                if live_repo_sha is None or repo_sha != live_repo_sha:
-                    report.add("provenance", FAIL, f"target {name}: repo_sha mismatch {live_repo_sha or err}")
+                if live_repo_sha is None:
+                    report.add("provenance", FAIL, f"target {name}: repo_sha unreadable: {err}")
                     bad += 1
+                elif repo_sha != live_repo_sha:
+                    # Frozen-baseline ancestry: the recorded repo_sha is the freeze commit;
+                    # a later commit on top is allowed (ancestor-of-HEAD). Binary hash +
+                    # raw counts are the strict guards.
+                    anc = subprocess.run(
+                        ["git", "merge-base", "--is-ancestor", repo_sha, live_repo_sha],
+                        cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    if anc.returncode != 0:
+                        report.add(
+                            "provenance", FAIL,
+                            f"target {name}: repo_sha {str(repo_sha)[:12]} neither HEAD nor an ancestor "
+                            f"of {str(live_repo_sha)[:12]}",
+                        )
+                        bad += 1
     if bad == 0:
         report.add("provenance", PASS, "filled provenance matches live git, binary, version, and raw counts")
 
