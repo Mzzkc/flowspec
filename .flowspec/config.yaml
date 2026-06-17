@@ -9,6 +9,10 @@ languages: ["rust"]
 exclude:
   - "tests/fixtures/"
   - "flowspec-cli/tests/"
+  - "tests/oracle/fixtures/"
+  - "tests/oracle/_selftest/"
+  - "tests/oracle/_semtest/"
+  - "tests/oracle/_production_bad/"
 project:
   name: "flowspec"
   languages: ["rust"]
