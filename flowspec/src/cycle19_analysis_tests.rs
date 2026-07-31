@@ -265,8 +265,8 @@ fn test_c19_t15_no_unknown_patterns_in_dogfood() {
 /// Structural gate per manager's assignment: file must exist before code work.
 #[test]
 fn test_c19_t16_issues_filed_gate_file_exists() {
-    let workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/process-gates/cycle-19/issues-filed.md");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/process-gates/cycle-19/issues-filed.md");
     assert!(
         workspace.exists(),
         "T16: cycle-19/issues-filed.md must exist — structural gate for issue filing"
@@ -277,8 +277,8 @@ fn test_c19_t16_issues_filed_gate_file_exists() {
 /// The manager requires 3+ issues filed. URLs must be https://github.com/ links.
 #[test]
 fn test_c19_t17_issues_filed_contains_minimum_urls() {
-    let workspace =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/process-gates/cycle-19/issues-filed.md");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/process-gates/cycle-19/issues-filed.md");
     let content =
         std::fs::read_to_string(&workspace).expect("T17: issues-filed.md must be readable");
     let url_count = content

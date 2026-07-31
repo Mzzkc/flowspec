@@ -71,8 +71,8 @@ fn example_test() {
         .expect("RED: git commit failed");
 
     // Invoke checker - it MUST detect the marker and return nonzero
-    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scripts/check-test-custody.py");
+    let checker_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
     let output = Command::new("python")
         .arg(&checker_path)
@@ -149,8 +149,8 @@ fn clean_test() {
         .expect("RED: git commit failed");
 
     // Invoke checker - it MUST accept clean sources and return zero
-    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scripts/check-test-custody.py");
+    let checker_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
     let output = Command::new("python")
         .arg(&checker_path)
@@ -226,8 +226,8 @@ test.skip('skipped test', () => {
         .expect("RED: git commit failed");
 
     // Invoke checker - it MUST detect the marker
-    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scripts/check-test-custody.py");
+    let checker_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
     let output = Command::new("python")
         .arg(&checker_path)
@@ -299,8 +299,8 @@ test.skip('skipped typescript test', () => {
         .expect("RED: git commit failed");
 
     // Invoke checker - it MUST detect the marker
-    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scripts/check-test-custody.py");
+    let checker_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
     let output = Command::new("python")
         .arg(&checker_path)
@@ -374,8 +374,8 @@ def example_test():
         .expect("RED: git commit failed");
 
     // Invoke checker - it MUST detect the marker
-    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scripts/check-test-custody.py");
+    let checker_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
     let output = Command::new("python")
         .arg(&checker_path)
@@ -387,7 +387,8 @@ def example_test():
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("example_test.py") && (stderr.contains("@pytest.skip") || stderr.contains("pytest.mark")),
+        stderr.contains("example_test.py")
+            && (stderr.contains("@pytest.skip") || stderr.contains("pytest.mark")),
         "RED: checker must detect @pytest.skip marker"
     );
 
@@ -409,8 +410,8 @@ fn custody_requires_zero_markers_with_synthetic_fixture() {
     // GREEN will leave this test UNCHANGED and remove only the five inherited
     // #[ignore] attributes/change only their evidence paths to committed artifacts.
 
-    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scripts/check-test-custody.py");
+    let checker_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
     // First, construct synthetic marker tokens at runtime to verify detection works
     let temp = TempDir::new().expect("RED: failed to create temp dir");
@@ -438,15 +439,17 @@ fn custody_requires_zero_markers_with_synthetic_fixture() {
     let marker_token = ["#[", "ignore"].concat();
     let test_file = repo.join("tests/synthetic_test.rs");
     fs::create_dir_all(test_file.parent().unwrap()).expect("RED: failed to create tests dir");
-    let synthetic_content = format!(r#"
+    let synthetic_content = format!(
+        r#"
 #[test]
 {} = "synthetic marker constructed at runtime"]
 fn synthetic_test() {{
     assert!(true);
 }}
-"#, marker_token);
-    fs::write(&test_file, synthetic_content)
-        .expect("RED: failed to write synthetic fixture");
+"#,
+        marker_token
+    );
+    fs::write(&test_file, synthetic_content).expect("RED: failed to write synthetic fixture");
 
     Command::new("git")
         .args(["add", "tests/synthetic_test.rs"])
