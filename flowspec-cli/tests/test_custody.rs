@@ -496,3 +496,467 @@ fn synthetic_test() {{
         actual_stderr
     );
 }
+
+fn recovery_checker_path() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py")
+}
+
+fn recovery_init_repo() -> TempDir {
+    let temp = TempDir::new().expect("failed to create recovery fixture repository");
+    let repo = temp.path();
+
+    recovery_git(repo, &["init"]);
+    recovery_git(repo, &["config", "user.email", "custody@example.invalid"]);
+    recovery_git(repo, &["config", "user.name", "Custody Test"]);
+    temp
+}
+
+fn recovery_git(repo: &Path, args: &[&str]) -> std::process::Output {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git must execute in recovery fixture");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn recovery_git_text(repo: &Path, args: &[&str]) -> String {
+    String::from_utf8(recovery_git(repo, args).stdout)
+        .expect("git output must be UTF-8")
+        .trim()
+        .to_owned()
+}
+
+fn recovery_write(repo: &Path, relative: &str, content: impl AsRef<[u8]>) {
+    let path = repo.join(relative);
+    fs::create_dir_all(path.parent().expect("fixture path must have a parent"))
+        .expect("fixture parent must be created");
+    fs::write(path, content).expect("fixture must be written");
+}
+
+fn recovery_commit_all(repo: &Path, message: &str) -> String {
+    recovery_git(repo, &["add", "--all"]);
+    recovery_git(repo, &["commit", "-m", message]);
+    recovery_git_text(repo, &["rev-parse", "HEAD"])
+}
+
+fn recovery_run_checker(repo: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("python")
+        .arg(recovery_checker_path())
+        .arg("--root")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("custody checker must execute")
+}
+
+fn recovery_assert_success(output: &std::process::Output, contract: &str) {
+    assert!(
+        output.status.success(),
+        "{contract}: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn recovery_assert_failure_evidence(
+    output: &std::process::Output,
+    contract: &str,
+    evidence: &[&str],
+) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "{contract} must fail closed: stdout={stdout} stderr={stderr}"
+    );
+    for expected in evidence {
+        assert!(
+            stderr.contains(expected),
+            "{contract} missing stable evidence {expected:?}: stderr={stderr}"
+        );
+    }
+}
+
+#[test]
+fn checker_scans_every_tracked_test_path_without_exclusions() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let live_attribute = ["#", "[", "ignore", "]"].concat();
+    let content = format!("#[test]\n{live_attribute}\nfn excluded_path_probe() {{}}\n");
+    let relative = "flowspec-cli/tests/test_custody.rs";
+
+    recovery_write(repo, relative, content);
+    recovery_commit_all(repo, "add exact-path custody probe");
+
+    let output = recovery_run_checker(repo, &["--check-markers"]);
+    recovery_assert_failure_evidence(
+        &output,
+        "tracked paths cannot be allowlisted out of custody",
+        &[relative, ":2:", "rust_ignore"],
+    );
+}
+
+#[test]
+fn checker_accepts_rust_lexical_controls() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let marker_text = ["#", "[", "ignore", "]"].concat();
+    let iterator_call = [".sk", "ip(1)"].concat();
+    let content = format!(
+        "#[test]\n\
+         fn rust_lexical_controls() {{\n\
+             let normal = \"first line\n{marker_text}\nlast line\";\n\
+             let raw = r#\"\n{marker_text}\n\"#;\n\
+             // {marker_text}\n\
+             /*\n{marker_text}\n             */\n\
+             let character = '#';\n\
+             let values = [1, 2, 3];\n\
+             let _ = values.iter(){iterator_call}.count();\n\
+         }}\n"
+    );
+
+    recovery_write(repo, "tests/rust_lexical_controls.rs", content);
+    recovery_commit_all(repo, "add Rust lexical controls");
+
+    let output = recovery_run_checker(repo, &["--check-markers"]);
+    recovery_assert_success(
+        &output,
+        "Rust normal/raw strings, comments, chars, and iterators are not markers",
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "clean Rust controls must emit no evidence: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn checker_accepts_javascript_and_typescript_lexical_controls() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let test_prefix = ["test", ".", "skip", "("].concat();
+    let it_prefix = ["it", ".", "skip", "("].concat();
+    let test_call = format!("{test_prefix}'not live', () => {{}});");
+    let it_call = format!("{it_prefix}\"not live\", () => {{}});");
+
+    for extension in ["js", "ts"] {
+        let content = format!(
+            "// {test_call}\n\
+             /*\n{it_call}\n*/\n\
+             const doubleQuoted = \"{test_call}\";\n\
+             const singleQuoted = '{it_call}';\n\
+             const template = `first line\n{test_call}\nlast line`;\n"
+        );
+        recovery_write(
+            repo,
+            &format!("tests/lexical_controls.{extension}"),
+            content,
+        );
+    }
+    recovery_commit_all(repo, "add JavaScript and TypeScript lexical controls");
+
+    let output = recovery_run_checker(repo, &["--check-markers"]);
+    recovery_assert_success(
+        &output,
+        "JavaScript and TypeScript comments, strings, and templates are not markers",
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "clean JavaScript/TypeScript controls must emit no evidence: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn checker_accepts_python_lexical_controls() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let decorator = ["@", "pytest", ".", "skip"].concat();
+    let marked_decorator = ["@", "pytest", ".", "mark", ".", "skip"].concat();
+    let content = format!(
+        "# {decorator}(\"not live\")\n\
+         single = '{decorator}(\"not live\")'\n\
+         double = \"{marked_decorator}('not live')\"\n\
+         triple = \"\"\"first line\n{marked_decorator}('not live')\nlast line\"\"\"\n"
+    );
+
+    recovery_write(repo, "tests/python_lexical_controls.py", content);
+    recovery_commit_all(repo, "add Python lexical controls");
+
+    let output = recovery_run_checker(repo, &["--check-markers"]);
+    recovery_assert_success(
+        &output,
+        "Python comments and normal/triple strings are not markers",
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "clean Python controls must emit no evidence: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn checker_rejects_live_markers_in_all_supported_test_languages() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let rust_attribute = ["#", "[", "ignore", " = \"reason\"", "]"].concat();
+    let javascript_call = ["test", ".", "skip", "('live', () => {});"].concat();
+    let typescript_call = ["it", ".", "skip", "('live', () => {});"].concat();
+    let python_decorator = ["@", "pytest", ".", "mark", ".", "skip"].concat();
+
+    recovery_write(
+        repo,
+        "tests/live_rust.rs",
+        format!("#[test]\n{rust_attribute}\nfn live_rust() {{}}\n"),
+    );
+    recovery_write(repo, "tests/live_javascript.js", javascript_call);
+    recovery_write(repo, "tests/live_typescript.ts", typescript_call);
+    recovery_write(
+        repo,
+        "tests/live_python.py",
+        format!("{python_decorator}\ndef test_live_python():\n    pass\n"),
+    );
+    recovery_commit_all(repo, "add one live marker per supported language");
+
+    let output = recovery_run_checker(repo, &["--check-markers"]);
+    recovery_assert_failure_evidence(
+        &output,
+        "all supported live marker forms",
+        &[
+            "tests/live_rust.rs:2:",
+            "rust_ignore",
+            "tests/live_javascript.js:1:",
+            "javascript_test_skip",
+            "tests/live_typescript.ts:1:",
+            "typescript_test_skip",
+            "tests/live_python.py:1:",
+            "python_test_skip",
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn checker_fails_closed_for_tracked_source_loss() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let missing = "tests/missing_test.py";
+    let linked = "tests/symlink_test.py";
+    let unreadable = "tests/unreadable_test.py";
+    let undecodable = "tests/invalid_utf8_test.py";
+
+    recovery_write(repo, missing, "def test_missing():\n    pass\n");
+    recovery_write(repo, "symlink-target.py", "def test_target():\n    pass\n");
+    fs::create_dir_all(repo.join("tests")).expect("tests directory must exist");
+    symlink("../symlink-target.py", repo.join(linked)).expect("tracked symlink must be created");
+    recovery_write(repo, unreadable, "def test_unreadable():\n    pass\n");
+    recovery_write(
+        repo,
+        undecodable,
+        b"def test_invalid_utf8():\n    value = '\xff'\n",
+    );
+    recovery_commit_all(repo, "add tracked source-loss fixtures");
+
+    fs::remove_file(repo.join(missing)).expect("tracked source must be removed from worktree");
+    fs::set_permissions(repo.join(unreadable), fs::Permissions::from_mode(0o000))
+        .expect("tracked source must become unreadable");
+
+    let first = recovery_run_checker(repo, &["--check-markers"]);
+    let second = recovery_run_checker(repo, &["--check-markers"]);
+
+    fs::set_permissions(repo.join(unreadable), fs::Permissions::from_mode(0o644))
+        .expect("fixture permissions must be restored for cleanup");
+
+    assert_eq!(
+        first.stderr, second.stderr,
+        "source-loss evidence must be stable across identical runs"
+    );
+    recovery_assert_failure_evidence(
+        &first,
+        "tracked source loss",
+        &[
+            "tests/missing_test.py:0: tracked_source_missing",
+            "tests/symlink_test.py:0: tracked_source_symlink",
+            "tests/unreadable_test.py:0: source_read_failed",
+            "tests/invalid_utf8_test.py:0: invalid_utf8",
+        ],
+    );
+}
+
+#[test]
+fn baseline_accepts_an_ancestor_after_a_non_test_commit() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let baseline_temp = TempDir::new().expect("baseline directory must be created");
+    let baseline = baseline_temp.path().join("baseline.json");
+
+    recovery_write(repo, "tests/stable_test.rs", "#[test]\nfn stable() {}\n");
+    let red_parent = recovery_commit_all(repo, "add stable test authority");
+    let generate = recovery_run_checker(
+        repo,
+        &[
+            "--generate-baseline",
+            baseline.to_str().expect("UTF-8 path"),
+        ],
+    );
+    recovery_assert_success(&generate, "baseline generation");
+    assert!(
+        fs::read_to_string(&baseline)
+            .expect("baseline must be readable")
+            .contains(&red_parent),
+        "baseline source_sha must name its generating test authority"
+    );
+
+    recovery_write(repo, "README.md", "non-test release note\n");
+    recovery_commit_all(repo, "add non-test change");
+
+    let verify = recovery_run_checker(
+        repo,
+        &["--baseline", baseline.to_str().expect("UTF-8 path")],
+    );
+    recovery_assert_success(
+        &verify,
+        "an ancestor source_sha with unchanged test paths and bytes remains authoritative",
+    );
+}
+
+#[test]
+fn baseline_rejects_a_non_ancestor_source_authority() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let baseline_temp = TempDir::new().expect("baseline directory must be created");
+    let baseline = baseline_temp.path().join("baseline.json");
+
+    recovery_write(repo, "tests/stable_test.rs", "#[test]\nfn stable() {}\n");
+    let source_sha = recovery_commit_all(repo, "add stable test authority");
+    let generate = recovery_run_checker(
+        repo,
+        &[
+            "--generate-baseline",
+            baseline.to_str().expect("UTF-8 path"),
+        ],
+    );
+    recovery_assert_success(&generate, "baseline generation");
+
+    let tree = recovery_git_text(repo, &["rev-parse", "HEAD^{tree}"]);
+    let unrelated = recovery_git_text(repo, &["commit-tree", &tree, "-m", "unrelated root"]);
+    let stored = fs::read_to_string(&baseline).expect("baseline must be readable");
+    fs::write(&baseline, stored.replace(&source_sha, &unrelated))
+        .expect("baseline authority must be replaced");
+
+    let verify = recovery_run_checker(
+        repo,
+        &["--baseline", baseline.to_str().expect("UTF-8 path")],
+    );
+    recovery_assert_failure_evidence(
+        &verify,
+        "non-ancestor baseline authority",
+        &["baseline_source_not_ancestor", &unrelated],
+    );
+}
+
+#[test]
+fn baseline_rejects_test_byte_drift() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let baseline_temp = TempDir::new().expect("baseline directory must be created");
+    let baseline = baseline_temp.path().join("baseline.json");
+    let relative = "tests/byte_drift.rs";
+
+    recovery_write(repo, relative, "#[test]\nfn stable() {}\n");
+    recovery_commit_all(repo, "add byte-drift authority");
+    let generate = recovery_run_checker(
+        repo,
+        &[
+            "--generate-baseline",
+            baseline.to_str().expect("UTF-8 path"),
+        ],
+    );
+    recovery_assert_success(&generate, "baseline generation");
+
+    recovery_write(repo, relative, "#[test]\nfn changed() {}\n");
+    let verify = recovery_run_checker(
+        repo,
+        &["--baseline", baseline.to_str().expect("UTF-8 path")],
+    );
+    recovery_assert_failure_evidence(&verify, "test byte drift", &[relative]);
+}
+
+#[test]
+fn baseline_rejects_test_path_drift() {
+    let temp = recovery_init_repo();
+    let repo = temp.path();
+    let baseline_temp = TempDir::new().expect("baseline directory must be created");
+    let baseline = baseline_temp.path().join("baseline.json");
+    let original = "tests/original_path.rs";
+    let moved = "tests/moved_path.rs";
+
+    recovery_write(repo, original, "#[test]\nfn stable() {}\n");
+    recovery_commit_all(repo, "add path-drift authority");
+    let generate = recovery_run_checker(
+        repo,
+        &[
+            "--generate-baseline",
+            baseline.to_str().expect("UTF-8 path"),
+        ],
+    );
+    recovery_assert_success(&generate, "baseline generation");
+
+    fs::rename(repo.join(original), repo.join(moved)).expect("test path must move");
+    recovery_git(repo, &["add", "--all"]);
+    let verify = recovery_run_checker(
+        repo,
+        &["--baseline", baseline.to_str().expect("UTF-8 path")],
+    );
+    recovery_assert_failure_evidence(&verify, "test path drift", &[original, moved]);
+}
+
+fn recovery_issue_urls(content: &str) -> Vec<String> {
+    let prefix = "https://github.com/Mzzkc/flowspec/issues/";
+    let mut urls: Vec<String> = content
+        .split_whitespace()
+        .filter(|token| token.starts_with(prefix))
+        .map(str::to_owned)
+        .collect();
+    urls.sort();
+    urls
+}
+
+#[test]
+fn committed_process_evidence_has_the_exact_issue_partition() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let cycle_19 =
+        fs::read_to_string(repository.join("tests/process-gates/cycle-19/issues-filed.md"))
+            .expect("cycle 19 evidence must be readable");
+    let cycle_21 =
+        fs::read_to_string(repository.join("tests/process-gates/cycle-21/issues-filed.md"))
+            .expect("cycle 21 evidence must be readable");
+
+    assert_eq!(
+        recovery_issue_urls(&cycle_19),
+        [
+            "https://github.com/Mzzkc/flowspec/issues/18",
+            "https://github.com/Mzzkc/flowspec/issues/19",
+            "https://github.com/Mzzkc/flowspec/issues/20",
+        ],
+        "cycle 19 custody accepts exactly issues 18, 19, and 20"
+    );
+    assert_eq!(
+        recovery_issue_urls(&cycle_21),
+        [
+            "https://github.com/Mzzkc/flowspec/issues/27",
+            "https://github.com/Mzzkc/flowspec/issues/28",
+            "https://github.com/Mzzkc/flowspec/issues/29",
+        ],
+        "cycle 21 custody accepts exactly issues 27, 28, and 29"
+    );
+}
