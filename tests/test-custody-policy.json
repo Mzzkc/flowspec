@@ -1,0 +1,68 @@
+{
+  "schema": "flowspec.test_custody_policy",
+  "schema_version": 1,
+  "policy_version": "phase-01-custody-closeout-red",
+  "deny_unknown_fields": true,
+  "marker_scan": {
+    "tracked_regular_utf8_source": true,
+    "path_exclusions_allowed": false,
+    "extensions": [
+      ".rs",
+      ".js",
+      ".ts",
+      ".tsx",
+      ".jsx",
+      ".py"
+    ]
+  },
+  "whole_file_roots": [
+    "tests/",
+    "flowspec/tests/",
+    "flowspec-cli/tests/"
+  ],
+  "whole_file_harness_paths": [
+    "scripts/check-test-custody.py",
+    "scripts/flowspec-oracle.py",
+    "scripts/validate-oracle-artifacts.py"
+  ],
+  "mixed_rust_roots": [
+    "flowspec/src/",
+    "flowspec-cli/src/"
+  ],
+  "rust_region_rules": {
+    "cfg_test_predicate": true,
+    "test_attributes": [
+      "test"
+    ],
+    "policy_test_attributes": [],
+    "external_modules_under_test_cfg": true,
+    "executable_rustdoc_fences": true,
+    "local_macro_invocations_inside_custodied_regions": true,
+    "fail_on_unclassified_test_constructs": true
+  },
+  "rust_include_edges": {
+    "resolve_constant_literal_include_str": true,
+    "resolve_constant_literal_include_bytes": true,
+    "repository_contained_regular_files_only": true,
+    "unresolved_include_is_error": true
+  },
+  "control_baseline": {
+    "path": "tests/test-custody-baseline.json",
+    "excluded_from_own_file_hash_map": true,
+    "self_exclusion_reason": "baseline self hash has no fixed point"
+  },
+  "cargo_inventory": {
+    "platform_contract": {
+      "os": "linux",
+      "workspace": true,
+      "all_features": true
+    },
+    "enumeration_commands": [
+      "cargo test --workspace --all-features --no-run",
+      "cargo test --workspace --all-features -- --list",
+      "cargo test --workspace --all-features --doc -- --list"
+    ],
+    "exact_identity_set_required": true,
+    "target_qualified_identities": true
+  }
+}
