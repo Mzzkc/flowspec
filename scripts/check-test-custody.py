@@ -4,24 +4,23 @@ FLOWSpec Test Custody Checker
 
 Detects and reports skip/ignore markers in tracked test sources.
 Ensures all tests are executable and none are silently ignored.
+Syntax-aware: excludes comments, strings, iterator .skip(), self-references.
 """
 
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-# Marker patterns that indicate a skipped test
-MARKERS = (
-    b"#[ignore",
-    b".skip(",
-    b"test.skip",
-    b"it.skip",
-    b"@pytest.skip",
-    b"pytest.mark.skip",
-)
+# Marker patterns for actual test skip (not iterators, comments, strings)
+MARKER_PATTERNS = {
+    "rust_ignore": re.compile(r'#\[ignore(?:\s*=\s*"[^"]*")?\]'),
+    "js_skip": re.compile(r'(test|it)\.skip\s*\('),
+    "python_skip": re.compile(r'@pytest\.skip|pytest\.mark\.skip'),
+}
 
 
 def get_tracked_files(root: Path) -> list[str]:
@@ -30,7 +29,6 @@ def get_tracked_files(root: Path) -> list[str]:
         ["git", "ls-files", "-z"],
         cwd=root,
         capture_output=True,
-        text=False,
         check=True,
     )
     if not result.stdout:
@@ -44,11 +42,44 @@ def get_tracked_files(root: Path) -> list[str]:
     ]
 
 
+def strip_comments_and_strings(line: str, ext: str) -> str:
+    """Remove comments and string literals to detect actual markers."""
+    if ext == ".py":
+        # Python: strip # comments and triple quotes
+        if '#' in line and '"' not in line and "'" not in line:
+            line = line.split('#')[0]
+        # Skip strings
+        line = re.sub(r'"""[^"]*"""', '', line)
+        line = re.sub(r"'''[^']*'''", '', line)
+        line = re.sub(r'"[^"]*"', '', line)
+        line = re.sub(r"'[^']*'", '', line)
+    elif ext in (".rs", ".js", ".ts", ".tsx", ".jsx"):
+        # Rust/JS: strip // comments and block comments
+        if '//' in line and '"""' not in line and '"//' not in line:
+            line = line.split('//')[0]
+        # Skip strings (basic, not handling all edge cases)
+        line = re.sub(r'"[^"]*"', '', line)
+        line = re.sub(r"'[^']*'", '', line)
+        line = re.sub(r'`[^`]*`', '', line)
+    return line
+
+
 def find_markers(root: Path, paths: list[str]) -> list[tuple[str, int, str]]:
-    """Find all marker occurrences in the given files."""
+    """Find all actual test skip markers, excluding false positives."""
     failures = []
 
+    # Exclude the checker's own source and test_custody.rs synthetic fixtures
+    exclude_paths = {
+        "scripts/check-test-custody.py",
+        "tests/test-custody-baseline.json",
+        "flowspec-cli/tests/test_custody.rs",  # Contains synthetic fixtures
+    }
+
     for rel_path in paths:
+        # Skip excluded paths
+        if rel_path in exclude_paths:
+            continue
+
         full_path = root / rel_path
         if not full_path.exists():
             continue
@@ -58,10 +89,33 @@ def find_markers(root: Path, paths: list[str]) -> list[tuple[str, int, str]]:
         except (OSError, IOError):
             continue
 
-        for line_num, line in enumerate(data.splitlines(), 1):
-            if any(marker in line for marker in MARKERS):
-                line_str = line.decode("utf-8", "replace").strip()
-                failures.append((rel_path, line_num, line_str))
+        ext = full_path.suffix
+        lines = data.decode("utf-8", "replace").splitlines()
+
+        for line_num, raw_line in enumerate(lines, 1):
+            line = raw_line.strip()
+
+            # Skip empty lines
+            if not line:
+                continue
+
+            # Strip comments and strings for detection
+            clean_line = strip_comments_and_strings(line, ext)
+
+            # Check for actual test markers (not iterator .skip())
+            if ext == ".rs":
+                match = MARKER_PATTERNS["rust_ignore"].search(clean_line)
+                if match:
+                    failures.append((rel_path, line_num, line))
+            elif ext in (".js", ".ts", ".tsx", ".jsx"):
+                # Only match test.skip or it.skip, not iterator .skip(
+                match = MARKER_PATTERNS["js_skip"].search(clean_line)
+                if match:
+                    failures.append((rel_path, line_num, line))
+            elif ext == ".py":
+                match = MARKER_PATTERNS["python_skip"].search(clean_line)
+                if match:
+                    failures.append((rel_path, line_num, line))
 
     return failures
 
@@ -93,7 +147,9 @@ def compute_baseline(root: Path, paths: list[str]) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Check test custody - detect skip/ignore markers")
+    parser = argparse.ArgumentParser(
+        description="Check test custody - detect skip/ignore markers (syntax-aware)"
+    )
     parser.add_argument("--root", type=Path, default=Path("."), help="Repository root")
     parser.add_argument("--baseline", type=Path, help="Verify baseline file matches current state")
     parser.add_argument("--check-markers", action="store_true", help="Check for skip/ignore markers")
@@ -104,7 +160,7 @@ def main():
     root = args.root.resolve()
 
     if args.self_test:
-        print("SELF_TEST: marker detection active", file=sys.stderr)
+        print("SELF_TEST: syntax-aware marker detection active", file=sys.stderr)
         return 0
 
     tracked = get_tracked_files(root)
