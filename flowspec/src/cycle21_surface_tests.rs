@@ -664,12 +664,11 @@ fn decisions_log_existing_preserved() {
 // ===========================================================================
 
 /// T27: issues-filed.md exists in cycle-21 directory
-#[ignore = "process gate: depends on gitignored workspaces/build/cycle-*/issues-filed.md (absent in clean checkout/CI); not a flowspec code test — re-home to CI or a committed artifact (Legion 2026-06-15)"]
 #[test]
 fn issues_filed_exists() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../workspaces/build/cycle-21/issues-filed.md"
+        "/../tests/process-gates/cycle-21/issues-filed.md"
     );
     assert!(
         std::path::Path::new(path).exists(),
@@ -683,12 +682,11 @@ fn issues_filed_exists() {
 }
 
 /// T28: issues-filed.md contains 3+ GitHub issue URLs
-#[ignore = "process gate: depends on gitignored workspaces/build/cycle-*/issues-filed.md (absent in clean checkout/CI); not a flowspec code test — re-home to CI or a committed artifact (Legion 2026-06-15)"]
 #[test]
 fn issues_filed_minimum_count() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../workspaces/build/cycle-21/issues-filed.md"
+        "/../tests/process-gates/cycle-21/issues-filed.md"
     );
     let content = std::fs::read_to_string(path).expect("issues-filed.md must exist");
     let url_count = content
@@ -703,12 +701,11 @@ fn issues_filed_minimum_count() {
 }
 
 /// T29: issues-filed.md URLs are real (not placeholder)
-#[ignore = "process gate: depends on gitignored workspaces/build/cycle-*/issues-filed.md (absent in clean checkout/CI); not a flowspec code test — re-home to CI or a committed artifact (Legion 2026-06-15)"]
 #[test]
 fn issues_filed_urls_not_placeholder() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../workspaces/build/cycle-21/issues-filed.md"
+        "/../tests/process-gates/cycle-21/issues-filed.md"
     );
     let content = std::fs::read_to_string(path).expect("issues-filed.md must exist");
     for line in content.lines() {
