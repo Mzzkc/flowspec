@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -85,6 +86,26 @@ fn copy_checker_and_policy(repo: &Path) {
         "tests/test-custody-policy.json",
         fs::read(source_policy_path()).expect("source policy must be readable"),
     );
+    write_file(
+        repo,
+        "scripts/flowspec-oracle.py",
+        "# clean oracle harness\n",
+    );
+    write_file(
+        repo,
+        "scripts/validate-oracle-artifacts.py",
+        "# clean oracle validator harness\n",
+    );
+    write_file(
+        repo,
+        "flowspec/tests/library_contract.rs",
+        "#[test]\nfn library_contract_control() {}\n",
+    );
+    write_file(
+        repo,
+        "flowspec-cli/tests/cli_contract.rs",
+        "#[test]\nfn cli_contract_control() {}\n",
+    );
 }
 
 fn commit_all(repo: &Path, message: &str) -> String {
@@ -120,6 +141,10 @@ fn assert_clean_fixture(repo: &Path) {
     let tracked = git_text(repo, &["ls-files"]);
     for required in [
         "scripts/check-test-custody.py",
+        "scripts/flowspec-oracle.py",
+        "scripts/validate-oracle-artifacts.py",
+        "flowspec/tests/library_contract.rs",
+        "flowspec-cli/tests/cli_contract.rs",
         "tests/test-custody-policy.json",
         "tests/clean_authority.rs",
     ] {
@@ -158,22 +183,6 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-fn assert_argparse_policy_rejection(output: &Output, contract: &str) {
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "{contract}: unchanged checker must fail at argparse for --policy, stdout={} stderr={}",
-        stdout(output),
-        stderr(output)
-    );
-    assert!(
-        stderr(output).contains("unrecognized arguments: --policy"),
-        "{contract}: expected exact old argparse evidence, stdout={} stderr={}",
-        stdout(output),
-        stderr(output)
-    );
 }
 
 fn assert_future_policy_required(output: &Output, contract: &str) {
@@ -226,18 +235,25 @@ fn sha256sum(repo: &Path, relative: &str) -> String {
 
 fn write_valid_legacy_baseline(repo: &Path, relative: &str) {
     let head = git_text(repo, &["rev-parse", "HEAD"]);
-    let checker_hash = sha256sum(repo, "scripts/check-test-custody.py");
-    let clean_hash = sha256sum(repo, "tests/clean_authority.rs");
+    let tracked = git_text(repo, &["ls-files"]);
+    let mut tracked_test_paths = tracked
+        .lines()
+        .filter(|path| {
+            [".rs", ".js", ".ts", ".tsx", ".jsx", ".py"]
+                .iter()
+                .any(|extension| path.ends_with(extension))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    tracked_test_paths.sort();
+    let files = tracked_test_paths
+        .iter()
+        .map(|path| (path.clone(), sha256sum(repo, path)))
+        .collect::<BTreeMap<_, _>>();
     let baseline = json!({
         "source_sha": head,
-        "tracked_test_paths": [
-            "scripts/check-test-custody.py",
-            "tests/clean_authority.rs"
-        ],
-        "files": {
-            "scripts/check-test-custody.py": checker_hash,
-            "tests/clean_authority.rs": clean_hash
-        }
+        "tracked_test_paths": tracked_test_paths,
+        "files": files
     });
     write_file(
         repo,
@@ -263,10 +279,23 @@ fn policy_option_is_recognized_for_marker_action() {
         ],
     );
 
-    assert_argparse_policy_rejection(&output, "marker action explicit --policy RED");
+    if stderr(&output).contains("unrecognized arguments: --policy") {
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "old --policy rejection must be argparse exit 2, stdout={} stderr={}",
+            stdout(&output),
+            stderr(&output)
+        );
+        panic!(
+            "RED: unchanged checker rejected explicit --policy before marker action authority executed; stdout={} stderr={}",
+            stdout(&output),
+            stderr(&output)
+        );
+    }
     assert!(
         output.status.success(),
-        "RED: unchanged checker rejected explicit --policy before marker action authority executed; stdout={} stderr={}",
+        "valid explicit --policy must reach and pass the clean marker action; stdout={} stderr={}",
         stdout(&output),
         stderr(&output)
     );
