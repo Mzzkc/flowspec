@@ -396,3 +396,67 @@ def example_test():
         "RED: checker must return nonzero when Python markers present"
     );
 }
+
+#[test]
+fn checker_detects_five_live_ignore_markers() {
+    // This test verifies the checker detects the FIVE current #[ignore] markers
+    // at known locations that will be removed in the next GREEN commit.
+    //
+    // Current markers (5 total):
+    // - flowspec/src/cycle19_analysis_tests.rs:266
+    // - flowspec/src/cycle19_analysis_tests.rs:279
+    // - flowspec/src/cycle21_surface_tests.rs:667
+    // - flowspec/src/cycle21_surface_tests.rs:686
+    // - flowspec/src/cycle21_surface_tests.rs:706
+    //
+    // After GREEN re-homes these tests with committed evidence,
+    // this test will be updated to expect ZERO markers.
+
+    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../scripts/check-test-custody.py");
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+
+    // Run checker on the actual repository
+    let output = Command::new("python")
+        .arg(&checker_path)
+        .arg("--root")
+        .arg(&repo_root)
+        .arg("--check-markers")
+        .output()
+        .expect("RED: checker must exist and execute");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Verify all FIVE markers are detected
+    assert!(
+        stderr.contains("cycle19_analysis_tests.rs:266"),
+        "RED: must detect marker at cycle19:266"
+    );
+    assert!(
+        stderr.contains("cycle19_analysis_tests.rs:279"),
+        "RED: must detect marker at cycle19:279"
+    );
+    assert!(
+        stderr.contains("cycle21_surface_tests.rs:667"),
+        "RED: must detect marker at cycle21:667"
+    );
+    assert!(
+        stderr.contains("cycle21_surface_tests.rs:686"),
+        "RED: must detect marker at cycle21:686"
+    );
+    assert!(
+        stderr.contains("cycle21_surface_tests.rs:706"),
+        "RED: must detect marker at cycle21:706"
+    );
+
+    // Checker MUST return nonzero when 5 markers present
+    assert!(
+        !output.status.success(),
+        "RED: checker must return nonzero when 5 markers present"
+    );
+
+    // Document the expected GREEN state
+    // After GREEN, these markers will be removed and this test
+    // will be updated to expect ZERO markers.
+}
