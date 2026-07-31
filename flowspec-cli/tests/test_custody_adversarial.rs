@@ -20,6 +20,10 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
+fn policy_file_path() -> PathBuf {
+    repo_root().join("tests/test-custody-policy.json")
+}
+
 fn init_repo() -> TempDir {
     let temp = TempDir::new().expect("fixture repository must be created");
     let repo = temp.path();
@@ -98,10 +102,12 @@ fn commit_all(repo: &Path, message: &str) -> String {
 }
 
 fn run_checker(repo: &Path, args: &[&str]) -> Output {
-    Command::new("python")
-        .arg(checker_path())
-        .arg("--root")
-        .arg(repo)
+    let mut command = Command::new("python");
+    command.arg(checker_path()).arg("--root").arg(repo);
+    if !args.contains(&"--policy") {
+        command.arg("--policy").arg(policy_file_path());
+    }
+    command
         .args(args)
         .output()
         .expect("custody checker must execute")
@@ -112,10 +118,12 @@ fn run_checker_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<Output, String> {
-    let mut child = Command::new("python")
-        .arg(checker_path())
-        .arg("--root")
-        .arg(repo)
+    let mut command = Command::new("python");
+    command.arg(checker_path()).arg("--root").arg(repo);
+    if !args.contains(&"--policy") {
+        command.arg("--policy").arg(policy_file_path());
+    }
+    let mut child = command
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -13,9 +13,13 @@
 // No #[ignore], no panic!, no assert!(false), no assertions of absence.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+
+fn committed_policy_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/test-custody-policy.json")
+}
 
 #[test]
 fn checker_rejects_rust_ignore_markers() {
@@ -78,6 +82,8 @@ fn example_test() {
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker script does not exist or cannot execute");
@@ -156,6 +162,8 @@ fn clean_test() {
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker script does not exist or cannot execute");
@@ -233,6 +241,8 @@ test.skip('skipped test', () => {
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker script does not exist or cannot execute");
@@ -306,6 +316,8 @@ test.skip('skipped typescript test', () => {
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker script does not exist or cannot execute");
@@ -381,6 +393,8 @@ def example_test():
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker script does not exist or cannot execute");
@@ -468,6 +482,8 @@ fn synthetic_test() {{
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker must execute on synthetic fixture");
@@ -485,6 +501,8 @@ fn synthetic_test() {{
         .arg(&checker_path)
         .arg("--root")
         .arg(&repo_root)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .arg("--check-markers")
         .output()
         .expect("RED: checker must execute on actual repo");
@@ -554,6 +572,8 @@ fn recovery_run_checker(repo: &Path, args: &[&str]) -> std::process::Output {
         .arg(recovery_checker_path())
         .arg("--root")
         .arg(repo)
+        .arg("--policy")
+        .arg(committed_policy_path())
         .args(args)
         .output()
         .expect("custody checker must execute")

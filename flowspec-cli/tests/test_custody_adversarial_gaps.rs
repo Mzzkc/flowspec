@@ -854,7 +854,14 @@ fn g4_unix_domain_socket_and_race_closure() {
         let _listener = UnixListener::bind(&socket_path).expect("unix domain socket must bind");
         git(repo, &["add", "tests/socket.rs"]);
 
-        let out = run_checker(repo, &["--check-markers"]);
+        let out = run_checker(
+            repo,
+            &[
+                "--policy",
+                "tests/test-custody-policy.json",
+                "--check-markers",
+            ],
+        );
         assert_failure_evidence(
             &out,
             "G4 Unix domain socket must fail closed with deterministic reason",
@@ -891,7 +898,15 @@ fn g4_changed_during_read_race_witness() {
         }
     });
 
-    let result = run_checker_with_timeout(repo, &["--check-markers"], Duration::from_secs(3));
+    let result = run_checker_with_timeout(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--check-markers",
+        ],
+        Duration::from_secs(3),
+    );
     running.store(false, Ordering::Relaxed);
     let _ = writer.join();
 
@@ -924,7 +939,14 @@ fn g4_post_open_regular_file_classifier_rejects_non_regular() {
             let _ = symlink(dev_null, &link_target);
             git(repo, &["add", "tests/dev_null.rs"]);
 
-            let out = run_checker(repo, &["--check-markers"]);
+            let out = run_checker(
+                repo,
+                &[
+                    "--policy",
+                    "tests/test-custody-policy.json",
+                    "--check-markers",
+                ],
+            );
             assert_failure_evidence(
                 &out,
                 "G4 non-regular descriptor must be rejected by shared classifier",
@@ -1115,7 +1137,14 @@ fn g6_rust_lexical_negative_controls_and_nested_comment_quotes() {
     write_file(repo, "tests/rust_spaced.rs", rust_spaced);
     commit_all(repo, "Rust controls and spaced ignore");
 
-    let out = run_checker(repo, &["--check-markers"]);
+    let out = run_checker(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--check-markers",
+        ],
+    );
     assert_failure_evidence(
         &out,
         "G6 Rust spaced ignore # [ignore] must be detected as live marker",
@@ -1149,7 +1178,14 @@ const t1 = `{m_skip}`;
     write_file(repo, "tests/js_live.js", js_live);
     commit_all(repo, "JS controls and live interpolation");
 
-    let out = run_checker(repo, &["--check-markers"]);
+    let out = run_checker(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--check-markers",
+        ],
+    );
     assert_failure_evidence(
         &out,
         "G6 JS marker inside ${...} template interpolation must remain live and be reported",
@@ -1185,7 +1221,14 @@ t2 = """{m_pyskip}"""
     write_file(repo, "tests/py_live.py", py_live);
     commit_all(repo, "Python controls and live f-strings");
 
-    let out = run_checker(repo, &["--check-markers"]);
+    let out = run_checker(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--check-markers",
+        ],
+    );
     assert_failure_evidence(
         &out,
         "G6 Python marker inside f-string expression {...} must remain live and be reported",
