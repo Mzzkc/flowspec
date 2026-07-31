@@ -480,9 +480,25 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path, help="Verify baseline file against current state")
     parser.add_argument("--check-markers", action="store_true", help="Check for skip/ignore markers")
     parser.add_argument("--generate-baseline", type=Path, help="Generate baseline JSON")
+    parser.add_argument("--policy", type=Path, help="Custody policy file")
     parser.add_argument("--self-test", action="store_true", help="Run self-test checks")
     args = parser.parse_args()
     root = args.root.resolve()
+
+    action_count = sum(
+        [
+            args.check_markers,
+            args.generate_baseline is not None,
+            args.baseline is not None,
+            args.self_test,
+        ]
+    )
+    if action_count != 1:
+        print("ERROR: exactly_one_action_required", file=sys.stderr)
+        return 2
+    if args.policy is None:
+        print("ERROR: policy_required", file=sys.stderr)
+        return 2
 
     if args.self_test:
         print("SELF_TEST: lexical fail-closed marker detection active", file=sys.stderr)
