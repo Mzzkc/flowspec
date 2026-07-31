@@ -51,10 +51,7 @@ def get_tracked_test_files(root: Path) -> List[str]:
 
 
 def marker_failures(root: Path, paths: List[str]) -> List[str]:
-    """Check for ignore/skip markers in tracked test files.
-
-    Only reports actual #[ignore] attributes, not string/comment mentions.
-    """
+    """Check for ignore/skip markers in tracked test files."""
     failures: List[str] = []
     for rel_path in paths:
         # Skip gitignored workspaces
@@ -67,31 +64,11 @@ def marker_failures(root: Path, paths: List[str]) -> List[str]:
         except FileNotFoundError:
             continue
 
-        lines = data.splitlines()
-        for line_num, line in enumerate(lines, 1):
-            line_str = line.decode("utf-8", "replace").strip()
-
-            # Skip empty lines and comments
-            if not line_str or line_str.startswith("//") or line_str.startswith("/*") or line_str.startswith("*"):
-                continue
-
-            # Check for #[ignore] attribute - must start the line or be preceded only by whitespace
-            if line_str.startswith("#[ignore"):
-                failures.append(f"{rel_path}:{line_num}: {line_str}")
-            elif "#[ignore = " in line_str or "#[ignore=\"" in line_str:
-                # Handle cases where #[ignore] has a value
-                stripped_start = line_str.lstrip()
-                if stripped_start.startswith("#[ignore"):
-                    failures.append(f"{rel_path}:{line_num}: {line_str}")
-
-            # Check for skip patterns - these must be actual method calls
-            # Look for .skip( that's not in a string
-            if ".skip(" in line_str:
-                # Basic check: if it starts with identifier.skip( it's likely real
-                # Skip if it's in a comment or string
-                if not line_str.startswith("//") and '"' not in line_str.split(".skip(")[0]:
-                    if any(line_str.split(".skip(")[0].endswith(prefix) for prefix in ["test.", "it.", "describe.", "context.", "suite."]):
-                        failures.append(f"{rel_path}:{line_num}: {line_str}")
+        for line_num, line in enumerate(data.splitlines(), 1):
+            if any(marker in line for marker in MARKERS):
+                # Decode line for error message
+                line_text = line.decode("utf-8", "replace").strip()
+                failures.append(f"{rel_path}:{line_num}: {line_text}")
 
     return failures
 
