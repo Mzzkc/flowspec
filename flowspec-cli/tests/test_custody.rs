@@ -250,6 +250,79 @@ test.skip('skipped test', () => {
 }
 
 #[test]
+fn checker_rejects_typescript_skip_markers() {
+    // Create temp git repo with tracked TS test fixture containing .skip(
+    let temp = TempDir::new().expect("RED: failed to create temp dir");
+    let repo = temp.path();
+
+    Command::new("git")
+        .args(["init"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git init failed");
+
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git config failed");
+
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git config failed");
+
+    // Create tracked test file with .skip( marker (TypeScript)
+    let test_file = repo.join("tests/example_test.ts");
+    fs::create_dir_all(test_file.parent().unwrap()).expect("RED: failed to create tests dir");
+    fs::write(
+        &test_file,
+        r#"
+test.skip('skipped typescript test', () => {
+    assert(true);
+});
+"#,
+    )
+    .expect("RED: failed to write test file");
+
+    Command::new("git")
+        .args(["add", "tests/example_test.ts"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git add failed");
+
+    Command::new("git")
+        .args(["commit", "-m", "test"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git commit failed");
+
+    // Invoke checker - it MUST detect the marker
+    let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../scripts/check-test-custody.py");
+
+    let output = Command::new("python")
+        .arg(&checker_path)
+        .arg("--root")
+        .arg(repo)
+        .arg("--check-markers")
+        .output()
+        .expect("RED: checker script does not exist or cannot execute");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("example_test.ts") && stderr.contains(".skip"),
+        "RED: checker must detect TypeScript .skip( marker"
+    );
+
+    assert!(
+        !output.status.success(),
+        "RED: checker must return nonzero when TS markers present"
+    );
+}
+
+#[test]
 fn checker_rejects_python_pytest_skip_markers() {
     // Create temp git repo with tracked Python test fixture containing @pytest.skip
     let temp = TempDir::new().expect("RED: failed to create temp dir");
