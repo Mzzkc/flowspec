@@ -398,65 +398,101 @@ def example_test():
 }
 
 #[test]
-fn checker_detects_five_live_ignore_markers() {
-    // This test verifies the checker detects the FIVE current #[ignore] markers
-    // at known locations that will be removed in the next GREEN commit.
+fn custody_requires_zero_markers_with_synthetic_fixture() {
+    // GENUINE RED: This test FAILS because FIVE #[ignore] markers currently exist
+    // in the codebase at inherited test locations.
     //
-    // Current markers (5 total):
-    // - flowspec/src/cycle19_analysis_tests.rs:266
-    // - flowspec/src/cycle19_analysis_tests.rs:279
-    // - flowspec/src/cycle21_surface_tests.rs:667
-    // - flowspec/src/cycle21_surface_tests.rs:686
-    // - flowspec/src/cycle21_surface_tests.rs:706
+    // This test constructs synthetic marker tokens at runtime (not in source)
+    // to verify the checker can detect them, then requires ZERO markers in
+    // the actual tracked sources.
     //
-    // After GREEN re-homes these tests with committed evidence,
-    // this test will be updated to expect ZERO markers.
+    // GREEN will leave this test UNCHANGED and remove only the five inherited
+    // #[ignore] attributes/change only their evidence paths to committed artifacts.
 
     let checker_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../scripts/check-test-custody.py");
 
+    // First, construct synthetic marker tokens at runtime to verify detection works
+    let temp = TempDir::new().expect("RED: failed to create temp dir");
+    let repo = temp.path();
+
+    Command::new("git")
+        .args(["init"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git init failed");
+
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git config failed");
+
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git config failed");
+
+    // Construct marker token at runtime: "#[ignore" (not in source as raw literal)
+    let marker_token = ["#[", "ignore"].concat();
+    let test_file = repo.join("tests/synthetic_test.rs");
+    fs::create_dir_all(test_file.parent().unwrap()).expect("RED: failed to create tests dir");
+    let synthetic_content = format!(r#"
+#[test]
+{} = "synthetic marker constructed at runtime"]
+fn synthetic_test() {{
+    assert!(true);
+}}
+"#, marker_token);
+    fs::write(&test_file, synthetic_content)
+        .expect("RED: failed to write synthetic fixture");
+
+    Command::new("git")
+        .args(["add", "tests/synthetic_test.rs"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git add failed");
+
+    Command::new("git")
+        .args(["commit", "-m", "test"])
+        .current_dir(repo)
+        .output()
+        .expect("RED: git commit failed");
+
+    // Verify checker detects the synthetic marker
+    let synthetic_output = Command::new("python")
+        .arg(&checker_path)
+        .arg("--root")
+        .arg(repo)
+        .arg("--check-markers")
+        .output()
+        .expect("RED: checker must execute on synthetic fixture");
+
+    assert!(
+        !synthetic_output.status.success(),
+        "RED: checker must detect synthetic marker"
+    );
+
+    // Now require ZERO markers in actual tracked sources
+    // This FAILS because 5 #[ignore] markers currently exist
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
 
-    // Run checker on the actual repository
-    let output = Command::new("python")
+    let actual_output = Command::new("python")
         .arg(&checker_path)
         .arg("--root")
         .arg(&repo_root)
         .arg("--check-markers")
         .output()
-        .expect("RED: checker must exist and execute");
+        .expect("RED: checker must execute on actual repo");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let actual_stderr = String::from_utf8_lossy(&actual_output.stderr);
 
-    // Verify all FIVE markers are detected
+    // RED state: This assertion FAILS because markers currently exist
+    // GREEN will remove the 5 #[ignore] attributes to make this pass
     assert!(
-        stderr.contains("cycle19_analysis_tests.rs:266"),
-        "RED: must detect marker at cycle19:266"
+        actual_output.status.success() && actual_stderr.is_empty(),
+        "RED: custody requires zero markers. Current stderr: {}",
+        actual_stderr
     );
-    assert!(
-        stderr.contains("cycle19_analysis_tests.rs:279"),
-        "RED: must detect marker at cycle19:279"
-    );
-    assert!(
-        stderr.contains("cycle21_surface_tests.rs:667"),
-        "RED: must detect marker at cycle21:667"
-    );
-    assert!(
-        stderr.contains("cycle21_surface_tests.rs:686"),
-        "RED: must detect marker at cycle21:686"
-    );
-    assert!(
-        stderr.contains("cycle21_surface_tests.rs:706"),
-        "RED: must detect marker at cycle21:706"
-    );
-
-    // Checker MUST return nonzero when 5 markers present
-    assert!(
-        !output.status.success(),
-        "RED: checker must return nonzero when 5 markers present"
-    );
-
-    // Document the expected GREEN state
-    // After GREEN, these markers will be removed and this test
-    // will be updated to expect ZERO markers.
 }
