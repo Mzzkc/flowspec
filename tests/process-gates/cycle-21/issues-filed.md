@@ -6,7 +6,7 @@ Committed evidence for cycle-21 structural gate verification.
 
 Real issues filed at https://github.com/Mzzkc/flowspec:
 
-- https://github.com/Mzzkc/flowspec/issues/18 - stale_reference: path-segment imports produce 117 false positives
+- https://github.com/Mzzkc/flowspec/issues/27 - Python type annotations not counted as usage references — 28% of phantom_dependency false positives
 - https://github.com/Mzzkc/flowspec/issues/28 - circular_dependency: 0/13 Python package cycles detected — relative import resolution missing
 - https://github.com/Mzzkc/flowspec/issues/29 - analyze() produces 53% duplicate flow output — deduplicate_flows() not wired into analysis pipeline
 

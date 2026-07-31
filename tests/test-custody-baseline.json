@@ -1,5 +1,5 @@
 {
-  "source_sha": "3bb42b01aff7f15115a58d0523b4af82e61acfd9",
+  "source_sha": "a3939034923a9a2deaeeb65e36affa26665c4fbf",
   "tracked_test_paths": [
     "flowspec-cli/src/main.rs",
     "flowspec-cli/tests/cli_parsing.rs",
@@ -285,7 +285,7 @@
     "flowspec-cli/tests/mjs_extension.rs": "38211d2fc9917880ed304d73bb97dbaa06d559eff1b2b26dfdccfad4d37a505f",
     "flowspec-cli/tests/pipe_safety.rs": "016df8b8928ccb7965fd4eba8dcccd857c68df2b9e2191ddd3818f9810cfd45d",
     "flowspec-cli/tests/sarif_output.rs": "d964014bcac9383a13e7ddecaeb705a2f9b451e4f039e3d0106b2a03f12e0d56",
-    "flowspec-cli/tests/test_custody.rs": "316be2750f28f0e38b4a991230cab988c1ba7bcd7f299dc09b51cb519d41ae46",
+    "flowspec-cli/tests/test_custody.rs": "04dfe55a48a8896e02b33c16c93bf37b8d7be99128557908c4cd9bb1c742346d",
     "flowspec-cli/tests/trace_command.rs": "82bf441db46072bcedaa35c98e86375fd1d6f1e6ac621cf5ef8230be0729e5bb",
     "flowspec-cli/tests/type_consolidation.rs": "af1854640f25621578929dd66f1da6b866e941d7f9c1bae4bb3b3f74d4730ab2",
     "flowspec/src/analyzer/conversion.rs": "03e5e2278d189ff8582f7e6de2a3e068f58ce97a0fa1b3e53b96433a93f15f3f",
@@ -355,7 +355,7 @@
     "flowspec/src/pipeline_tests.rs": "777eff4da1f8f07b3c4ec1b0e31235d4b876951b288587063ae3bf84e6ca1fb8",
     "flowspec/src/test_utils.rs": "e9ea79d3401d05640768cf07bc84ff0e41ed7b2265856241c37920656cef597f",
     "flowspec/tests/cache_serialization.rs": "43ab5a163a41f2b5558ec66acac96d561c96c6c29e49449cde80c9a31362daf0",
-    "scripts/check-test-custody.py": "ec041b6aa8be327e0fd188c6d54fd10300a86ee727d7db5faf8115e0e7426d56",
+    "scripts/check-test-custody.py": "3b569d0530352610de09be22835b085bcb936445e7acba1e037a55f2d577c7a3",
     "scripts/flowspec-oracle.py": "73cf05ce5e1950888dc3577b26cfa6dae211020bc99732fbb4b59b8584fd549c",
     "scripts/validate-oracle-artifacts.py": "223d89188345a36a53f7286d1f34c191badee16f700caf750b98c708a10a56d0",
     "tests/fixtures/javascript/basic_functions.js": "190dfe180115a45bb03c447fa59965a405059016689389d43326c916bc30298c",
