@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,16 @@ from pathlib import Path
 # Supported test-bearing source extensions. Kept identical to the original
 # custody inventory so the baseline path set is stable.
 TEST_EXTENSIONS = (".rs", ".js", ".ts", ".tsx", ".jsx", ".py")
+POLICY_MAX_BYTES = 1_048_576
+POLICY_MAX_DEPTH = 64
+
+
+class PolicyLoadError(Exception):
+    """Stable fail-closed custody policy load failure."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 # Marker reason codes. Each is a stable identifier asserted by the custody
 # contract; the matching text lives inside raw-string regex literals so this
@@ -344,6 +355,131 @@ def _specs_for(ext: str):
     return [(reason, rx) for reason, spec_ext, rx in _MARKER_SPECS if spec_ext == ext]
 
 
+def _policy_path(root: Path, supplied: Path) -> Path:
+    if supplied.is_absolute():
+        return supplied
+    return root / supplied
+
+
+def _reject_parent_symlink_components(path: Path) -> None:
+    parts = path.parent.parts
+    if not parts:
+        return
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            raise PolicyLoadError("policy_not_found") from None
+        except OSError:
+            raise PolicyLoadError("policy_read_failed") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise PolicyLoadError("policy_symlink_component_rejected")
+
+
+def _reason_for_non_regular(mode: int) -> str:
+    if stat.S_ISFIFO(mode):
+        return "policy_non_regular_fifo"
+    if stat.S_ISSOCK(mode):
+        return "policy_non_regular_socket"
+    return "policy_non_regular"
+
+
+def _read_policy_bytes(path: Path) -> bytes:
+    _reject_parent_symlink_components(path)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        raise PolicyLoadError("policy_not_found") from None
+    except OSError:
+        raise PolicyLoadError("policy_read_failed") from None
+
+    mode = info.st_mode
+    if stat.S_ISLNK(mode):
+        raise PolicyLoadError("policy_symlink_rejected")
+    if not stat.S_ISREG(mode):
+        raise PolicyLoadError(_reason_for_non_regular(mode))
+    if info.st_size > POLICY_MAX_BYTES:
+        raise PolicyLoadError("policy_too_large")
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        opened_info = os.fstat(fd)
+        if not stat.S_ISREG(opened_info.st_mode):
+            raise PolicyLoadError("policy_read_failed")
+        data = os.read(fd, POLICY_MAX_BYTES + 1)
+    except PolicyLoadError:
+        raise
+    except OSError:
+        raise PolicyLoadError("policy_read_failed") from None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    if len(data) > POLICY_MAX_BYTES:
+        raise PolicyLoadError("policy_too_large")
+    return data
+
+
+def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict:
+    seen: set[str] = set()
+    obj = {}
+    for key, value in pairs:
+        if key in seen:
+            raise PolicyLoadError("policy_duplicate_field")
+        seen.add(key)
+        obj[key] = value
+    return obj
+
+
+def _reject_policy_too_deep(value: object) -> None:
+    if not isinstance(value, (dict, list)):
+        return
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > POLICY_MAX_DEPTH:
+            raise PolicyLoadError("policy_too_deep")
+        if isinstance(item, dict):
+            children = item.values()
+        else:
+            children = item
+        for child in children:
+            if isinstance(child, (dict, list)):
+                stack.append((child, depth + 1))
+
+
+def load_policy(root: Path, supplied: Path) -> dict:
+    raw = _read_policy_bytes(_policy_path(root, supplied))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise PolicyLoadError("policy_invalid_utf8") from None
+
+    try:
+        parsed = json.loads(text, object_pairs_hook=_object_without_duplicates)
+    except PolicyLoadError:
+        raise
+    except RecursionError:
+        raise PolicyLoadError("policy_too_deep") from None
+    except json.JSONDecodeError:
+        raise PolicyLoadError("policy_malformed_json") from None
+
+    if not isinstance(parsed, dict):
+        raise PolicyLoadError("policy_schema_type")
+    _reject_policy_too_deep(parsed)
+    return parsed
+
+
 def find_failures(root: Path, paths: list[str]) -> list[str]:
     """Return stable path:line: reason evidence for loss and marker failures."""
     failures: list[str] = []
@@ -499,6 +635,12 @@ def main() -> int:
     if args.policy is None:
         print("ERROR: policy_required", file=sys.stderr)
         return 2
+
+    try:
+        load_policy(root, args.policy)
+    except PolicyLoadError as error:
+        print(f"ERROR: {error.reason}", file=sys.stderr)
+        return 1
 
     if args.self_test:
         print("SELF_TEST: lexical fail-closed marker detection active", file=sys.stderr)
