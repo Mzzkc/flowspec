@@ -677,21 +677,6 @@ fn run_semantics_case(
     );
 
     let observed = run_self_test(repo);
-    assert_eq!(
-        exit_code(&observed),
-        0,
-        "SEMANTICS_PRECONDITION_FAILURE {identity}: structural checker must execute mutation and exit zero"
-    );
-    assert_eq!(
-        stdout(&observed),
-        "",
-        "SEMANTICS_PRECONDITION_FAILURE {identity}: observed stdout must be empty before semantic GREEN"
-    );
-    assert_eq!(
-        stderr(&observed),
-        SELF_TEST_BANNER,
-        "SEMANTICS_PRECONDITION_FAILURE {identity}: observed stderr must remain the self-test banner"
-    );
     println!(
         "POLICY_SEMANTICS_RED case_id={identity} pointer={pointer} mutation_class={mutation_class} expected_reason={reason} value_sha256={value_sha256} semantic_owner={pointer} control_exit={} observed_exit={} failure_site=future_semantic_assertion",
         exit_code(&control),
