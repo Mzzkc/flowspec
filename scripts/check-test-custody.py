@@ -44,9 +44,62 @@ POLICY_MAX_DEPTH = 64
 class PolicyLoadError(Exception):
     """Stable fail-closed custody policy load failure."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, pointer: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.pointer = pointer
+
+
+_POLICY_SCHEMA = {
+    "schema": "string",
+    "schema_version": "integer",
+    "policy_version": "string",
+    "deny_unknown_fields": "boolean",
+    "marker_scan": {
+        "tracked_regular_utf8_source": "boolean",
+        "path_exclusions_allowed": "boolean",
+        "extensions": ("array", "string"),
+    },
+    "whole_file_roots": ("array", "string"),
+    "whole_file_harness_paths": ("array", "string"),
+    "mixed_rust_roots": ("array", "string"),
+    "rust_region_rules": {
+        "cfg_test_predicate": "boolean",
+        "test_attributes": ("array", "string"),
+        "policy_test_attributes": ("array", "string"),
+        "external_modules_under_test_cfg": "boolean",
+        "executable_rustdoc_fences": "boolean",
+        "local_macro_invocations_inside_custodied_regions": "boolean",
+        "fail_on_unclassified_test_constructs": "boolean",
+    },
+    "rust_include_edges": {
+        "resolve_constant_literal_include_str": "boolean",
+        "resolve_constant_literal_include_bytes": "boolean",
+        "repository_contained_regular_files_only": "boolean",
+        "unresolved_include_is_error": "boolean",
+    },
+    "control_baseline": {
+        "path": "string",
+        "excluded_from_own_file_hash_map": "boolean",
+        "self_exclusion_reason": "string",
+    },
+    "cargo_inventory": {
+        "platform_contract": {
+            "os": "string",
+            "workspace": "boolean",
+            "all_features": "boolean",
+        },
+        "enumeration_commands": ("array", "string"),
+        "exact_identity_set_required": "boolean",
+        "target_qualified_identities": "boolean",
+    },
+}
+
+_POLICY_BINDINGS = (
+    ("/schema", "flowspec.test_custody_policy"),
+    ("/schema_version", 1),
+    ("/deny_unknown_fields", True),
+)
 
 # Marker reason codes. Each is a stable identifier asserted by the custody
 # contract; the matching text lives inside raw-string regex literals so this
@@ -458,6 +511,72 @@ def _reject_policy_too_deep(value: object) -> None:
                 stack.append((child, depth + 1))
 
 
+def _join_json_pointer(parent: str, token: str) -> str:
+    escaped = token.replace("~", "~0").replace("/", "~1")
+    return f"{parent}/{escaped}"
+
+
+def _matches_policy_type(value: object, schema: object) -> bool:
+    if isinstance(schema, dict):
+        return isinstance(value, dict)
+    if isinstance(schema, tuple):
+        return isinstance(value, list)
+    if schema == "string":
+        return isinstance(value, str)
+    if schema == "boolean":
+        return isinstance(value, bool)
+    if schema == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    raise AssertionError(f"unknown policy schema node: {schema!r}")
+
+
+def _validate_policy_structure(value: object, schema: object, pointer: str = "") -> None:
+    if isinstance(schema, dict):
+        assert isinstance(value, dict)
+        for key in value:
+            if key not in schema:
+                raise PolicyLoadError(
+                    "policy_unknown_field", _join_json_pointer(pointer, key)
+                )
+        for key in schema:
+            if key not in value:
+                raise PolicyLoadError(
+                    "policy_missing_required", _join_json_pointer(pointer, key)
+                )
+        for key, child_schema in schema.items():
+            if not _matches_policy_type(value[key], child_schema):
+                raise PolicyLoadError(
+                    "policy_invalid_type", _join_json_pointer(pointer, key)
+                )
+        for key, child_schema in schema.items():
+            if isinstance(child_schema, (dict, tuple)):
+                _validate_policy_structure(
+                    value[key], child_schema, _join_json_pointer(pointer, key)
+                )
+        return
+
+    if isinstance(schema, tuple):
+        assert isinstance(value, list)
+        item_schema = schema[1]
+        for index, item in enumerate(value):
+            item_pointer = _join_json_pointer(pointer, str(index))
+            if not _matches_policy_type(item, item_schema):
+                raise PolicyLoadError("policy_invalid_type", item_pointer)
+            if isinstance(item_schema, (dict, tuple)):
+                _validate_policy_structure(item, item_schema, item_pointer)
+        return
+
+    raise AssertionError(f"non-container policy schema node: {schema!r}")
+
+
+def _policy_pointer(value: object, pointer: str) -> object:
+    current = value
+    for token in pointer.split("/")[1:]:
+        assert isinstance(current, dict)
+        current = current[token.replace("~1", "/").replace("~0", "~")]
+    return current
+
+
 def load_policy(root: Path, supplied: Path) -> dict:
     raw = _read_policy_bytes(_policy_path(root, supplied))
     try:
@@ -477,6 +596,10 @@ def load_policy(root: Path, supplied: Path) -> dict:
     if not isinstance(parsed, dict):
         raise PolicyLoadError("policy_schema_type")
     _reject_policy_too_deep(parsed)
+    _validate_policy_structure(parsed, _POLICY_SCHEMA)
+    for pointer, expected in _POLICY_BINDINGS:
+        if _policy_pointer(parsed, pointer) != expected:
+            raise PolicyLoadError("policy_invalid_binding", pointer)
     return parsed
 
 
@@ -639,7 +762,8 @@ def main() -> int:
     try:
         load_policy(root, args.policy)
     except PolicyLoadError as error:
-        print(f"ERROR: {error.reason}", file=sys.stderr)
+        detail = f": {error.pointer}" if error.pointer is not None else ""
+        print(f"ERROR: {error.reason}{detail}", file=sys.stderr)
         return 1
 
     if args.self_test:
