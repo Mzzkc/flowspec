@@ -95,11 +95,176 @@ _POLICY_SCHEMA = {
     },
 }
 
-_POLICY_BINDINGS = (
-    ("/schema", "flowspec.test_custody_policy"),
-    ("/schema_version", 1),
-    ("/deny_unknown_fields", True),
+_POLICY_ARRAYS = (
+    (
+        "/marker_scan/extensions",
+        ("marker_scan", "extensions"),
+        (".rs", ".js", ".ts", ".tsx", ".jsx", ".py"),
+    ),
+    (
+        "/whole_file_roots",
+        ("whole_file_roots",),
+        ("tests/", "flowspec/tests/", "flowspec-cli/tests/"),
+    ),
+    (
+        "/whole_file_harness_paths",
+        ("whole_file_harness_paths",),
+        (
+            "scripts/check-test-custody.py",
+            "scripts/flowspec-oracle.py",
+            "scripts/validate-oracle-artifacts.py",
+        ),
+    ),
+    (
+        "/mixed_rust_roots",
+        ("mixed_rust_roots",),
+        ("flowspec/src/", "flowspec-cli/src/"),
+    ),
+    (
+        "/rust_region_rules/test_attributes",
+        ("rust_region_rules", "test_attributes"),
+        ("test",),
+    ),
+    (
+        "/rust_region_rules/policy_test_attributes",
+        ("rust_region_rules", "policy_test_attributes"),
+        (),
+    ),
+    (
+        "/cargo_inventory/enumeration_commands",
+        ("cargo_inventory", "enumeration_commands"),
+        (
+            "cargo test --workspace --all-features --no-run",
+            "cargo test --workspace --all-features -- --list",
+            "cargo test --workspace --all-features --doc -- --list",
+        ),
+    ),
 )
+
+_POLICY_PATH_ARRAYS = (
+    ("/whole_file_roots", ("whole_file_roots",), True),
+    ("/whole_file_harness_paths", ("whole_file_harness_paths",), False),
+    ("/mixed_rust_roots", ("mixed_rust_roots",), True),
+)
+
+_POLICY_PATH_SCALARS = (
+    ("/control_baseline/path", ("control_baseline", "path"), False),
+)
+
+_POLICY_UNSAFE_BOOLEAN_BINDINGS = (
+    (
+        "/marker_scan/tracked_regular_utf8_source",
+        ("marker_scan", "tracked_regular_utf8_source"),
+        True,
+    ),
+    (
+        "/marker_scan/path_exclusions_allowed",
+        ("marker_scan", "path_exclusions_allowed"),
+        False,
+    ),
+    (
+        "/rust_region_rules/cfg_test_predicate",
+        ("rust_region_rules", "cfg_test_predicate"),
+        True,
+    ),
+    (
+        "/rust_region_rules/external_modules_under_test_cfg",
+        ("rust_region_rules", "external_modules_under_test_cfg"),
+        True,
+    ),
+    (
+        "/rust_region_rules/executable_rustdoc_fences",
+        ("rust_region_rules", "executable_rustdoc_fences"),
+        True,
+    ),
+    (
+        "/rust_region_rules/local_macro_invocations_inside_custodied_regions",
+        (
+            "rust_region_rules",
+            "local_macro_invocations_inside_custodied_regions",
+        ),
+        True,
+    ),
+    (
+        "/rust_region_rules/fail_on_unclassified_test_constructs",
+        ("rust_region_rules", "fail_on_unclassified_test_constructs"),
+        True,
+    ),
+    (
+        "/rust_include_edges/resolve_constant_literal_include_str",
+        ("rust_include_edges", "resolve_constant_literal_include_str"),
+        True,
+    ),
+    (
+        "/rust_include_edges/resolve_constant_literal_include_bytes",
+        ("rust_include_edges", "resolve_constant_literal_include_bytes"),
+        True,
+    ),
+    (
+        "/rust_include_edges/repository_contained_regular_files_only",
+        ("rust_include_edges", "repository_contained_regular_files_only"),
+        True,
+    ),
+    (
+        "/rust_include_edges/unresolved_include_is_error",
+        ("rust_include_edges", "unresolved_include_is_error"),
+        True,
+    ),
+    (
+        "/cargo_inventory/platform_contract/workspace",
+        ("cargo_inventory", "platform_contract", "workspace"),
+        True,
+    ),
+    (
+        "/cargo_inventory/platform_contract/all_features",
+        ("cargo_inventory", "platform_contract", "all_features"),
+        True,
+    ),
+    (
+        "/cargo_inventory/exact_identity_set_required",
+        ("cargo_inventory", "exact_identity_set_required"),
+        True,
+    ),
+    (
+        "/cargo_inventory/target_qualified_identities",
+        ("cargo_inventory", "target_qualified_identities"),
+        True,
+    ),
+)
+
+_POLICY_VERSION = "phase-01-custody-closeout-red"
+
+_POLICY_BINDINGS = (
+    ("/schema", ("schema",), "flowspec.test_custody_policy"),
+    ("/schema_version", ("schema_version",), 1),
+    ("/deny_unknown_fields", ("deny_unknown_fields",), True),
+    (
+        "/control_baseline/path",
+        ("control_baseline", "path"),
+        "tests/test-custody-baseline.json",
+    ),
+    (
+        "/control_baseline/excluded_from_own_file_hash_map",
+        ("control_baseline", "excluded_from_own_file_hash_map"),
+        True,
+    ),
+    (
+        "/control_baseline/self_exclusion_reason",
+        ("control_baseline", "self_exclusion_reason"),
+        "baseline self hash has no fixed point",
+    ),
+    (
+        "/cargo_inventory/platform_contract/os",
+        ("cargo_inventory", "platform_contract", "os"),
+        "linux",
+    ),
+)
+
+_COMMAND_PREFIX = "cargo test --workspace --all-features"
+_COMMAND_FILTER_TOKENS = ("--ignored", "--skip", "--exact")
+_COMMAND_SHELL_METACHARACTERS = ";|&$()`<>"
+_UNICODE_PATH_SEPARATORS = "\u2044\u2215\u29f5\uff0f"
+_BIDI_PATH_CONTROLS = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 
 # Marker reason codes. Each is a stable identifier asserted by the custody
 # contract; the matching text lives inside raw-string regex literals so this
@@ -577,6 +742,134 @@ def _policy_pointer(value: object, pointer: str) -> object:
     return current
 
 
+def _semantic_value(policy: dict, keys: tuple[str, ...]) -> object:
+    current = policy
+    for key in keys:
+        current = current[key]
+    return current
+
+
+def _is_noncanonical_policy_path(value: str, directory: bool) -> bool:
+    if not value:
+        return True
+    if value[0] == "/" or "\\" in value or "//" in value:
+        return True
+    if len(value) >= 3 and value[1:3] == ":/" and (
+        "A" <= value[0] <= "Z" or "a" <= value[0] <= "z"
+    ):
+        return True
+    for character in value:
+        codepoint = ord(character)
+        if codepoint < 32 or codepoint == 127:
+            return True
+        if character in _UNICODE_PATH_SEPARATORS:
+            return True
+        if character in _BIDI_PATH_CONTROLS:
+            return True
+    if directory != (value[-1] == "/"):
+        return True
+    segment_start = 0
+    for index, character in enumerate(value):
+        if character != "/":
+            continue
+        segment = value[segment_start:index]
+        if segment == "." or segment == "..":
+            return True
+        segment_start = index + 1
+    final_segment = value[segment_start:]
+    return final_segment == "." or final_segment == ".."
+
+
+def _is_invalid_command_grammar(command: str) -> bool:
+    prefix_length = len(_COMMAND_PREFIX)
+    if len(command) <= prefix_length + 1:
+        return True
+    if command[:prefix_length] != _COMMAND_PREFIX:
+        return True
+    if command[prefix_length] != " " or command[-1] == " ":
+        return True
+    if "  " in command:
+        return True
+    for character in command:
+        if not 32 <= ord(character) <= 126:
+            return True
+        if character in _COMMAND_SHELL_METACHARACTERS:
+            return True
+    for token in _COMMAND_FILTER_TOKENS:
+        if token in command:
+            return True
+    return False
+
+
+def _validate_policy_semantics(policy: dict) -> None:
+    # Specific semantic classes precede generic exact-value binding.
+    for pointer, keys, directory in _POLICY_PATH_ARRAYS:
+        values = _semantic_value(policy, keys)
+        assert isinstance(values, list)
+        for index, value in enumerate(values):
+            assert isinstance(value, str)
+            if _is_noncanonical_policy_path(value, directory):
+                raise PolicyLoadError(
+                    "policy_noncanonical_path",
+                    pointer + "/" + str(index),
+                )
+    for pointer, keys, directory in _POLICY_PATH_SCALARS:
+        value = _semantic_value(policy, keys)
+        assert isinstance(value, str)
+        if _is_noncanonical_policy_path(value, directory):
+            raise PolicyLoadError("policy_noncanonical_path", pointer)
+
+    for pointer, keys, _expected in _POLICY_ARRAYS:
+        values = _semantic_value(policy, keys)
+        assert isinstance(values, list)
+        if len(values) != len(set(values)):
+            raise PolicyLoadError("policy_duplicate_item", pointer)
+
+    for pointer, keys, expected in _POLICY_ARRAYS:
+        values = _semantic_value(policy, keys)
+        assert isinstance(values, list)
+        if len(values) != len(expected):
+            raise PolicyLoadError("policy_invalid_cardinality", pointer)
+
+    commands_pointer = "/cargo_inventory/enumeration_commands"
+    commands = _semantic_value(policy, ("cargo_inventory", "enumeration_commands"))
+    assert isinstance(commands, list)
+    for index, command in enumerate(commands):
+        assert isinstance(command, str)
+        if _is_invalid_command_grammar(command):
+            raise PolicyLoadError(
+                "policy_invalid_command",
+                commands_pointer + "/" + str(index),
+            )
+
+    for pointer, keys, expected in _POLICY_ARRAYS:
+        values = _semantic_value(policy, keys)
+        assert isinstance(values, list)
+        if set(values) == set(expected) and tuple(values) != expected:
+            raise PolicyLoadError("policy_invalid_order", pointer)
+
+    for pointer, keys, expected in _POLICY_UNSAFE_BOOLEAN_BINDINGS:
+        if _semantic_value(policy, keys) != expected:
+            raise PolicyLoadError("policy_unsafe_value", pointer)
+
+    if _semantic_value(policy, ("policy_version",)) != _POLICY_VERSION:
+        raise PolicyLoadError("policy_unsupported_version", "/policy_version")
+
+    for pointer, keys, expected in _POLICY_ARRAYS:
+        values = _semantic_value(policy, keys)
+        assert isinstance(values, list)
+        for index, (value, expected_value) in enumerate(zip(values, expected)):
+            if value != expected_value:
+                raise PolicyLoadError(
+                    "policy_invalid_entry",
+                    pointer + "/" + str(index),
+                )
+
+    for pointer, keys, expected in _POLICY_BINDINGS:
+        if _semantic_value(policy, keys) != expected:
+            raise PolicyLoadError("policy_invalid_binding", pointer)
+
+
 def load_policy(root: Path, supplied: Path) -> dict:
     raw = _read_policy_bytes(_policy_path(root, supplied))
     try:
@@ -597,9 +890,7 @@ def load_policy(root: Path, supplied: Path) -> dict:
         raise PolicyLoadError("policy_schema_type")
     _reject_policy_too_deep(parsed)
     _validate_policy_structure(parsed, _POLICY_SCHEMA)
-    for pointer, expected in _POLICY_BINDINGS:
-        if _policy_pointer(parsed, pointer) != expected:
-            raise PolicyLoadError("policy_invalid_binding", pointer)
+    _validate_policy_semantics(parsed)
     return parsed
 
 
