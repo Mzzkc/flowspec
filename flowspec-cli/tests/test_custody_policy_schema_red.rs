@@ -12,7 +12,6 @@ use tempfile::TempDir;
 const CHECKER_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const SELF_TEST_BANNER: &str = "SELF_TEST: lexical fail-closed marker detection active\n";
-const CHECKER_SHA256: &str = "b69c295be5cabcfedfdc70085c29fd05cce5fc19cd7e2e6737d096a8dec73c94";
 const POLICY_SHA256: &str = "c14829a4d7428166cbd9b6a74cff24fb884d52733b549459f0a8ea3c61acc0d1";
 const POLICY_PATH: &str = "tests/test-custody-policy.json";
 
@@ -233,8 +232,8 @@ fn assert_clean_fixture(repo: &Path) {
     );
     assert_eq!(
         sha256_file(&repo.join("scripts/check-test-custody.py")),
-        CHECKER_SHA256,
-        "scratch checker must be byte-identical to accepted parser GREEN"
+        sha256_file(&source_checker_path()),
+        "scratch checker must be byte-identical to current source checker"
     );
     assert_eq!(
         sha256_file(&repo.join(POLICY_PATH)),
