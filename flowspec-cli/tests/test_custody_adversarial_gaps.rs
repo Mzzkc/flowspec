@@ -1,13 +1,12 @@
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -163,6 +162,163 @@ fn copy_policy_and_harness(repo: &Path) {
         "scripts/validate-oracle-artifacts.py",
         b"# dummy validator\n",
     );
+}
+
+fn setup_inventory_repo() -> TempDir {
+    let temp = init_repo();
+    let repo = temp.path();
+    copy_policy_and_harness(repo);
+    write_file(
+        repo,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"fixture\"]\nresolver = \"2\"\n",
+    );
+    write_file(repo, ".gitignore", "target/\n");
+    write_file(
+        repo,
+        "fixture/Cargo.toml",
+        "[package]\nname = \"custody-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write_file(
+        repo,
+        "fixture/src/lib.rs",
+        "pub fn product() -> bool { true }\n",
+    );
+    write_file(
+        repo,
+        "fixture/tests/inventory.rs",
+        "#[test]\nfn alpha() {}\n#[test]\nfn beta() {}\n",
+    );
+    write_file(
+        repo,
+        "flowspec/src/lib.rs",
+        "pub fn product() -> bool { true }\n#[cfg(test)]\nmod tests { #[test] fn region() { assert!(true); } }\n",
+    );
+    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(repo)
+        .output()
+        .expect("scratch Cargo lockfile generator must execute");
+    assert_success(&lock, "scratch Cargo.lock generation");
+    commit_all(repo, "committed custody inventory fixture");
+    temp
+}
+
+fn generated_v2_baseline(repo: &Path) -> Value {
+    let result = run_checker(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--generate-baseline",
+            "tests/test-custody-baseline.json",
+        ],
+    );
+    assert_success(
+        &result,
+        "complete scratch baseline generation with committed policy",
+    );
+    let baseline = read_json(&repo.join("tests/test-custody-baseline.json"));
+    assert_eq!(
+        baseline.get("schema_version").and_then(Value::as_u64),
+        Some(2),
+        "schema_version 2 required from clean committed source; generated baseline={baseline}"
+    );
+    assert_eq!(
+        baseline.get("source_sha").and_then(Value::as_str),
+        Some(git_text(repo, &["rev-parse", "HEAD"]).as_str()),
+        "scratch baseline must bind committed source"
+    );
+    let verified = run_checker(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--baseline",
+            "tests/test-custody-baseline.json",
+        ],
+    );
+    assert_success(&verified, "unmodified complete v2 baseline must verify");
+    baseline
+}
+
+fn assert_baseline_mutation(repo: &Path, original: &Value, changed: &Value, reason: &str) {
+    assert_ne!(
+        original, changed,
+        "schema mutation must change exactly one case"
+    );
+    let baseline_path = repo.join("tests/test-custody-baseline.json");
+    fs::write(&baseline_path, serde_json::to_vec_pretty(changed).unwrap()).unwrap();
+    let result = run_checker(
+        repo,
+        &[
+            "--policy",
+            "tests/test-custody-policy.json",
+            "--baseline",
+            "tests/test-custody-baseline.json",
+        ],
+    );
+    assert_failure_evidence(&result, "isolated complete-v2 mutation", &[reason]);
+    assert!(
+        !String::from_utf8_lossy(&result.stderr).contains("Traceback"),
+        "schema rejection must not traceback: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::write(&baseline_path, serde_json::to_vec_pretty(original).unwrap()).unwrap();
+}
+
+fn sorted_unique_strings(value: &Value, contract: &str) -> Vec<String> {
+    let rows: Vec<String> = value
+        .as_array()
+        .unwrap_or_else(|| panic!("{contract} must be an array"))
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .unwrap_or_else(|| panic!("{contract} row must be a string"))
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        rows.iter().cloned().collect::<BTreeSet<_>>().len(),
+        rows.len(),
+        "{contract} duplicate"
+    );
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "{contract} must be sorted"
+    );
+    rows
+}
+
+fn sha256_file(path: &Path) -> String {
+    let output = Command::new("sha256sum").arg(path).output().unwrap();
+    assert_success(&output, "sha256sum of identity manifest");
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn manifest_lines(path: &Path) -> Vec<String> {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(
+        bytes.last(),
+        Some(&b'\n'),
+        "identity manifest must be LF terminated"
+    );
+    let rows: Vec<String> = String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "manifest identities must be sorted and unique"
+    );
+    rows
 }
 
 // -----------------------------------------------------------------------------
@@ -436,151 +592,146 @@ fn g1_mixed_rust_changing_external_test_module_fails() {
 #[test]
 fn g2_exact_cargo_and_rustdoc_identities_inventory() {
     let policy = read_json(&policy_file_path());
-    let inventory_cfg = policy.get("cargo_inventory").expect("cargo inventory");
     assert_eq!(
-        inventory_cfg
-            .get("target_qualified_identities")
-            .and_then(Value::as_bool),
-        Some(true),
-        "cargo inventory policy must specify target-qualified identities"
+        policy.pointer("/cargo_inventory/target_qualified_identities"),
+        Some(&Value::Bool(true))
     );
+    let temp = setup_inventory_repo();
+    let baseline = generated_v2_baseline(temp.path());
+    let executable =
+        sorted_unique_strings(&baseline["executable_identities"], "executable identities");
+    assert_eq!(
+        executable,
+        vec![
+            "custody-fixture|test|inventory|alpha".to_owned(),
+            "custody-fixture|test|inventory|beta".to_owned(),
+        ],
+        "scratch inventory must use package, target kind, target name and exact executable identity"
+    );
+    let rustdoc = sorted_unique_strings(&baseline["rustdoc_identities"], "rustdoc identities");
+    assert!(
+        rustdoc.is_empty(),
+        "fixture has no Rustdoc tests; exact empty set must be explicit"
+    );
+    assert!(
+        baseline["rustdoc_inventory"].is_array(),
+        "Rustdoc inventory must remain separately represented"
+    );
+}
 
-    // Verify current repo baseline or generated inventory binding
-    let baseline_path = repo_root().join("tests/test-custody-baseline.json");
-    if baseline_path.exists() {
-        let baseline = read_json(&baseline_path);
-        if let Some(identities) = baseline
-            .get("executable_identities")
-            .and_then(Value::as_array)
-        {
-            assert!(
-                identities.len() >= 2369,
-                "executable identities count must be >= 2369 starting set, got {}",
-                identities.len()
-            );
-        }
-        assert!(
-            baseline.get("rustdoc_identities").is_some(),
-            "rustdoc_identities must be recorded separately and exactly (zero is valid set, never omitted)"
-        );
-    }
+#[test]
+fn g2_exact_historical_identity_delta_is_content_addressed() {
+    let evidence = repo_root()
+        .parent()
+        .expect("application workspace must have parent")
+        .join("flowspec-custody-gap-fixture-successor-20261002");
+    let format_path = evidence.join("format-identities.txt");
+    let original_path = evidence.join("original-red-identities.txt");
+    let correction_path = evidence.join("correction-identities.txt");
+    let format = manifest_lines(&format_path);
+    let original = manifest_lines(&original_path);
+    let correction = manifest_lines(&correction_path);
+    assert_eq!(format.len(), 2369);
+    assert_eq!(
+        sha256_file(&format_path),
+        "027c8925d13de53244f810c82cf94cd56d91345c3338f8709a0ecb8f7d3023ba"
+    );
+    assert_eq!(original.len(), 2385);
+    assert_eq!(
+        sha256_file(&original_path),
+        "77680ce5d116be5736652754487fe20ed89fc9c3bebe24c5c5f7162d7d832a38"
+    );
+    let starting: BTreeSet<_> = format.iter().collect();
+    let original_set: BTreeSet<_> = original.iter().collect();
+    assert!(
+        starting.is_subset(&original_set),
+        "FORMAT identities cannot be removed by original RED"
+    );
+    let original_additions: Vec<_> = original_set.difference(&starting).collect();
+    assert_eq!(
+        original_additions.len(),
+        16,
+        "original RED has exactly its independently replayed additions"
+    );
+    let corrected_set: BTreeSet<_> = correction.iter().collect();
+    assert!(
+        original_set.is_subset(&corrected_set),
+        "correction cannot remove inherited identities"
+    );
+    assert_eq!(
+        corrected_set.difference(&original_set).count(),
+        1,
+        "only the enumerated correction identity is added"
+    );
+    let temp = setup_inventory_repo();
+    let baseline = generated_v2_baseline(temp.path());
+    assert_eq!(
+        sorted_unique_strings(&baseline["executable_identities"], "scratch executable set").len(),
+        2
+    );
 }
 
 #[test]
 fn g2_exact_cargo_identities_rejects_removed_and_renamed() {
-    let temp = init_repo();
+    let temp = setup_inventory_repo();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(
-        repo,
-        "tests/test_main.rs",
-        "#[test]\nfn test_alpha() {}\n#[test]\nfn test_beta() {}\n",
+    let original = generated_v2_baseline(repo);
+    let identities =
+        sorted_unique_strings(&original["executable_identities"], "executable identities");
+    assert!(
+        identities.len() >= 2,
+        "remove and rename negatives need two real identities"
     );
-    commit_all(repo, "G2 setup");
-
-    let gen_out = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--generate-baseline",
-            "tests/test-custody-baseline.json",
-        ],
+    let mut removed = original.clone();
+    removed["executable_identities"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    assert_baseline_mutation(repo, &original, &removed, "executable_identity_mismatch");
+    let mut renamed = original.clone();
+    renamed["executable_identities"][0] =
+        Value::String("custody-fixture|test|inventory|renamed".to_owned());
+    assert_eq!(
+        renamed["executable_identities"].as_array().unwrap().len(),
+        identities.len()
     );
-    assert_success(&gen_out, "G2 baseline generation");
-
-    let baseline_file = repo.join("tests/test-custody-baseline.json");
-    if baseline_file.exists() {
-        let mut baseline: Value =
-            serde_json::from_str(&fs::read_to_string(&baseline_file).unwrap()).unwrap();
-
-        // Case 1: Renamed identity (same count)
-        if let Some(arr) = baseline
-            .get_mut("executable_identities")
-            .and_then(Value::as_array_mut)
-        {
-            if !arr.is_empty() {
-                arr[0] = Value::String("test_renamed_identity".into());
-            }
-        }
-        fs::write(
-            &baseline_file,
-            serde_json::to_string_pretty(&baseline).unwrap(),
-        )
-        .unwrap();
-
-        let ver_out = run_checker(
-            repo,
-            &[
-                "--policy",
-                "tests/test-custody-policy.json",
-                "--baseline",
-                "tests/test-custody-baseline.json",
-            ],
-        );
-        assert_failure_evidence(
-            &ver_out,
-            "G2 renamed identity must be rejected even when total count is unchanged",
-            &["ERROR: executable_identity_mismatch"],
-        );
-    } else {
-        // Against old checker, verify baseline fails with missing evidence
-        let ver_out = run_checker(
-            repo,
-            &[
-                "--policy",
-                "tests/test-custody-policy.json",
-                "--baseline",
-                "tests/test-custody-baseline.json",
-            ],
-        );
-        assert_failure_evidence(
-            &ver_out,
-            "G2 exact identity set verification",
-            &["ERROR: executable_identity_mismatch"],
-        );
-    }
+    assert_baseline_mutation(repo, &original, &renamed, "executable_identity_mismatch");
 }
 
 // -----------------------------------------------------------------------------
 // G3 — schema-v2 strictness
 // -----------------------------------------------------------------------------
 
-#[test]
-fn g3_schema_v2_unknown_top_level_and_nested_fields() {
-    let temp = init_repo();
+fn baseline_fixture() -> (TempDir, Value) {
+    let temp = setup_inventory_repo();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--generate-baseline",
-            "tests/test-custody-baseline.json",
-        ],
+    assert_eq!(
+        fs::read(repo.join("tests/test-custody-policy.json")).unwrap(),
+        fs::read(policy_file_path()).unwrap(),
+        "scratch baseline must use the exact committed policy"
     );
+    let baseline = generated_v2_baseline(repo);
+    assert_eq!(
+        read_json(&repo.join("tests/test-custody-policy.json"))["deny_unknown_fields"],
+        Value::Bool(true)
+    );
+    (temp, baseline)
+}
 
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let mut baseline: Value = if baseline_path.exists() {
-        serde_json::from_str(&fs::read_to_string(&baseline_path).unwrap())
-            .unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({"schema_version": 2})
-    };
+fn first_whole_file(baseline: &Value) -> String {
+    baseline["whole_files"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone()
+}
 
-    // Unknown top-level field
-    baseline["unknown_top_level_field"] = Value::Bool(true);
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let ver_out = run_checker(
+fn assert_raw_baseline_mutation(repo: &Path, original: &Value, text: &str, reason: &str) {
+    let path = repo.join("tests/test-custody-baseline.json");
+    fs::write(&path, text).unwrap();
+    let result = run_checker(
         repo,
         &[
             "--policy",
@@ -589,272 +740,373 @@ fn g3_schema_v2_unknown_top_level_and_nested_fields() {
             "tests/test-custody-baseline.json",
         ],
     );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 unknown top-level field must be rejected under deny_unknown_fields",
-        &["schema_unknown_field"],
-    );
+    assert_failure_evidence(&result, "raw duplicate-key baseline mutation", &[reason]);
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("Traceback"));
+    fs::write(path, serde_json::to_vec_pretty(original).unwrap()).unwrap();
+}
+
+#[test]
+fn g3_schema_v2_unknown_top_level_and_nested_fields() {
+    let (temp, original) = baseline_fixture();
+    let repo = temp.path();
+    let mut top = original.clone();
+    top["unknown_top_level_field"] = Value::Bool(true);
+    assert_baseline_mutation(repo, &original, &top, "schema_unknown_field");
+    let mut nested = original.clone();
+    nested["cargo_inventory"]["unknown_nested_field"] = Value::Bool(true);
+    assert_baseline_mutation(repo, &original, &nested, "schema_unknown_field");
 }
 
 #[test]
 fn g3_schema_v2_wrong_scalar_object_and_array_types() {
-    let temp = init_repo();
+    let (temp, original) = baseline_fixture();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--generate-baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let mut baseline: Value = serde_json::json!({
-        "schema": "flowspec.test_custody_baseline",
-        "schema_version": 2,
-        "source_sha": 12345, // wrong scalar type (integer instead of string)
-        "whole_files": "not_an_object", // wrong object type
-        "executable_identities": "not_an_array" // wrong array type
-    });
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let ver_out = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 wrong scalar, object, and array types must be rejected deterministically",
-        &["schema_invalid_type"],
-    );
+    for (field, bad) in [
+        ("source_sha", Value::from(12345)),
+        ("whole_files", Value::String("not an object".to_owned())),
+        (
+            "executable_identities",
+            Value::String("not an array".to_owned()),
+        ),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = bad;
+        assert_baseline_mutation(repo, &original, &changed, "schema_invalid_type");
+    }
+    let mut missing = original.clone();
+    missing.as_object_mut().unwrap().remove("source_sha");
+    assert_baseline_mutation(repo, &original, &missing, "baseline_missing_required_key");
 }
 
 #[test]
 fn g3_schema_v2_empty_inventory_maps_rejected() {
-    let temp = init_repo();
+    let (temp, original) = baseline_fixture();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let baseline: Value = serde_json::json!({
-        "schema": "flowspec.test_custody_baseline",
-        "schema_version": 2,
-        "source_sha": git_text(repo, &["rev-parse", "HEAD"]),
-        "whole_files": {}, // empty whole-file map when discovered universe is non-empty
-        "rust_regions": [],
-        "executable_identities": []
-    });
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let ver_out = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 empty whole-file map when universe non-empty must be rejected",
-        &["schema_empty_universe"],
-    );
+    assert!(!original["whole_files"].as_object().unwrap().is_empty());
+    assert!(!original["rust_regions"].as_array().unwrap().is_empty());
+    assert!(!original["executable_identities"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    for (field, empty) in [
+        ("whole_files", serde_json::json!({})),
+        ("rust_regions", serde_json::json!([])),
+        ("executable_identities", serde_json::json!([])),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = empty;
+        assert_baseline_mutation(repo, &original, &changed, "schema_empty_universe");
+    }
 }
 
 #[test]
 fn g3_schema_v2_invalid_sha256_length_case_and_alphabet() {
-    let temp = init_repo();
+    let (temp, original) = baseline_fixture();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let baseline: Value = serde_json::json!({
-        "schema": "flowspec.test_custody_baseline",
-        "schema_version": 2,
-        "source_sha": git_text(repo, &["rev-parse", "HEAD"]),
-        "whole_files": {
-            "tests/test_one.rs": "12345" // invalid sha256 length
-        }
-    });
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let ver_out = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 invalid sha256 length/case/alphabet must be rejected",
-        &["schema_invalid_sha256"],
-    );
+    let path = first_whole_file(&original);
+    for bad in ["12345".to_owned(), "A".repeat(64), "g".repeat(64)] {
+        let mut changed = original.clone();
+        changed["whole_files"][&path] = Value::String(bad);
+        assert_baseline_mutation(repo, &original, &changed, "schema_invalid_sha256");
+    }
 }
 
 #[test]
 fn g3_schema_v2_duplicate_paths_regions_and_executable_identities() {
-    let temp = init_repo();
+    let (temp, original) = baseline_fixture();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let baseline_str = r#"{
-  "schema": "flowspec.test_custody_baseline",
-  "schema_version": 2,
-  "source_sha": "a102deb681f0180985b4fdfb9cc544ed7d8db90e",
-  "executable_identities": [
-    "test_one",
-    "test_one"
-  ]
-}"#;
-    fs::write(&baseline_path, baseline_str).unwrap();
-
-    let ver_out = run_checker(
+    let path = first_whole_file(&original);
+    let digest = original["whole_files"][&path].as_str().unwrap();
+    let baseline_text = serde_json::to_string(&original).unwrap();
+    let key = format!("\"{path}\":\"{digest}\"");
+    assert_eq!(baseline_text.matches(&key).count(), 1);
+    let duplicate_key = format!("{key},{key}");
+    assert_raw_baseline_mutation(
         repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
+        &original,
+        &baseline_text.replacen(&key, &duplicate_key, 1),
+        "schema_duplicate_path",
     );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 duplicate executable identities must be rejected",
-        &["schema_duplicate_identity"],
+    let regions = original["rust_regions"].as_array().unwrap();
+    assert!(!regions.is_empty());
+    let mut duplicate_region = original.clone();
+    duplicate_region["rust_regions"]
+        .as_array_mut()
+        .unwrap()
+        .push(regions[0].clone());
+    assert_baseline_mutation(
+        repo,
+        &original,
+        &duplicate_region,
+        "schema_duplicate_region",
+    );
+    let identities = original["executable_identities"].as_array().unwrap();
+    assert!(!identities.is_empty());
+    let mut duplicate_identity = original.clone();
+    duplicate_identity["executable_identities"]
+        .as_array_mut()
+        .unwrap()
+        .push(identities[0].clone());
+    assert_baseline_mutation(
+        repo,
+        &original,
+        &duplicate_identity,
+        "schema_duplicate_identity",
     );
 }
 
 #[test]
 fn g3_schema_v2_phantom_missing_and_noncanonical_paths() {
-    let temp = init_repo();
+    let (temp, original) = baseline_fixture();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let baseline: Value = serde_json::json!({
-        "schema": "flowspec.test_custody_baseline",
-        "schema_version": 2,
-        "source_sha": git_text(repo, &["rev-parse", "HEAD"]),
-        "whole_files": {
-            "tests/nonexistent_phantom.rs": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
-    });
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let ver_out = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 phantom file entry must be rejected",
-        &["baseline_phantom_path"],
-    );
+    let path = first_whole_file(&original);
+    let digest = original["whole_files"][&path].clone();
+    let mut phantom = original.clone();
+    phantom["whole_files"]["tests/nonexistent_phantom.rs"] = digest.clone();
+    assert_baseline_mutation(repo, &original, &phantom, "baseline_phantom_path");
+    let mut missing = original.clone();
+    missing["whole_files"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&path);
+    assert_baseline_mutation(repo, &original, &missing, "baseline_missing_path");
+    let mut noncanonical = original.clone();
+    noncanonical["whole_files"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&path);
+    noncanonical["whole_files"][format!("tests/../{path}")] = digest;
+    assert_baseline_mutation(repo, &original, &noncanonical, "schema_noncanonical_path");
 }
 
 #[test]
 fn g3_schema_v2_malformed_legacy_policy_platform_command_bindings() {
-    let temp = init_repo();
+    let (temp, original) = baseline_fixture();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_one.rs", "#[test]\nfn test_one() {}\n");
-    commit_all(repo, "G3 setup");
-
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let baseline: Value = serde_json::json!({
-        "schema": "flowspec.test_custody_baseline",
-        "schema_version": 2,
-        "source_sha": git_text(repo, &["rev-parse", "HEAD"]),
-        "cargo_inventory": {
-            "platform_contract": {
-                "os": "windows" // wrong platform
-            }
-        }
-    });
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let ver_out = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-    assert_failure_evidence(
-        &ver_out,
-        "G3 malformed platform/command binding must be rejected",
-        &["schema_invalid_binding"],
-    );
+    let mut cases: Vec<(Value, &str)> = Vec::new();
+    let mut legacy = original.clone();
+    legacy["legacy"]["candidate_sha"] = Value::String("f".repeat(40));
+    cases.push((legacy, "schema_invalid_binding"));
+    let mut policy = original.clone();
+    policy["policy_sha256"] = Value::String("0".repeat(64));
+    cases.push((policy, "policy_hash_mismatch"));
+    let mut platform = original.clone();
+    platform["cargo_inventory"]["platform_contract"]["os"] = Value::String("windows".to_owned());
+    cases.push((platform, "schema_invalid_binding"));
+    let mut command = original.clone();
+    command["cargo_inventory"]["command"] =
+        Value::String("cargo test --workspace --all-features -- --ignored".to_owned());
+    cases.push((command, "schema_invalid_binding"));
+    let mut count = original.clone();
+    count["counts"]["whole_files"] =
+        Value::from(original["counts"]["whole_files"].as_u64().unwrap() + 1);
+    cases.push((count, "schema_count_mismatch"));
+    let path = first_whole_file(&original);
+    let mut digest = original.clone();
+    digest["whole_files"][&path] = Value::String("0".repeat(64));
+    cases.push((digest, "baseline_hash_mismatch"));
+    let mut schema = original.clone();
+    schema["schema_version"] = Value::from(1);
+    cases.push((schema, "schema_invalid_binding"));
+    for (changed, reason) in cases {
+        assert_baseline_mutation(repo, &original, &changed, reason);
+    }
 }
 
 // -----------------------------------------------------------------------------
 // G4 — filesystem loss and race closure
 // -----------------------------------------------------------------------------
 
+#[cfg(unix)]
+fn run_python_probe(repo: &Path, script: &str, target: &Path, timeout: Duration) -> Output {
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(checker_path())
+        .arg(repo)
+        .arg(target)
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("bounded checker probe must spawn");
+    let start = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .expect("probe status must be observable")
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .expect("probe output must be collected");
+        }
+        if start.elapsed() >= timeout {
+            child.kill().expect("timed-out probe must be killed");
+            child.wait().expect("timed-out probe must be reaped");
+            panic!(
+                "bounded checker probe timed out after {} ms",
+                timeout.as_millis()
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn g4_unix_domain_socket_and_race_closure() {
-    let temp = init_repo();
-    let repo = temp.path();
-    copy_policy_and_harness(repo);
-
     #[cfg(unix)]
     {
+        let temp = init_repo();
+        let repo = temp.path();
+        copy_policy_and_harness(repo);
+        write_file(repo, "tests/socket.rs", "// indexed regular source\n");
+        commit_all(repo, "tracked regular socket target");
         let socket_path = repo.join("tests/socket.rs");
-        let _listener = UnixListener::bind(&socket_path).expect("unix domain socket must bind");
-        git(repo, &["add", "tests/socket.rs"]);
+        fs::remove_file(&socket_path).unwrap();
+        let _listener =
+            UnixListener::bind(&socket_path).expect("Unix socket must bind at tracked path");
+        git(repo, &["ls-files", "--error-unmatch", "tests/socket.rs"]);
+        assert!(
+            fs::symlink_metadata(&socket_path)
+                .unwrap()
+                .file_type()
+                .is_socket(),
+            "the indexed target must now be a live Unix socket"
+        );
+        let out = run_checker_with_timeout(
+            repo,
+            &[
+                "--policy",
+                "tests/test-custody-policy.json",
+                "--check-markers",
+            ],
+            Duration::from_secs(5),
+        )
+        .expect("bounded socket checker must return");
+        assert_failure_evidence(
+            &out,
+            "G4 tracked Unix socket must reach source_non_regular classifier",
+            &["tests/socket.rs:0: source_non_regular"],
+        );
+    }
+}
 
-        let out = run_checker(
+#[test]
+fn g4_changed_during_read_race_witness() {
+    #[cfg(unix)]
+    {
+        let temp = init_repo();
+        let repo = temp.path();
+        copy_policy_and_harness(repo);
+        write_file(repo, "tests/race_target.rs", "// original content\n");
+        commit_all(repo, "tracked race target");
+        write_file(repo, "replacement.staged", "// changed! content\n");
+        assert_eq!(
+            fs::metadata(repo.join("tests/race_target.rs"))
+                .unwrap()
+                .len(),
+            fs::metadata(repo.join("replacement.staged")).unwrap().len(),
+            "race replacement must preserve byte length"
+        );
+        let script = r#"
+import importlib.util, os, sys
+checker, root, target = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('custody_probe', checker)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_read = os.read
+reached = False
+
+def read_and_replace(fd, count):
+    global reached
+    data = original_read(fd, count)
+    if not reached and os.path.realpath(f'/proc/self/fd/{fd}') == target:
+        os.replace(os.path.join(root, 'replacement.staged'), target)
+        reached = True
+    return data
+
+os.read = read_and_replace
+sys.argv = [checker, '--root', root, '--policy', 'tests/test-custody-policy.json', '--check-markers']
+result = module.main()
+if reached:
+    print('WITNESS_RACE_REPLACED_AFTER_OPEN', file=sys.stderr)
+sys.exit(result)
+"#;
+        let out = run_python_probe(
+            repo,
+            script,
+            &repo.join("tests/race_target.rs"),
+            Duration::from_secs(5),
+        );
+        assert_failure_evidence(
+            &out,
+            "G4 synchronized source_changed_during_read must be observed by real checker main",
+            &[
+                "tests/race_target.rs:0: source_changed_during_read",
+                "WITNESS_RACE_REPLACED_AFTER_OPEN",
+            ],
+        );
+    }
+}
+
+#[test]
+fn g4_post_open_regular_file_classifier_rejects_non_regular() {
+    #[cfg(unix)]
+    {
+        let device = Path::new("/dev/null");
+        assert!(device.exists(), "real character device witness must exist");
+        assert!(fs::metadata(device).unwrap().file_type().is_char_device());
+        let temp = init_repo();
+        let repo = temp.path();
+        copy_policy_and_harness(repo);
+        write_file(repo, "tests/dev_null.rs", "// indexed regular source\n");
+        commit_all(repo, "tracked descriptor target");
+        let script = r#"
+import errno, importlib.util, os, stat, sys
+checker, root, target = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('custody_probe', checker)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_open = os.open
+opened = []
+
+def open_device(path, flags, *args, **kwargs):
+    if os.fspath(path) == target:
+        fd = original_open('/dev/null', os.O_RDONLY)
+        assert stat.S_ISCHR(os.fstat(fd).st_mode)
+        opened.append(fd)
+        return fd
+    return original_open(path, flags, *args, **kwargs)
+
+os.open = open_device
+sys.argv = [checker, '--root', root, '--policy', 'tests/test-custody-policy.json', '--check-markers']
+result = module.main()
+if opened:
+    assert all(is_closed(fd) for fd in opened)
+    print('WITNESS_CHAR_DEVICE_OPENED_AND_FD_CLOSED', file=sys.stderr)
+sys.exit(result)
+"#.replace("assert all(is_closed(fd) for fd in opened)", "\n    for fd in opened:\n        try:\n            os.fstat(fd)\n        except OSError as error:\n            assert error.errno == errno.EBADF\n        else:\n            raise AssertionError('descriptor leaked')\n");
+        let out = run_python_probe(
+            repo,
+            &script,
+            &repo.join("tests/dev_null.rs"),
+            Duration::from_secs(5),
+        );
+        assert_failure_evidence(
+            &out,
+            "G4 real post-open nonregular descriptor must be rejected and closed",
+            &[
+                "tests/dev_null.rs:0: source_non_regular",
+                "WITNESS_CHAR_DEVICE_OPENED_AND_FD_CLOSED",
+            ],
+        );
+
+        let link = repo.join("tests/dev_null.rs");
+        fs::remove_file(&link).unwrap();
+        symlink(device, &link).expect("tracked final-component symlink must be created");
+        git(repo, &["ls-files", "--error-unmatch", "tests/dev_null.rs"]);
+        let symlink_out = run_checker(
             repo,
             &[
                 "--policy",
@@ -863,96 +1115,10 @@ fn g4_unix_domain_socket_and_race_closure() {
             ],
         );
         assert_failure_evidence(
-            &out,
-            "G4 Unix domain socket must fail closed with deterministic reason",
-            &["tests/socket.rs:0: source_non_regular"],
+            &symlink_out,
+            "G4 no-follow final symlink is a separate branch",
+            &["tests/dev_null.rs:0: source_final_symlink"],
         );
-    }
-}
-
-#[test]
-fn g4_changed_during_read_race_witness() {
-    let temp = init_repo();
-    let repo = temp.path();
-    copy_policy_and_harness(repo);
-
-    let race_file = repo.join("tests/race_target.rs");
-    fs::write(&race_file, "// initial\n").unwrap();
-    git(repo, &["add", "tests/race_target.rs"]);
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r_clone = running.clone();
-    let f_path = race_file.clone();
-
-    let writer = thread::spawn(move || {
-        let mut toggle = false;
-        while r_clone.load(Ordering::Relaxed) {
-            let data = if toggle {
-                "// small content\n"
-            } else {
-                "// much longer content line to change size during read operation\n"
-            };
-            toggle = !toggle;
-            let _ = fs::write(&f_path, data);
-            thread::sleep(Duration::from_micros(100));
-        }
-    });
-
-    let result = run_checker_with_timeout(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--check-markers",
-        ],
-        Duration::from_secs(3),
-    );
-    running.store(false, Ordering::Relaxed);
-    let _ = writer.join();
-
-    match result {
-        Ok(out) => {
-            assert_failure_evidence(
-                &out,
-                "G4 changed-during-read file must be observed and reported",
-                &["tests/race_target.rs:0: source_changed_during_read"],
-            );
-        }
-        Err(e) => {
-            panic!("G4 race witness execution error or timeout: {e}");
-        }
-    }
-}
-
-#[test]
-fn g4_post_open_regular_file_classifier_rejects_non_regular() {
-    // Test post-open regular file classifier on available non-regular descriptors
-    let dev_null = Path::new("/dev/null");
-    if dev_null.exists() {
-        let temp = init_repo();
-        let repo = temp.path();
-        copy_policy_and_harness(repo);
-
-        #[cfg(unix)]
-        {
-            let link_target = repo.join("tests/dev_null.rs");
-            let _ = symlink(dev_null, &link_target);
-            git(repo, &["add", "tests/dev_null.rs"]);
-
-            let out = run_checker(
-                repo,
-                &[
-                    "--policy",
-                    "tests/test-custody-policy.json",
-                    "--check-markers",
-                ],
-            );
-            assert_failure_evidence(
-                &out,
-                "G4 non-regular descriptor must be rejected by shared classifier",
-                &["tests/dev_null.rs:0: source_non_regular"],
-            );
-        }
     }
 }
 
@@ -1242,40 +1408,13 @@ t2 = """{m_pyskip}"""
 
 #[test]
 fn g7_policy_authority_hash_mismatch_unknown_field_and_ignored_policy() {
-    let temp = init_repo();
+    let temp = setup_inventory_repo();
     let repo = temp.path();
-    copy_policy_and_harness(repo);
-    write_file(repo, "tests/test_p.rs", "#[test]\nfn tp() {}\n");
-    commit_all(repo, "G7 setup");
+    let original = generated_v2_baseline(repo);
 
-    // Case 1: Policy hash mismatch in baseline
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
-    let baseline: Value = serde_json::json!({
-        "schema": "flowspec.test_custody_baseline",
-        "schema_version": 2,
-        "source_sha": git_text(repo, &["rev-parse", "HEAD"]),
-        "policy_sha256": "0000000000000000000000000000000000000000000000000000000000000000" // hash mismatch
-    });
-    fs::write(
-        &baseline_path,
-        serde_json::to_string_pretty(&baseline).unwrap(),
-    )
-    .unwrap();
-
-    let out1 = run_checker(
-        repo,
-        &[
-            "--policy",
-            "tests/test-custody-policy.json",
-            "--baseline",
-            "tests/test-custody-baseline.json",
-        ],
-    );
-    assert_failure_evidence(
-        &out1,
-        "G7 baseline policy hash mismatch must fail closed",
-        &["policy_hash_mismatch"],
-    );
+    let mut forged = original.clone();
+    forged["policy_sha256"] = Value::String("0".repeat(64));
+    assert_baseline_mutation(repo, &original, &forged, "policy_hash_mismatch");
 
     // Case 2: Unknown policy field in policy file
     let mut policy: Value = read_json(&policy_file_path());
@@ -1300,6 +1439,7 @@ fn g7_policy_authority_hash_mismatch_unknown_field_and_ignored_policy() {
         "G7 unknown field in policy file must fail closed under deny_unknown_fields",
         &["policy_unknown_field"],
     );
+    assert!(!String::from_utf8_lossy(&out2.stderr).contains("Traceback"));
 
     // Case 3: Ignored policy invocation (running baseline verification without passing --policy)
     let out3 = run_checker(repo, &["--baseline", "tests/test-custody-baseline.json"]);
@@ -1308,4 +1448,5 @@ fn g7_policy_authority_hash_mismatch_unknown_field_and_ignored_policy() {
         "G7 verification without passing --policy must fail closed",
         &["policy_required"],
     );
+    assert!(!String::from_utf8_lossy(&out3.stderr).contains("Traceback"));
 }
