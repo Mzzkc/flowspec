@@ -606,6 +606,17 @@ fn whole_roots_harness_policy_and_include_assets_are_discovered() {
         "flowspec-cli/tests/include_probe.rs",
         "const FIXTURE: &str = include_str!(\"../../tests/include-fixture.txt\");\n#[test]\nfn include_probe() { assert_eq!(FIXTURE.trim(), \"included fixture\"); }\n",
     );
+    for path in [
+        "scripts/check-test-custody.py",
+        "scripts/flowspec-oracle.py",
+        "scripts/validate-oracle-artifacts.py",
+    ] {
+        write_file(
+            repo,
+            path,
+            fs::read(repo_root().join(path)).expect("canonical harness must be readable"),
+        );
+    }
     commit_all(repo, "add non-code assets and include edge");
     assert_success(&generate_baseline(repo, &baseline), "baseline generation");
 
