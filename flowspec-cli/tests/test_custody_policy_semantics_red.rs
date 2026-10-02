@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -74,19 +74,45 @@ fn source_path(relative: &str) -> PathBuf {
     repo_root().join(relative)
 }
 
-fn finish_bounded(mut child: std::process::Child, timeout: Duration, context: &str) -> Output {
+fn finish_bounded(
+    mut child: std::process::Child,
+    mut stdout_file: std::fs::File,
+    mut stderr_file: std::fs::File,
+    timeout: Duration,
+    context: &str,
+) -> Output {
     let start = Instant::now();
     loop {
-        if child
-            .try_wait()
-            .unwrap_or_else(|error| {
-                panic!("SEMANTICS_PROCESS_FAILURE {context}: poll failed: {error}")
-            })
-            .is_some()
-        {
-            return child.wait_with_output().unwrap_or_else(|error| {
-                panic!("SEMANTICS_PROCESS_FAILURE {context}: collect failed: {error}")
-            });
+        if let Some(status) = child.try_wait().unwrap_or_else(|error| {
+            panic!("SEMANTICS_PROCESS_FAILURE {context}: poll failed: {error}")
+        }) {
+            stdout_file
+                .seek(SeekFrom::Start(0))
+                .unwrap_or_else(|error| {
+                    panic!("SEMANTICS_PROCESS_FAILURE {context}: stdout seek failed: {error}")
+                });
+            stderr_file
+                .seek(SeekFrom::Start(0))
+                .unwrap_or_else(|error| {
+                    panic!("SEMANTICS_PROCESS_FAILURE {context}: stderr seek failed: {error}")
+                });
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            stdout_file
+                .read_to_end(&mut stdout)
+                .unwrap_or_else(|error| {
+                    panic!("SEMANTICS_PROCESS_FAILURE {context}: stdout collect failed: {error}")
+                });
+            stderr_file
+                .read_to_end(&mut stderr)
+                .unwrap_or_else(|error| {
+                    panic!("SEMANTICS_PROCESS_FAILURE {context}: stderr collect failed: {error}")
+                });
+            return Output {
+                status,
+                stdout,
+                stderr,
+            };
         }
         if start.elapsed() > timeout {
             let _ = child.kill();
@@ -101,14 +127,24 @@ fn finish_bounded(mut child: std::process::Child, timeout: Duration, context: &s
 }
 
 fn run_bounded(mut command: Command, timeout: Duration, context: &str) -> Output {
+    let stdout_file = tempfile::tempfile().unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stdout tempfile failed: {error}")
+    });
+    let stderr_file = tempfile::tempfile().unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stderr tempfile failed: {error}")
+    });
     let child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout_file.try_clone().unwrap_or_else(
+            |error| panic!("SEMANTICS_PROCESS_FAILURE {context}: stdout clone failed: {error}"),
+        )))
+        .stderr(Stdio::from(stderr_file.try_clone().unwrap_or_else(
+            |error| panic!("SEMANTICS_PROCESS_FAILURE {context}: stderr clone failed: {error}"),
+        )))
         .spawn()
         .unwrap_or_else(|error| {
             panic!("SEMANTICS_PROCESS_FAILURE {context}: spawn failed: {error}")
         });
-    finish_bounded(child, timeout, context)
+    finish_bounded(child, stdout_file, stderr_file, timeout, context)
 }
 
 fn run_bounded_with_input(
@@ -117,23 +153,34 @@ fn run_bounded_with_input(
     timeout: Duration,
     context: &str,
 ) -> Output {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut input_file = tempfile::tempfile().unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stdin tempfile failed: {error}")
+    });
+    input_file.write_all(input).unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stdin write failed: {error}")
+    });
+    input_file.seek(SeekFrom::Start(0)).unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stdin seek failed: {error}")
+    });
+    let stdout_file = tempfile::tempfile().unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stdout tempfile failed: {error}")
+    });
+    let stderr_file = tempfile::tempfile().unwrap_or_else(|error| {
+        panic!("SEMANTICS_PROCESS_FAILURE {context}: stderr tempfile failed: {error}")
+    });
+    let child = command
+        .stdin(Stdio::from(input_file))
+        .stdout(Stdio::from(stdout_file.try_clone().unwrap_or_else(
+            |error| panic!("SEMANTICS_PROCESS_FAILURE {context}: stdout clone failed: {error}"),
+        )))
+        .stderr(Stdio::from(stderr_file.try_clone().unwrap_or_else(
+            |error| panic!("SEMANTICS_PROCESS_FAILURE {context}: stderr clone failed: {error}"),
+        )))
         .spawn()
         .unwrap_or_else(|error| {
             panic!("SEMANTICS_PROCESS_FAILURE {context}: spawn failed: {error}")
         });
-    child
-        .stdin
-        .take()
-        .expect("SEMANTICS_PROCESS_FAILURE piped stdin must exist")
-        .write_all(input)
-        .unwrap_or_else(|error| {
-            panic!("SEMANTICS_PROCESS_FAILURE {context}: stdin write failed: {error}")
-        });
-    finish_bounded(child, timeout, context)
+    finish_bounded(child, stdout_file, stderr_file, timeout, context)
 }
 
 fn stdout(output: &Output) -> String {
@@ -368,13 +415,17 @@ fn assert_baseline_bytes_bound_from(source: &Path, scratch: &Path) {
                 "BASELINE_BINDING_FAILURE v2 required string key missing: {key}"
             );
         }
-        for key in ["whole_files", "rust_regions"] {
+        for key in ["whole_files"] {
             assert!(
                 object.get(key).is_some_and(Value::is_object),
                 "BASELINE_BINDING_FAILURE v2 required object key missing: {key}"
             );
         }
-        for key in ["executable_identities", "rustdoc_identities"] {
+        for key in [
+            "rust_regions",
+            "executable_identities",
+            "rustdoc_identities",
+        ] {
             assert!(
                 object.get(key).is_some_and(Value::is_array),
                 "BASELINE_BINDING_FAILURE v2 required array key missing: {key}"
@@ -1661,7 +1712,7 @@ fn v2_binding_bytes() -> Vec<u8> {
         "policy_path": POLICY_PATH,
         "policy_sha256": POLICY_SHA256,
         "whole_files": {},
-        "rust_regions": {},
+        "rust_regions": [],
         "executable_identities": [],
         "rustdoc_identities": []
     }))
