@@ -13,6 +13,21 @@ use serde::{Deserialize, Serialize};
 /// empty (empty lists, not omitted) so consumers can rely on a stable schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Schema version for analyzed reports; absent on legacy empty payloads.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub schema_version: Option<u32>,
+    /// Whether the declared scope was completely analyzed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub execution: Option<Execution>,
+    /// Full finding presence before display filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub findings_present: Option<bool>,
+    /// Derived report state before display filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub outcome: Option<Outcome>,
+    /// Input accounting before display filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub completeness: Option<Completeness>,
     /// Project identity, analysis timestamp, version, counts.
     pub metadata: Metadata,
     /// Compressed structural overview (~2K token budget).
@@ -271,6 +286,11 @@ impl Manifest {
     /// Create an empty manifest with all sections present but unpopulated.
     pub fn empty() -> Self {
         Self {
+            schema_version: None,
+            execution: None,
+            findings_present: None,
+            outcome: None,
+            completeness: None,
             metadata: Metadata {
                 project: String::new(),
                 analyzed_at: String::new(),
@@ -308,6 +328,11 @@ impl Manifest {
     /// Create a sample fully populated manifest for testing.
     pub fn sample_full() -> Self {
         Self {
+            schema_version: None,
+            execution: None,
+            findings_present: None,
+            outcome: None,
+            completeness: None,
             metadata: Metadata {
                 project: "test-project".to_string(),
                 analyzed_at: "2026-03-10T12:00:00Z".to_string(),
@@ -561,5 +586,93 @@ mod tests {
         let _evidence_vec: &Vec<EvidenceEntry> = &entry.evidence;
         let _first: &EvidenceEntry = &entry.evidence[0];
         let _obs: &str = &_first.observation;
+    }
+}
+
+/// Why a selected source file could not contribute complete analysis.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RejectedFile {
+    /// Selected source path.
+    pub path: String,
+    /// Stable code: `read_error` or `parse_error`.
+    pub reason: String,
+}
+
+/// Counts and file-level loss for the declared analysis scope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Completeness {
+    /// Source files selected after policy and language filtering.
+    pub selected: u64,
+    /// Selected files read as valid UTF-8.
+    pub read: u64,
+    /// Selected files parsed without tree-sitter recovery or adapter failure.
+    pub parsed: u64,
+    /// Selected files that could not be read or parsed completely.
+    pub rejected: u64,
+    /// Deterministic per-file loss records.
+    pub rejected_files: Vec<RejectedFile>,
+}
+
+impl Completeness {
+    /// Record a selected file whose evidence was lost.
+    pub fn reject(&mut self, path: String, reason: &str) {
+        self.rejected += 1;
+        self.rejected_files.push(RejectedFile {
+            path,
+            reason: reason.to_string(),
+        });
+    }
+}
+
+/// Whether the declared scope was completely analyzed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Execution {
+    /// All selected inputs were analyzed completely.
+    Complete,
+    /// At least one selected input lost required evidence.
+    Incomplete,
+    /// A hard precondition or report construction failed.
+    Error,
+}
+
+/// Derived result of a report, independent of display filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// No contract-valid report was produced.
+    Error,
+    /// Analysis lost required evidence, possibly retaining valid findings.
+    Incomplete,
+    /// Complete analysis found one or more diagnostics.
+    Findings,
+    /// Complete analysis found no diagnostics.
+    Clean,
+}
+
+/// Public analyzed report; the manifest carries state in addition to its payload.
+pub type AnalysisReport = Manifest;
+
+impl Manifest {
+    /// Attach complete selected-input state to an analyzed manifest.
+    pub fn with_report(mut self, completeness: Completeness) -> Self {
+        let execution = if completeness.rejected > 0 {
+            Execution::Incomplete
+        } else {
+            Execution::Complete
+        };
+        let findings_present = !self.diagnostics.is_empty();
+        let outcome = match (execution, findings_present) {
+            (Execution::Error, _) => Outcome::Error,
+            (Execution::Incomplete, _) => Outcome::Incomplete,
+            (Execution::Complete, true) => Outcome::Findings,
+            (Execution::Complete, false) => Outcome::Clean,
+        };
+        self.schema_version = Some(2);
+        self.execution = Some(execution);
+        self.findings_present = Some(findings_present);
+        self.outcome = Some(outcome);
+        self.completeness = Some(completeness);
+        self
     }
 }
