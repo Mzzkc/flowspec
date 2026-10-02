@@ -11,7 +11,6 @@ use tempfile::TempDir;
 
 const CHECKER_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
-const SELF_TEST_BANNER: &str = "SELF_TEST: lexical fail-closed marker detection active\n";
 const POLICY_SHA256: &str = "c14829a4d7428166cbd9b6a74cff24fb884d52733b549459f0a8ea3c61acc0d1";
 const POLICY_PATH: &str = "tests/test-custody-policy.json";
 
@@ -249,7 +248,7 @@ fn assert_clean_fixture(repo: &Path) {
     }
 }
 
-fn run_self_test(repo: &Path) -> Output {
+fn run_check_markers(repo: &Path) -> Output {
     let mut command = Command::new("python3");
     command
         .current_dir(repo)
@@ -258,8 +257,8 @@ fn run_self_test(repo: &Path) -> Output {
         .arg(".")
         .arg("--policy")
         .arg(POLICY_PATH)
-        .arg("--self-test");
-    run_bounded(command, CHECKER_TIMEOUT, "custody checker self-test")
+        .arg("--check-markers");
+    run_bounded(command, CHECKER_TIMEOUT, "custody checker marker check")
 }
 
 fn assert_valid_control(identity: &str, output: &Output) {
@@ -277,8 +276,8 @@ fn assert_valid_control(identity: &str, output: &Output) {
     );
     assert_eq!(
         stderr(output),
-        SELF_TEST_BANNER,
-        "{identity}: valid policy control must print the exact self-test banner"
+        "",
+        "{identity}: valid policy marker control must keep stderr empty"
     );
 }
 
@@ -496,7 +495,7 @@ fn run_schema_case(identity: &str, pointer: &str, mutation: &str, reason: &str) 
         POLICY_SHA256,
         "{identity}: valid policy SHA must be proved before control"
     );
-    let control = run_self_test(repo);
+    let control = run_check_markers(repo);
     assert_valid_control(identity, &control);
 
     let before = policy_json(repo);
@@ -510,7 +509,7 @@ fn run_schema_case(identity: &str, pointer: &str, mutation: &str, reason: &str) 
         "{identity}: written mutated policy must parse back identically"
     );
 
-    let observed = run_self_test(repo);
+    let observed = run_check_markers(repo);
     println!(
         "POLICY_SCHEMA_RED case_id={identity} pointer={pointer} mutation={mutation} expected_reason={reason} control_exit={} observed_exit={}",
         exit_code(&control),
@@ -2168,3 +2167,85 @@ schema_case!(
     "bind_unknown_fields_false",
     "policy_invalid_binding"
 );
+
+// BEGIN ACTION CONTROLS
+#[test]
+fn action_valid_policy_succeeds_quietly() {
+    let temp = init_clean_repo();
+    let output = run_check_markers(temp.path());
+    assert_valid_control("action_valid_policy_succeeds_quietly", &output);
+}
+
+#[test]
+fn action_live_marker_rejected() {
+    let temp = init_clean_repo();
+    let repo = temp.path();
+    let marker = ["#[", "ignore]\n"].concat();
+    write_file(repo, "tests/live-marker.rs", marker);
+    commit_all(repo, "committed live Rust marker");
+    let output = run_check_markers(repo);
+    assert_eq!(exit_code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "tests/live-marker.rs:1: rust_ignore: #[ignore]\n"
+    );
+}
+
+#[test]
+fn action_schema_invalid_policy_precedes_marker() {
+    let temp = init_clean_repo();
+    let repo = temp.path();
+    let marker = ["#[", "ignore]\n"].concat();
+    write_file(repo, "tests/live-marker.rs", marker);
+    commit_all(repo, "committed live Rust marker");
+    let mut policy = policy_json(repo);
+    policy
+        .as_object_mut()
+        .expect("policy object")
+        .remove("schema");
+    write_policy_json(repo, &policy);
+    let output = run_check_markers(repo);
+    assert_future_schema_rejection(
+        "action_schema_invalid_policy_precedes_marker",
+        "/schema",
+        "policy_missing_required",
+        &output,
+    );
+}
+
+#[test]
+fn action_self_test_valid_policy_rejected() {
+    let temp = init_clean_repo();
+    let repo = temp.path();
+    let mut command = Command::new("python3");
+    command
+        .current_dir(repo)
+        .arg("scripts/check-test-custody.py")
+        .arg("--root")
+        .arg(".")
+        .arg("--policy")
+        .arg(POLICY_PATH)
+        .arg("--self-test");
+    let output = run_bounded(command, CHECKER_TIMEOUT, "valid-policy self-test rejection");
+    assert_ne!(exit_code(&output), 0, "valid-policy self-test must fail");
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "ERROR: self_test_noop_rejected\n");
+}
+
+#[test]
+fn action_self_test_without_policy_requires_policy() {
+    let temp = init_clean_repo();
+    let mut command = Command::new("python3");
+    command
+        .current_dir(temp.path())
+        .arg("scripts/check-test-custody.py")
+        .arg("--root")
+        .arg(".")
+        .arg("--self-test");
+    let output = run_bounded(command, CHECKER_TIMEOUT, "no-policy self-test rejection");
+    assert_eq!(exit_code(&output), 2);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "ERROR: policy_required\n");
+}
+// END ACTION CONTROLS

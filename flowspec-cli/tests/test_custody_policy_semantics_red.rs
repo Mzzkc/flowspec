@@ -12,7 +12,6 @@ use tempfile::TempDir;
 
 const CHECKER_TIMEOUT: Duration = Duration::from_secs(5);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
-const SELF_TEST_BANNER: &str = "SELF_TEST: lexical fail-closed marker detection active\n";
 const POLICY_PATH: &str = "tests/test-custody-policy.json";
 const POLICY_SHA256: &str = "c14829a4d7428166cbd9b6a74cff24fb884d52733b549459f0a8ea3c61acc0d1";
 const BASELINE_PATH: &str = "tests/test-custody-baseline.json";
@@ -480,7 +479,7 @@ fn init_clean_repo() -> TempDir {
     temp
 }
 
-fn run_self_test(repo: &Path) -> Output {
+fn run_check_markers(repo: &Path) -> Output {
     let mut command = Command::new("python3");
     command
         .current_dir(repo)
@@ -489,15 +488,15 @@ fn run_self_test(repo: &Path) -> Output {
         .arg(".")
         .arg("--policy")
         .arg(POLICY_PATH)
-        .arg("--self-test");
-    run_bounded(command, CHECKER_TIMEOUT, "custody checker --self-test")
+        .arg("--check-markers");
+    run_bounded(command, CHECKER_TIMEOUT, "custody checker --check-markers")
 }
 
 fn assert_valid_control(identity: &str, output: &Output) {
     assert_eq!(
         exit_code(output),
         0,
-        "SEMANTICS_PRECONDITION_FAILURE {identity}: valid --self-test control must exit 0; stdout={} stderr={}",
+        "SEMANTICS_PRECONDITION_FAILURE {identity}: valid --check-markers control must exit 0; stdout={} stderr={}",
         stdout(output),
         stderr(output)
     );
@@ -508,7 +507,7 @@ fn assert_valid_control(identity: &str, output: &Output) {
     );
     assert_eq!(
         stderr(output),
-        SELF_TEST_BANNER,
+        "",
         "SEMANTICS_PRECONDITION_FAILURE {identity}: valid control stderr must be exact"
     );
 }
@@ -777,7 +776,7 @@ fn run_semantics_case(
 ) {
     let temp = init_clean_repo();
     let repo = temp.path();
-    let control = run_self_test(repo);
+    let control = run_check_markers(repo);
     assert_valid_control(identity, &control);
 
     let record = apply_and_prove_mutation(
@@ -793,7 +792,7 @@ fn run_semantics_case(
         "SEMANTICS_MUTATION_FAILURE {identity}: semantic owner changed"
     );
 
-    let observed = run_self_test(repo);
+    let observed = run_check_markers(repo);
     println!(
         "POLICY_SEMANTICS_RED case_id={identity} pointer={pointer} mutation_class={mutation_class} expected_reason={reason} value_sha256={value_sha256} semantic_owner={pointer} control_exit={} observed_exit={} failure_site=future_semantic_assertion",
         exit_code(&control),
@@ -811,7 +810,7 @@ fn canonical_policy_v1() {
         POLICY_SHA256,
         "SEMANTICS_PRECONDITION_FAILURE canonical policy digest changed"
     );
-    let control = run_self_test(repo);
+    let control = run_check_markers(repo);
     assert_valid_control("canonical_policy_v1", &control);
 }
 
@@ -1802,3 +1801,91 @@ fn baseline_binding_v2_missing_source_sha_rejected() {
     assert_binding_rejected(source.path(), scratch.path(), "v2 source_sha missing");
 }
 // END BASELINE SOURCE-BINDING CONTROLS
+
+// BEGIN ACTION CONTROLS
+#[test]
+fn action_valid_policy_succeeds_quietly() {
+    let temp = init_clean_repo();
+    let output = run_check_markers(temp.path());
+    assert_valid_control("action_valid_policy_succeeds_quietly", &output);
+}
+
+#[test]
+fn action_live_marker_rejected() {
+    let temp = init_clean_repo();
+    let repo = temp.path();
+    let marker = ["#[", "ignore]\n"].concat();
+    write_file(
+        repo,
+        "flowspec/tests/policy_semantics_fixture_sentinel.rs",
+        marker,
+    );
+    git(repo, &["add", "--all"]);
+    git(repo, &["commit", "-m", "committed live Rust marker"]);
+    let output = run_check_markers(repo);
+    assert_eq!(exit_code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        "flowspec/tests/policy_semantics_fixture_sentinel.rs:1: rust_ignore: #[ignore]\n"
+    );
+}
+
+#[test]
+fn action_semantic_invalid_policy_precedes_marker() {
+    let temp = init_clean_repo();
+    let repo = temp.path();
+    let marker = ["#[", "ignore]\n"].concat();
+    write_file(
+        repo,
+        "flowspec/tests/policy_semantics_fixture_sentinel.rs",
+        marker,
+    );
+    git(repo, &["add", "--all"]);
+    git(repo, &["commit", "-m", "committed live Rust marker"]);
+    let mut policy = policy_json(repo);
+    policy["marker_scan"]["tracked_regular_utf8_source"] = json!(false);
+    write_file(repo, POLICY_PATH, pretty_policy_bytes(&policy));
+    let output = run_check_markers(repo);
+    assert_future_semantic_rejection(
+        "/marker_scan/tracked_regular_utf8_source",
+        "policy_unsafe_value",
+        &output,
+    );
+}
+
+#[test]
+fn action_self_test_valid_policy_rejected() {
+    let temp = init_clean_repo();
+    let repo = temp.path();
+    let mut command = Command::new("python3");
+    command
+        .current_dir(repo)
+        .arg(CHECKER_PATH)
+        .arg("--root")
+        .arg(".")
+        .arg("--policy")
+        .arg(POLICY_PATH)
+        .arg("--self-test");
+    let output = run_bounded(command, CHECKER_TIMEOUT, "valid-policy self-test rejection");
+    assert_ne!(exit_code(&output), 0, "valid-policy self-test must fail");
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "ERROR: self_test_noop_rejected\n");
+}
+
+#[test]
+fn action_self_test_without_policy_requires_policy() {
+    let temp = init_clean_repo();
+    let mut command = Command::new("python3");
+    command
+        .current_dir(temp.path())
+        .arg(CHECKER_PATH)
+        .arg("--root")
+        .arg(".")
+        .arg("--self-test");
+    let output = run_bounded(command, CHECKER_TIMEOUT, "no-policy self-test rejection");
+    assert_eq!(exit_code(&output), 2);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "ERROR: policy_required\n");
+}
+// END ACTION CONTROLS
