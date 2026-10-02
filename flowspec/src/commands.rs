@@ -111,16 +111,71 @@ pub fn run_analyze(
         &mut result.manifest.summary.diagnostic_summary,
     );
 
-    let output = format_with(format, |f| f.format_manifest(&result.manifest))?;
+    let output = match format {
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(&result.manifest).map_err(|e| FlowspecError::Manifest {
+                reason: e.to_string(),
+            })?
+        }
+        OutputFormat::Yaml => {
+            serde_yaml::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
+                reason: e.to_string(),
+            })?
+        }
+        OutputFormat::Summary => {
+            let completeness = result
+                .manifest
+                .completeness
+                .as_ref()
+                .expect("analyzed report");
+            let mut state = format!(
+                "schema_version: {}\nexecution: {}\nfindings_present: {}\noutcome: {}\nselected: {}\nread: {}\nparsed: {}\nrejected: {}\n",
+                result.manifest.schema_version.expect("analyzed report"),
+                execution_name(result.manifest.execution.expect("analyzed report")),
+                result.manifest.findings_present.expect("analyzed report"),
+                outcome_name(result.manifest.outcome.expect("analyzed report")),
+                completeness.selected,
+                completeness.read,
+                completeness.parsed,
+                completeness.rejected,
+            );
+            for file in &completeness.rejected_files {
+                state.push_str(&format!("{}: {}\n", file.path, file.reason));
+            }
+            state.push('\n');
+            state.push_str(&SummaryFormatter::new().format_manifest(&result.manifest)?);
+            state
+        }
+        OutputFormat::Sarif => format_with(format, |f| f.format_manifest(&result.manifest))?,
+    };
 
     validate_manifest_size(&output, result.source_bytes, format_name(format))?;
 
     write_output(&output, output_path)?;
 
-    if has_critical {
+    if result.manifest.execution == Some(crate::Execution::Incomplete) {
+        Ok(3)
+    } else if has_critical {
         Ok(2)
     } else {
         Ok(0)
+    }
+}
+
+fn execution_name(execution: crate::Execution) -> &'static str {
+    match execution {
+        crate::Execution::Complete => "complete",
+        crate::Execution::Incomplete => "incomplete",
+        crate::Execution::Error => "error",
+    }
+}
+
+fn outcome_name(outcome: crate::Outcome) -> &'static str {
+    match outcome {
+        crate::Outcome::Clean => "clean",
+        crate::Outcome::Findings => "findings",
+        crate::Outcome::Incomplete => "incomplete",
+        crate::Outcome::Error => "error",
     }
 }
 

@@ -36,6 +36,47 @@ pub const MAX_AST_DEPTH: usize = 256;
 use crate::error::FlowspecError;
 use ir::ParseResult;
 
+/// Return true if any tree-sitter ERROR or missing recovery node exists.
+pub(crate) fn has_parse_loss(root: tree_sitter::Node<'_>) -> bool {
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.is_error() || node.is_missing() {
+            return true;
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+    }
+    false
+}
+
+/// Check recovery in the grammar consumed by the current adapter.
+/// This preserves the adapter IR API while report construction records loss.
+pub(crate) fn source_has_parse_loss(path: &Path, content: &str) -> bool {
+    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+        return true;
+    };
+    let (language, source) = match extension {
+        "py" => (tree_sitter_python::LANGUAGE.into(), content.to_string()),
+        "rs" => (tree_sitter_rust::LANGUAGE.into(), content.to_string()),
+        "ts" | "tsx" => (
+            tree_sitter_javascript::LANGUAGE.into(),
+            javascript::preprocess_typescript(content),
+        ),
+        "js" | "jsx" | "mjs" | "cjs" => {
+            (tree_sitter_javascript::LANGUAGE.into(), content.to_string())
+        }
+        _ => return true,
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&language).is_err() {
+        return true;
+    }
+    match parser.parse(&source, None) {
+        Some(tree) => has_parse_loss(tree.root_node()),
+        None => true,
+    }
+}
+
 /// Trait implemented by each language adapter.
 ///
 /// Language adapters translate tree-sitter AST into flowspec IR. This is one of
