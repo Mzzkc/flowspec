@@ -10708,7 +10708,7 @@
   "rustdoc_inventory": [],
   "schema": "flowspec.test_custody_baseline",
   "schema_version": 2,
-  "source_sha": "c4b84d94eb2d1e75b069ec3807f5febc6dcb723d",
+  "source_sha": "2588c196a66b6ebc6744f83d07fca15bdedfe6da",
   "tracked_test_paths": [
     "flowspec-cli/src/main.rs",
     "flowspec-cli/tests/cli_parsing.rs",
@@ -11005,7 +11005,7 @@
     "flowspec-cli/tests/test_custody_cli_authority_red.rs": "873dfa93eba23eae902d90f49ba2a0f2cb3da8805779f6b24ebeac242da65164",
     "flowspec-cli/tests/test_custody_policy_ingestion_red.rs": "c3458433fc616e238d28a975de272c4f946263b2979ea23a3877a818c2275941",
     "flowspec-cli/tests/test_custody_policy_schema_red.rs": "2ab7d96d68060bd766324d06860f2d95cfed3c4f4901b219ddea71824a42b647",
-    "flowspec-cli/tests/test_custody_policy_semantics_red.rs": "2d17c85e052d82491db0687e208c983fc463a1d8f37cce32fb2b36ddf5a36cf2",
+    "flowspec-cli/tests/test_custody_policy_semantics_red.rs": "c43eeff827be8037f9fb57758c0607e5cf4fd415be99f25c4d4e0497a24c63bb",
     "flowspec-cli/tests/trace_command.rs": "82bf441db46072bcedaa35c98e86375fd1d6f1e6ac621cf5ef8230be0729e5bb",
     "flowspec-cli/tests/type_consolidation.rs": "af1854640f25621578929dd66f1da6b866e941d7f9c1bae4bb3b3f74d4730ab2",
     "flowspec/src/cycle10_js_cross_file_tests.rs": "03c028d3682f61dc8d53adda4fc22d7c9aca9a8ebcbb277b2c3b149e9d39db8f",
