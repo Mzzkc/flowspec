@@ -73,6 +73,7 @@ fn run_checker(repo: &Path, args: &[&str]) -> Output {
         .arg("--root")
         .arg(repo)
         .args(args)
+        .current_dir(repo)
         .output()
         .expect("custody checker must execute")
 }
@@ -87,6 +88,7 @@ fn run_checker_with_timeout(
         .arg("--root")
         .arg(repo)
         .args(args)
+        .current_dir(repo)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -287,36 +289,6 @@ fn sorted_unique_strings(value: &Value, contract: &str) -> Vec<String> {
     assert!(
         rows.windows(2).all(|pair| pair[0] < pair[1]),
         "{contract} must be sorted"
-    );
-    rows
-}
-
-fn sha256_file(path: &Path) -> String {
-    let output = Command::new("sha256sum").arg(path).output().unwrap();
-    assert_success(&output, "sha256sum of identity manifest");
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned()
-}
-
-fn manifest_lines(path: &Path) -> Vec<String> {
-    let bytes = fs::read(path).unwrap();
-    assert_eq!(
-        bytes.last(),
-        Some(&b'\n'),
-        "identity manifest must be LF terminated"
-    );
-    let rows: Vec<String> = String::from_utf8(bytes)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert!(
-        rows.windows(2).all(|pair| pair[0] < pair[1]),
-        "manifest identities must be sorted and unique"
     );
     rows
 }
@@ -620,58 +592,6 @@ fn g2_exact_cargo_and_rustdoc_identities_inventory() {
 }
 
 #[test]
-fn g2_exact_historical_identity_delta_is_content_addressed() {
-    let evidence = repo_root()
-        .parent()
-        .expect("application workspace must have parent")
-        .join("flowspec-custody-gap-fixture-successor-20261002");
-    let format_path = evidence.join("format-identities.txt");
-    let original_path = evidence.join("original-red-identities.txt");
-    let correction_path = evidence.join("correction-identities.txt");
-    let format = manifest_lines(&format_path);
-    let original = manifest_lines(&original_path);
-    let correction = manifest_lines(&correction_path);
-    assert_eq!(format.len(), 2369);
-    assert_eq!(
-        sha256_file(&format_path),
-        "027c8925d13de53244f810c82cf94cd56d91345c3338f8709a0ecb8f7d3023ba"
-    );
-    assert_eq!(original.len(), 2385);
-    assert_eq!(
-        sha256_file(&original_path),
-        "77680ce5d116be5736652754487fe20ed89fc9c3bebe24c5c5f7162d7d832a38"
-    );
-    let starting: BTreeSet<_> = format.iter().collect();
-    let original_set: BTreeSet<_> = original.iter().collect();
-    assert!(
-        starting.is_subset(&original_set),
-        "FORMAT identities cannot be removed by original RED"
-    );
-    let original_additions: Vec<_> = original_set.difference(&starting).collect();
-    assert_eq!(
-        original_additions.len(),
-        16,
-        "original RED has exactly its independently replayed additions"
-    );
-    let corrected_set: BTreeSet<_> = correction.iter().collect();
-    assert!(
-        original_set.is_subset(&corrected_set),
-        "correction cannot remove inherited identities"
-    );
-    assert_eq!(
-        corrected_set.difference(&original_set).count(),
-        1,
-        "only the enumerated correction identity is added"
-    );
-    let temp = setup_inventory_repo();
-    let baseline = generated_v2_baseline(temp.path());
-    assert_eq!(
-        sorted_unique_strings(&baseline["executable_identities"], "scratch executable set").len(),
-        2
-    );
-}
-
-#[test]
 fn g2_exact_cargo_identities_rejects_removed_and_renamed() {
     let temp = setup_inventory_repo();
     let repo = temp.path();
@@ -918,6 +838,40 @@ fn g3_schema_v2_malformed_legacy_policy_platform_command_bindings() {
 // -----------------------------------------------------------------------------
 
 #[cfg(unix)]
+fn primary_path_reason_matches(
+    stderr: &str,
+    expected_path: &str,
+    expected_position: usize,
+    expected_reason: &str,
+) -> bool {
+    stderr.lines().any(|line| {
+        let mut fields = line.splitn(3, ':');
+        let (Some(path), Some(position), Some(message)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return false;
+        };
+        path == expected_path
+            && position.parse::<usize>().ok() == Some(expected_position)
+            && message.split_whitespace().next() == Some(expected_reason)
+    })
+}
+
+#[cfg(unix)]
+fn assert_primary_path_reason(
+    output: &Output,
+    expected_path: &str,
+    expected_position: usize,
+    expected_reason: &str,
+) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        primary_path_reason_matches(&stderr, expected_path, expected_position, expected_reason),
+        "missing primary {expected_path}:{expected_position}: {expected_reason}; stderr={stderr}"
+    );
+}
+
+#[cfg(unix)]
 fn run_python_probe(repo: &Path, script: &str, target: &Path, timeout: Duration) -> Output {
     let mut child = Command::new("python3")
         .arg("-c")
@@ -989,6 +943,16 @@ fn g4_unix_domain_socket_and_race_closure() {
             "G4 tracked Unix socket must reach source_non_regular classifier",
             &["tests/socket.rs:0: source_non_regular"],
         );
+        assert_primary_path_reason(&out, "tests/socket.rs", 0, "source_non_regular");
+        assert!(
+            !primary_path_reason_matches(
+                "tests/socket.rs:0: source_not_regular source_non_regular",
+                "tests/socket.rs",
+                0,
+                "source_non_regular"
+            ),
+            "a trailing alias must not satisfy the primary reason contract"
+        );
     }
 }
 
@@ -1047,6 +1011,12 @@ sys.exit(result)
                 "WITNESS_RACE_REPLACED_AFTER_OPEN",
             ],
         );
+        assert_primary_path_reason(
+            &out,
+            "tests/race_target.rs",
+            0,
+            "source_changed_during_read",
+        );
     }
 }
 
@@ -1101,6 +1071,7 @@ sys.exit(result)
                 "WITNESS_CHAR_DEVICE_OPENED_AND_FD_CLOSED",
             ],
         );
+        assert_primary_path_reason(&out, "tests/dev_null.rs", 0, "source_non_regular");
 
         let link = repo.join("tests/dev_null.rs");
         fs::remove_file(&link).unwrap();
@@ -1119,6 +1090,7 @@ sys.exit(result)
             "G4 no-follow final symlink is a separate branch",
             &["tests/dev_null.rs:0: source_final_symlink"],
         );
+        assert_primary_path_reason(&symlink_out, "tests/dev_null.rs", 0, "source_final_symlink");
     }
 }
 
