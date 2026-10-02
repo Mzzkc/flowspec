@@ -16,7 +16,8 @@ const SELF_TEST_BANNER: &str = "SELF_TEST: lexical fail-closed marker detection 
 const POLICY_PATH: &str = "tests/test-custody-policy.json";
 const POLICY_SHA256: &str = "c14829a4d7428166cbd9b6a74cff24fb884d52733b549459f0a8ea3c61acc0d1";
 const BASELINE_PATH: &str = "tests/test-custody-baseline.json";
-const BASELINE_SHA256: &str = "c579c2a68b65be17b2ae3356b3936fe98cdd974016d5f99dfc8003b04391abfe";
+const LEGACY_BASELINE_SHA256: &str =
+    "c579c2a68b65be17b2ae3356b3936fe98cdd974016d5f99dfc8003b04391abfe";
 const CHECKER_PATH: &str = "scripts/check-test-custody.py";
 const HARNESS_PATHS: &[&str] = &[
     "scripts/check-test-custody.py",
@@ -269,6 +270,126 @@ fn assert_policy_inventory(repo: &Path) {
     );
 }
 
+// BEGIN BASELINE SOURCE-BINDING HELPER
+fn baseline_blob(repo: &Path) -> Vec<u8> {
+    let entry = git(repo, &["ls-tree", "HEAD", "--", BASELINE_PATH]);
+    let listing = String::from_utf8(entry.stdout)
+        .expect("BASELINE_BINDING_FAILURE Git tree entry must be UTF-8");
+    let (metadata, path) = listing
+        .trim_end_matches('\n')
+        .split_once('\t')
+        .expect("BASELINE_BINDING_FAILURE baseline Git tree entry missing");
+    let fields = metadata.split_whitespace().collect::<Vec<_>>();
+    assert!(
+        path == BASELINE_PATH
+            && fields.len() == 3
+            && matches!(fields[0], "100644" | "100755")
+            && fields[1] == "blob",
+        "BASELINE_BINDING_FAILURE baseline must be a regular committed Git blob"
+    );
+    git(repo, &["show", &format!("HEAD:{BASELINE_PATH}")]).stdout
+}
+
+fn regular_baseline_bytes(repo: &Path) -> Vec<u8> {
+    let path = repo.join(BASELINE_PATH);
+    let metadata = fs::symlink_metadata(&path).unwrap_or_else(|error| {
+        panic!(
+            "BASELINE_BINDING_FAILURE missing baseline {}: {error}",
+            path.display()
+        )
+    });
+    assert!(
+        metadata.file_type().is_file(),
+        "BASELINE_BINDING_FAILURE baseline must be a regular non-symlink file: {}",
+        path.display()
+    );
+    fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "BASELINE_BINDING_FAILURE unreadable baseline {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn assert_baseline_bytes_bound_from(source: &Path, scratch: &Path) {
+    assert_eq!(
+        git_text(scratch, &["status", "--porcelain"]),
+        "",
+        "BASELINE_BINDING_FAILURE scratch repository must be clean"
+    );
+    let source_object = baseline_blob(source);
+    let source_worktree = regular_baseline_bytes(source);
+    let scratch_object = baseline_blob(scratch);
+    let scratch_worktree = regular_baseline_bytes(scratch);
+    let digests = [
+        sha256_bytes(&source_object),
+        sha256_bytes(&source_worktree),
+        sha256_bytes(&scratch_object),
+        sha256_bytes(&scratch_worktree),
+    ];
+    assert!(
+        source_object == source_worktree
+            && source_object == scratch_object
+            && source_object == scratch_worktree,
+        "BASELINE_BINDING_FAILURE baseline bytes differ across source object/worktree and scratch object/worktree: {digests:?}"
+    );
+
+    let parsed: Value = serde_json::from_slice(&source_object)
+        .expect("BASELINE_BINDING_FAILURE baseline must be valid JSON");
+    let object = parsed
+        .as_object()
+        .expect("BASELINE_BINDING_FAILURE baseline must be a JSON object");
+    if object.len() == 3
+        && !object.contains_key("schema_version")
+        && object.contains_key("files")
+        && object.contains_key("source_sha")
+        && object.contains_key("tracked_test_paths")
+    {
+        assert_eq!(
+            digests[0], LEGACY_BASELINE_SHA256,
+            "BASELINE_BINDING_FAILURE legacy v1 baseline Git object digest changed"
+        );
+        assert!(
+            object["files"].is_object()
+                && object["source_sha"].is_string()
+                && object["tracked_test_paths"].is_array(),
+            "BASELINE_BINDING_FAILURE malformed legacy v1 baseline"
+        );
+    } else if object.get("schema_version") == Some(&json!(2)) {
+        assert!(
+            object
+                .get("source_sha")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty()),
+            "BASELINE_BINDING_FAILURE v2 source_sha missing"
+        );
+        for key in ["schema", "policy_path", "policy_sha256"] {
+            assert!(
+                object.get(key).is_some_and(Value::is_string),
+                "BASELINE_BINDING_FAILURE v2 required string key missing: {key}"
+            );
+        }
+        for key in ["whole_files", "rust_regions"] {
+            assert!(
+                object.get(key).is_some_and(Value::is_object),
+                "BASELINE_BINDING_FAILURE v2 required object key missing: {key}"
+            );
+        }
+        for key in ["executable_identities", "rustdoc_identities"] {
+            assert!(
+                object.get(key).is_some_and(Value::is_array),
+                "BASELINE_BINDING_FAILURE v2 required array key missing: {key}"
+            );
+        }
+    } else {
+        panic!("BASELINE_BINDING_FAILURE unsupported baseline shape or schema version");
+    }
+}
+
+fn assert_baseline_bytes_bound(repo: &Path) {
+    assert_baseline_bytes_bound_from(&repo_root(), repo);
+}
+// END BASELINE SOURCE-BINDING HELPER
 fn assert_clean_fixture(repo: &Path) {
     assert_eq!(
         git_text(repo, &["status", "--porcelain"]),
@@ -305,11 +426,7 @@ fn assert_clean_fixture(repo: &Path) {
         POLICY_SHA256,
         "SEMANTICS_FIXTURE_FAILURE scratch policy must equal canonical authority"
     );
-    assert_eq!(
-        sha256_file(&repo.join(BASELINE_PATH)),
-        BASELINE_SHA256,
-        "SEMANTICS_FIXTURE_FAILURE scratch baseline must equal canonical authority"
-    );
+    assert_baseline_bytes_bound(repo);
     for relative in HARNESS_PATHS {
         assert_eq!(
             sha256_file(&repo.join(relative)),
@@ -1506,3 +1623,182 @@ semantics_case!(
     r#"".rs\u0000""#,
     "9096ff94763a5c95254e523e15f46d9d5a9eb7afcec5e11764c595495c302935"
 );
+// BEGIN BASELINE SOURCE-BINDING CONTROLS
+fn binding_pair(bytes: &[u8]) -> (TempDir, TempDir) {
+    let source = TempDir::new().expect("BASELINE_CONTROL_FAILURE source tempdir");
+    let scratch = TempDir::new().expect("BASELINE_CONTROL_FAILURE scratch tempdir");
+    for repo in [source.path(), scratch.path()] {
+        git(repo, &["init"]);
+        git(
+            repo,
+            &["config", "user.email", "baseline-binding@example.invalid"],
+        );
+        git(repo, &["config", "user.name", "Baseline Binding Control"]);
+        write_file(repo, BASELINE_PATH, bytes);
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "-m", "bind baseline object"]);
+    }
+    (source, scratch)
+}
+
+fn legacy_binding_bytes() -> Vec<u8> {
+    let bytes = git(
+        &repo_root(),
+        &[
+            "show",
+            "44839365ca63f350d0cfdd8247964407526e261d:tests/test-custody-baseline.json",
+        ],
+    )
+    .stdout;
+    assert_eq!(sha256_bytes(&bytes), LEGACY_BASELINE_SHA256);
+    bytes
+}
+
+fn v2_binding_bytes() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "schema": "flowspec.test_custody_baseline",
+        "schema_version": 2,
+        "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "policy_path": POLICY_PATH,
+        "policy_sha256": POLICY_SHA256,
+        "whole_files": {},
+        "rust_regions": {},
+        "executable_identities": [],
+        "rustdoc_identities": []
+    }))
+    .expect("BASELINE_CONTROL_FAILURE v2 fixture serialization")
+}
+
+fn assert_binding_rejected(source: &Path, scratch: &Path, reason: &str) {
+    let panic = std::panic::catch_unwind(|| assert_baseline_bytes_bound_from(source, scratch))
+        .expect_err("BASELINE_CONTROL_FAILURE invalid baseline unexpectedly accepted");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("BASELINE_CONTROL_FAILURE panic must carry stable text");
+    assert!(
+        message.contains(reason),
+        "BASELINE_CONTROL_FAILURE wrong rejection: expected {reason:?}, got {message:?}"
+    );
+}
+
+#[test]
+fn baseline_binding_v1_exact_passes() {
+    let (source, scratch) = binding_pair(&legacy_binding_bytes());
+    assert_baseline_bytes_bound_from(source.path(), scratch.path());
+}
+
+#[test]
+fn baseline_binding_v1_changed_object_rejected() {
+    let mut bytes = legacy_binding_bytes();
+    bytes.push(b'\n');
+    let (source, scratch) = binding_pair(&bytes);
+    assert_binding_rejected(
+        source.path(),
+        scratch.path(),
+        "legacy v1 baseline Git object digest changed",
+    );
+}
+
+#[test]
+fn baseline_binding_v2_exact_passes() {
+    let (source, scratch) = binding_pair(&v2_binding_bytes());
+    assert_baseline_bytes_bound_from(source.path(), scratch.path());
+}
+
+#[test]
+fn baseline_binding_scratch_worktree_tamper_rejected() {
+    let (source, scratch) = binding_pair(&v2_binding_bytes());
+    let mut bytes = v2_binding_bytes();
+    bytes.push(b'\n');
+    write_file(scratch.path(), BASELINE_PATH, bytes);
+    assert_binding_rejected(
+        source.path(),
+        scratch.path(),
+        "scratch repository must be clean",
+    );
+}
+
+#[test]
+fn baseline_binding_scratch_object_tamper_rejected() {
+    let (source, scratch) = binding_pair(&v2_binding_bytes());
+    let mut bytes = v2_binding_bytes();
+    bytes.push(b'\n');
+    write_file(scratch.path(), BASELINE_PATH, bytes);
+    git(scratch.path(), &["add", "--all"]);
+    git(scratch.path(), &["commit", "-m", "tamper scratch object"]);
+    assert_binding_rejected(
+        source.path(),
+        scratch.path(),
+        "baseline bytes differ across",
+    );
+}
+
+#[test]
+fn baseline_binding_source_worktree_tamper_rejected() {
+    let (source, scratch) = binding_pair(&v2_binding_bytes());
+    let mut bytes = v2_binding_bytes();
+    bytes.push(b'\n');
+    write_file(source.path(), BASELINE_PATH, &bytes);
+    write_file(scratch.path(), BASELINE_PATH, bytes);
+    git(scratch.path(), &["add", "--all"]);
+    git(
+        scratch.path(),
+        &["commit", "-m", "match tampered source worktree"],
+    );
+    assert_binding_rejected(
+        source.path(),
+        scratch.path(),
+        "baseline bytes differ across",
+    );
+}
+
+#[test]
+fn baseline_binding_missing_rejected() {
+    let (source, scratch) = binding_pair(&v2_binding_bytes());
+    fs::remove_file(source.path().join(BASELINE_PATH))
+        .expect("BASELINE_CONTROL_FAILURE remove source copy");
+    assert_binding_rejected(source.path(), scratch.path(), "missing baseline");
+}
+
+#[test]
+fn baseline_binding_symlink_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let (source, scratch) = binding_pair(&v2_binding_bytes());
+    let baseline = source.path().join(BASELINE_PATH);
+    let destination = source.path().join("baseline-target.json");
+    fs::rename(&baseline, &destination).expect("BASELINE_CONTROL_FAILURE move source copy");
+    symlink(&destination, &baseline).expect("BASELINE_CONTROL_FAILURE link source copy");
+    assert_binding_rejected(source.path(), scratch.path(), "regular non-symlink file");
+}
+
+#[test]
+fn baseline_binding_malformed_json_rejected() {
+    let (source, scratch) = binding_pair(b"{");
+    assert_binding_rejected(source.path(), scratch.path(), "baseline must be valid JSON");
+}
+
+#[test]
+fn baseline_binding_unsupported_version_rejected() {
+    let bytes = serde_json::to_vec(&json!({"schema_version": 3}))
+        .expect("BASELINE_CONTROL_FAILURE unsupported version fixture");
+    let (source, scratch) = binding_pair(&bytes);
+    assert_binding_rejected(
+        source.path(),
+        scratch.path(),
+        "unsupported baseline shape or schema version",
+    );
+}
+
+#[test]
+fn baseline_binding_v2_missing_source_sha_rejected() {
+    let mut value: Value = serde_json::from_slice(&v2_binding_bytes())
+        .expect("BASELINE_CONTROL_FAILURE v2 fixture must parse");
+    value.as_object_mut().unwrap().remove("source_sha");
+    let bytes = serde_json::to_vec(&value).expect("BASELINE_CONTROL_FAILURE missing SHA fixture");
+    let (source, scratch) = binding_pair(&bytes);
+    assert_binding_rejected(source.path(), scratch.path(), "v2 source_sha missing");
+}
+// END BASELINE SOURCE-BINDING CONTROLS
