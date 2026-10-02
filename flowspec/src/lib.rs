@@ -188,7 +188,7 @@ const VALID_PATTERNS: &[&str] = &[
 /// analysis without re-parsing.
 pub struct AnalysisResult {
     /// The generated manifest — ready for formatting via [`OutputFormatter`].
-    pub manifest: Manifest,
+    pub manifest: AnalysisReport,
     /// Whether any critical-severity diagnostics were found (drives exit code 2).
     pub has_critical: bool,
     /// Whether any findings exist at or above the given thresholds.
@@ -308,28 +308,43 @@ pub fn analyze(
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
     let mut source_bytes: u64 = 0;
+    let mut completeness = Completeness::default();
 
     for file in &files {
         if let Some(adapter) = adapters.iter().find(|a| a.can_handle(file)) {
+            completeness.selected += 1;
             let content = match std::fs::read_to_string(file) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Failed to read {}: {}", file.display(), e);
+                    completeness.reject(file.display().to_string(), "read_error");
                     continue;
                 }
             };
+            completeness.read += 1;
             source_bytes += content.len() as u64;
+            let parse_loss = parser::source_has_parse_loss(file, &content);
             match adapter.parse_file(file, &content) {
                 Ok(result) => {
                     populate_graph(&mut graph, &result);
-                    parsed_file_count += 1;
+                    if parse_loss {
+                        tracing::warn!("Parse recovery in {}", file.display());
+                        completeness.reject(file.display().to_string(), "parse_error");
+                    } else {
+                        parsed_file_count += 1;
+                        completeness.parsed += 1;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse {}: {}", file.display(), e);
+                    completeness.reject(file.display().to_string(), "parse_error");
                 }
             }
         }
     }
+    completeness
+        .rejected_files
+        .sort_by(|a, b| a.path.cmp(&b.path));
 
     // Stage 1b: Cross-file import resolution
     // After all files are parsed, resolve import symbols that reference definitions
@@ -627,6 +642,11 @@ pub fn analyze(
     };
 
     let manifest = Manifest {
+        schema_version: None,
+        execution: None,
+        findings_present: None,
+        outcome: None,
+        completeness: None,
         metadata: Metadata {
             project: project_name,
             analyzed_at: chrono::Utc::now().to_rfc3339(),
@@ -687,7 +707,7 @@ pub fn analyze(
     };
 
     Ok(AnalysisResult {
-        manifest,
+        manifest: manifest.with_report(completeness),
         has_critical,
         has_findings,
         graph,

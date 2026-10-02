@@ -426,15 +426,16 @@ fn js_syntax_errors_no_panic() {
         .unwrap();
 
     let code = output.status.code().unwrap();
-    assert!(
-        code == 0 || code == 2,
-        "JS syntax error should not cause panic (exit 101) or error (exit 1). Got: {}",
-        code
+    assert_eq!(
+        code, 3,
+        "selected syntax loss must produce incomplete exit 3"
     );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let _: serde_yaml::Value =
+    let parsed: serde_yaml::Value =
         serde_yaml::from_str(&stdout).expect("JS syntax error output is not valid YAML");
+    assert_eq!(parsed["execution"].as_str(), Some("incomplete"));
+    assert_eq!(parsed["outcome"].as_str(), Some("incomplete"));
 }
 
 #[test]

@@ -1356,7 +1356,7 @@ fn is_typescript_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn preprocess_typescript(content: &str) -> String {
+pub(crate) fn preprocess_typescript(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let lines: Vec<&str> = content.split('\n').collect();
     let mut in_ts_block = false;
