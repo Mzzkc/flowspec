@@ -67,6 +67,10 @@ pub struct Graph {
     scopes: SlotMap<ScopeId, Scope>,
     boundaries: SlotMap<BoundaryId, Boundary>,
     references: SlotMap<ReferenceId, Reference>,
+    #[serde(default)]
+    unresolved_calls: Vec<Reference>,
+    #[serde(default)]
+    dynamic_exports: HashSet<PathBuf>,
 
     outgoing: HashMap<SymbolId, Vec<Edge>>,
     incoming: HashMap<SymbolId, Vec<Edge>>,
@@ -82,6 +86,27 @@ impl Graph {
     /// Creates a new empty graph.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Call sites examined by the local resolver with no proven target.
+    pub fn unresolved_calls(&self) -> &[Reference] {
+        &self.unresolved_calls
+    }
+
+    pub(crate) fn record_unresolved_call(&mut self, reference: Reference) {
+        self.unresolved_calls.push(reference);
+    }
+
+    pub(crate) fn record_dynamic_export(&mut self, path: PathBuf) {
+        self.dynamic_exports.insert(path);
+    }
+
+    pub fn has_dynamic_export(&self, path: &Path) -> bool {
+        self.dynamic_exports.contains(path)
+    }
+
+    pub fn dynamic_exports(&self) -> &HashSet<PathBuf> {
+        &self.dynamic_exports
     }
 
     // -- Symbols ------------------------------------------------------------

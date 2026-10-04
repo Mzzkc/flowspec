@@ -300,7 +300,7 @@ fn analyze_core(
     }
 
     // Discover source files (respects .gitignore, config exclude, hardcoded skip_dirs)
-    let (files, detected_langs, mut input_records, mut losses) =
+    let (mut files, detected_langs, mut input_records, mut losses) =
         discover_source_files(project_path, &config.exclude);
 
     // Language priority: CLI flags > config languages > auto-detect
@@ -311,6 +311,26 @@ fn analyze_core(
     } else {
         detected_langs
     };
+    // Discovery inventories every candidate, but only languages in the
+    // effective scope may enter selected/read/parsed analysis.
+    if !active_languages.is_empty() {
+        for record in &mut input_records {
+            if record.disposition == "selected"
+                && record
+                    .language
+                    .as_ref()
+                    .is_some_and(|lang| !active_languages.contains(lang))
+            {
+                record.disposition = "policy_excluded";
+                record.reason = Some("language_scope".to_string());
+            }
+        }
+        files.retain(|file| {
+            input_records
+                .iter()
+                .any(|record| record.path == *file && record.disposition == "selected")
+        });
+    }
 
     // Build the project name from the directory
     let project_name = project_path
@@ -458,6 +478,30 @@ fn analyze_core(
     let module_map = build_module_map(&files);
     if !module_map.is_empty() {
         resolve_cross_file_imports(&mut graph, &module_map);
+    }
+    for reference in graph.unresolved_calls() {
+        let key = report_authority::path_key(project_path, &reference.location.file);
+        let range = input_records
+            .iter()
+            .find(|input| input.path == reference.location.file)
+            .and_then(|input| input.content.as_deref())
+            .map(|content| report_authority::location_range(&key, content, &reference.location));
+        losses.push(report_authority::loss(
+            "unresolved_call",
+            key,
+            range,
+            "resolve",
+        ));
+    }
+    let mut dynamic_exports: Vec<_> = graph.dynamic_exports().iter().collect();
+    dynamic_exports.sort();
+    for path in dynamic_exports {
+        losses.push(report_authority::loss(
+            "unresolved_reference",
+            report_authority::path_key(project_path, path),
+            None,
+            "resolve",
+        ));
     }
     // A relative import is a declared local obligation. If the real resolver
     // leaves it unresolved, absence of downstream findings is not established.

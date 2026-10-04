@@ -28,6 +28,25 @@ impl Default for YamlFormatter {
 
 impl OutputFormatter for YamlFormatter {
     fn format_manifest(&self, manifest: &Manifest) -> Result<String, ManifestError> {
+        if manifest.authority.is_none() {
+            let mut value =
+                serde_yaml::to_value(manifest).map_err(|e| ManifestError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if let Some(fields) = value.as_mapping_mut() {
+                for key in [
+                    "losses",
+                    "pattern_state",
+                    "full_findings_total",
+                    "displayed_findings_total",
+                ] {
+                    fields.remove(&serde_yaml::Value::String(key.to_string()));
+                }
+            }
+            return serde_yaml::to_string(&value).map_err(|e| ManifestError::Serialization {
+                reason: e.to_string(),
+            });
+        }
         serde_yaml::to_string(manifest).map_err(|e| ManifestError::Serialization {
             reason: e.to_string(),
         })

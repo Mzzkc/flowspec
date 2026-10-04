@@ -119,15 +119,43 @@ fn byte_at(content: &str, line: u32, column: u32) -> u64 {
     (offset + column.saturating_sub(1) as usize).min(content.len()) as u64
 }
 
+pub(crate) fn location_range(
+    path_key: &str,
+    content: &str,
+    location: &crate::parser::ir::Location,
+) -> Value {
+    let start = byte_at(content, location.line, location.column);
+    let end = byte_at(content, location.end_line, location.end_column).max(start);
+    json!({"path_key":path_key,"start_byte":start,"end_byte":end,
+        "start_line":location.line,"start_column":location.column,
+        "end_line":location.end_line,"end_column":location.end_column})
+}
+
 fn graph_state(root: &Path, graph: &Graph, inputs: &[InputRecord]) -> Value {
     let mut entities = Vec::new();
     let mut ids = HashMap::new();
+    let mut binding_counts = HashMap::new();
+    for (_, symbol) in graph.all_symbols() {
+        let base = json!({"path_key":path_key(root, &symbol.location.file),
+            "language":language(&symbol.location.file).unwrap_or("python"),
+            "qualified_name":symbol.qualified_name,
+            "construct_kind":format!("{:?}", symbol.kind).to_lowercase()});
+        *binding_counts
+            .entry(hash("binding", &base))
+            .or_insert(0usize) += 1;
+    }
     for (id, symbol) in graph.all_symbols() {
         let key = path_key(root, &symbol.location.file);
         let kind = format!("{:?}", symbol.kind).to_lowercase();
         let base = json!({"path_key":key,"language":language(&symbol.location.file).unwrap_or("python"),
             "qualified_name":symbol.qualified_name,"construct_kind":kind});
         let binding_id = hash("binding", &base);
+        if binding_counts.get(&binding_id).copied().unwrap_or(0) != 1 {
+            // A lexical identity is ambiguous. The legacy graph retains both
+            // observations; the authoritative graph cannot claim either is a
+            // unique binding or attach edges to that shared key.
+            continue;
+        }
         ids.insert(id, binding_id.clone());
         let mut subject = base;
         subject["binding_id"] = json!(binding_id);
@@ -450,12 +478,37 @@ pub(crate) fn build(
         "adapters":adapters,"controls":controls,"inputs":provenance_inputs,
         "cache":{"requested_mode":"full","executed_mode":"full","rebuild_reason":Value::Null},
         "build_receipt":hash("build",&producer)});
+    // Colliding lexical bindings have no unique stable graph key. Keep the
+    // source observations, but make the missing authoritative join explicit.
+    let mut binding_counts = HashMap::new();
+    for (_, symbol) in graph.all_symbols() {
+        let base = json!({"path_key":path_key(root, &symbol.location.file),
+            "language":language(&symbol.location.file).unwrap_or("python"),
+            "qualified_name":symbol.qualified_name,
+            "construct_kind":format!("{:?}", symbol.kind).to_lowercase()});
+        *binding_counts
+            .entry(hash("binding", &base))
+            .or_insert(0usize) += 1;
+    }
+    if binding_counts.values().any(|count| *count > 1) {
+        losses.push(loss("identity_uncertain", String::new(), None, "binding"));
+    }
     let mut pattern_state = Vec::new();
     for pattern in PATTERNS {
         let cells:Vec<Value>=scope["effective_languages"].as_array().unwrap().iter().map(|lang|{
-            let reasons:Vec<String>=losses.iter().filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
+            let mut reasons:Vec<String>=losses.iter().filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
+            let capabilities: &[&str] = match pattern {
+                "data_dead_end" => &["symbols", "calls", "value_references", "exports"],
+                "phantom_dependency" | "missing_reexport" => &["imports", "exports", "value_references"],
+                "circular_dependency" | "layer_violation" => &["imports", "dependency_edges"],
+                "duplication" => &["symbols", "binding_structure"],
+                "contract_mismatch" | "partial_wiring" | "asymmetric_handling" => &["symbols", "calls", "control_flow"],
+                "stale_reference" | "incomplete_migration" => &["imports", "resolution"],
+                _ => &["symbols", "calls", "resolution"],
+            };
+            if pattern == "layer_violation" { reasons.push("policy_absent".to_string()); }
             let state=if pattern=="layer_violation" {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
-            json!({"language":lang,"state":state,"required_capabilities":[],"affected_paths":[],"reason_codes":reasons})
+            json!({"language":lang,"state":state,"required_capabilities":capabilities,"affected_paths":[],"reason_codes":reasons})
         }).collect();
         pattern_state.push(json!({"pattern_id":pattern,"cells":cells}));
     }

@@ -38,6 +38,9 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         if is_excluded_symbol(symbol) {
             continue;
         }
+        if graph.has_dynamic_export(&symbol.location.file) {
+            continue;
+        }
 
         // Pattern-specific: skip structural container kinds and Methods
         // (Methods have a dedicated orphaned_implementation pattern)

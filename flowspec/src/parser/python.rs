@@ -99,6 +99,10 @@ impl LanguageAdapter for PythonAdapter {
         // Extract attribute accesses to track import usage (e.g., os.path.join, sys.argv)
         extract_attribute_accesses(&mut result, content_bytes, path, root, 0);
 
+        // Passing a local function as a value consumes that binding even when
+        // no direct call to it appears in this module.
+        extract_argument_value_refs(&mut result, content_bytes, path, root, 0);
+
         // Extract type annotation references (parameter types, return types, annotated assignments)
         extract_type_annotation_refs(&mut result, content_bytes, path, root, 0);
 
@@ -1247,14 +1251,33 @@ fn extract_dunder_all(result: &mut ParseResult, content: &[u8], path: &Path, nod
         None => return,
     };
 
-    // Accept both list [...] and tuple (...) forms
+    // A computed export set can publish any local name. Preserve that
+    // uncertainty so no underscore helper is certified unconsumed.
     if right.kind() != "list" && right.kind() != "tuple" {
+        result.references.push(Reference {
+            id: ReferenceId::default(),
+            from: SymbolId::default(),
+            to: SymbolId::default(),
+            kind: ReferenceKind::Export,
+            location: node_location(path, node),
+            resolution: ResolutionStatus::Partial("dynamic_export".to_string()),
+        });
         return;
     }
 
     let mut cursor = right.walk();
     for child in right.children(&mut cursor) {
         if child.kind() != "string" {
+            if child.is_named() {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Export,
+                    location: node_location(path, child),
+                    resolution: ResolutionStatus::Partial("dynamic_export".to_string()),
+                });
+            }
             continue;
         }
         // Extract the unquoted value from string_content child
@@ -1542,6 +1565,52 @@ fn extract_attribute_accesses(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         extract_attribute_accesses(result, content, path, child, depth + 1);
+    }
+}
+
+/// Record bare identifiers passed as call arguments. The graph resolver only
+/// connects these to unique same-file function bindings; unknown names do not
+/// become proof of consumption.
+fn extract_argument_value_refs(
+    result: &mut ParseResult,
+    content: &[u8],
+    path: &Path,
+    node: Node,
+    depth: usize,
+) {
+    if depth > super::MAX_AST_DEPTH {
+        return;
+    }
+    if node.kind() == "argument_list" {
+        let mut cursor = node.walk();
+        for argument in node.named_children(&mut cursor) {
+            let value = if argument.kind() == "keyword_argument" {
+                argument.child_by_field_name("value")
+            } else {
+                Some(argument)
+            };
+            if let Some(value) = value.filter(|value| value.kind() == "identifier") {
+                let name = node_text(content, value);
+                if result
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == name && symbol.kind == SymbolKind::Function)
+                {
+                    result.references.push(Reference {
+                        id: ReferenceId::default(),
+                        from: SymbolId::default(),
+                        to: SymbolId::default(),
+                        kind: ReferenceKind::Read,
+                        location: node_location(path, value),
+                        resolution: ResolutionStatus::Partial(format!("value_use:{name}")),
+                    });
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        extract_argument_value_refs(result, content, path, child, depth + 1);
     }
 }
 

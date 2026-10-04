@@ -28,6 +28,27 @@ impl Default for JsonFormatter {
 
 impl OutputFormatter for JsonFormatter {
     fn format_manifest(&self, manifest: &Manifest) -> Result<String, ManifestError> {
+        if manifest.authority.is_none() {
+            let mut value =
+                serde_json::to_value(manifest).map_err(|e| ManifestError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if let Some(fields) = value.as_object_mut() {
+                for key in [
+                    "losses",
+                    "pattern_state",
+                    "full_findings_total",
+                    "displayed_findings_total",
+                ] {
+                    fields.remove(key);
+                }
+            }
+            return serde_json::to_string_pretty(&value).map_err(|e| {
+                ManifestError::Serialization {
+                    reason: e.to_string(),
+                }
+            });
+        }
         serde_json::to_string_pretty(manifest).map_err(|e| ManifestError::Serialization {
             reason: e.to_string(),
         })

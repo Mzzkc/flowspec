@@ -295,6 +295,10 @@ fn insert_references(
         let mut new_ref = reference.clone();
 
         match &reference.resolution {
+            ResolutionStatus::Partial(info) if info == "dynamic_export" => {
+                graph.record_dynamic_export(reference.location.file.clone());
+                continue;
+            }
             ResolutionStatus::Partial(info) if info.starts_with("call:") => {
                 let callee_name = &info[5..]; // after "call:"
 
@@ -399,22 +403,98 @@ fn insert_references(
                 }
 
                 #[cfg(feature = "fault_probe")]
-                if crate::fault_probe::call_edge(
+                let injected_call = crate::fault_probe::call_edge(
                     &reference.location,
                     graph
                         .get_symbol(new_ref.from)
                         .map(|s| s.name.as_str())
                         .unwrap_or(""),
                     callee_name,
-                ) {
+                );
+                #[cfg(not(feature = "fault_probe"))]
+                let injected_call = false;
+                if injected_call {
                     new_ref.to = SymbolId::default();
                 }
 
                 // Skip adding unresolved call edges — they create phantom edges to
                 // SymbolId::default() that pollute callees()/callers() results.
                 if new_ref.to == SymbolId::default() {
+                    if !injected_call
+                        && reference
+                            .location
+                            .file
+                            .extension()
+                            .is_some_and(|ext| ext == "py")
+                        && !callee_name.contains('.')
+                        && !matches!(
+                            callee_name,
+                            "print"
+                                | "len"
+                                | "str"
+                                | "int"
+                                | "bool"
+                                | "list"
+                                | "dict"
+                                | "set"
+                                | "tuple"
+                                | "range"
+                                | "enumerate"
+                                | "zip"
+                                | "sum"
+                                | "min"
+                                | "max"
+                                | "any"
+                                | "all"
+                                | "isinstance"
+                                | "getattr"
+                                | "setattr"
+                                | "hasattr"
+                                | "super"
+                                | "type"
+                                | "object"
+                                | "Exception"
+                                | "ValueError"
+                                | "RuntimeError"
+                                | "open"
+                                | "sorted"
+                                | "reversed"
+                                | "iter"
+                                | "next"
+                                | "abs"
+                                | "round"
+                                | "float"
+                                | "bytes"
+                                | "bytearray"
+                                | "property"
+                                | "staticmethod"
+                                | "classmethod"
+                                | "__import__"
+                        )
+                    {
+                        graph.record_unresolved_call(new_ref);
+                    }
                     continue;
                 }
+            }
+            ResolutionStatus::Partial(info) if info.starts_with("value_use:") => {
+                let name = &info["value_use:".len()..];
+                let candidates: Vec<_> = symbol_id_map
+                    .iter()
+                    .filter(|(idx, _)| {
+                        symbols[*idx].name == name && symbols[*idx].kind == SymbolKind::Function
+                    })
+                    .collect();
+                if candidates.len() != 1 {
+                    continue;
+                }
+                new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                    .unwrap_or_else(|| {
+                        *module_symbol_id
+                            .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
+                    });
+                new_ref.to = candidates[0].1;
+                new_ref.resolution = ResolutionStatus::Resolved;
             }
             ResolutionStatus::Partial(info) if info.starts_with("attribute_access:") => {
                 // Attribute access references (e.g., `obj.attr`) are resolved differently
@@ -456,6 +536,18 @@ fn insert_references(
                         reference.location.line,
                     )
                 };
+                // Literal __all__ entries use this reference form too. If no
+                // import owns the name, a unique local definition is exported.
+                if new_ref.to == SymbolId::default() && !injected {
+                    let candidates: Vec<_> = symbol_id_map
+                        .iter()
+                        .filter(|(idx, _)| symbols[*idx].name == root_name)
+                        .collect();
+                    if candidates.len() == 1 {
+                        new_ref.to = candidates[0].1;
+                        new_ref.resolution = ResolutionStatus::Resolved;
+                    }
+                }
             }
             _ => {
                 // Non-call references: keep existing behavior

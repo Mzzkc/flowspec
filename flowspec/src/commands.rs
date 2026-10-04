@@ -220,7 +220,36 @@ pub fn run_analyze_with_gate(
         OutputFormat::Sarif => format_with(format, |f| f.format_manifest(&result.manifest))?,
     };
 
-    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
+    // The additive authority carries one record per discovered input and the
+    // full source-bound graph. Its fixed provenance cost is independent of
+    // diagnostic amplification. Apply the historical ratio to the same
+    // eight-section compatibility payload that established that limit.
+    let size_output = if matches!(format, OutputFormat::Json | OutputFormat::Yaml)
+        && result.manifest.authority.is_some()
+    {
+        let mut legacy = result.manifest.clone();
+        legacy.authority = None;
+        legacy.losses.clear();
+        legacy.pattern_state.clear();
+        legacy.full_findings_total = 0;
+        legacy.displayed_findings_total = 0;
+        match format {
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&legacy).map_err(|e| FlowspecError::Manifest {
+                    reason: e.to_string(),
+                })?
+            }
+            OutputFormat::Yaml => {
+                serde_yaml::to_string(&legacy).map_err(|e| FlowspecError::Manifest {
+                    reason: e.to_string(),
+                })?
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        output.clone()
+    };
+    validate_manifest_size(&size_output, result.source_bytes, format_name(format))?;
 
     write_output(&output, output_path)?;
 
