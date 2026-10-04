@@ -691,10 +691,12 @@ fn test_c17_t19_data_dead_end_unchanged() {
 
     // Baseline drifted to ~311 after C19 code growth (new test files + size limit fix).
     assert!(
-        (dead_end as i32 - 311).abs() <= 60,
-        "data_dead_end ~311 (C19 baseline), got {}",
+        dead_end <= 371,
+        "data_dead_end must not exceed existing upper bound 371, got {}",
         dead_end
     );
+    // Registered test functions are consumers, not a required false-positive floor.
+    crate::test_utils::assert_rust_test_registration_contract();
 }
 
 /// T20: orphaned_implementation count stable after fix.

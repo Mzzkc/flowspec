@@ -414,10 +414,12 @@ fn test_c18_t13_data_dead_end_baseline_range() {
     let dead_end = count_pattern(&results, "data_dead_end");
     eprintln!("T13: data_dead_end = {}", dead_end);
     assert!(
-        dead_end >= 200 && dead_end <= 400,
-        "T13: data_dead_end={}, expected 200-400 (C19 baseline ~311)",
+        dead_end <= 400,
+        "T13: data_dead_end={}, must not exceed existing ceiling 400",
         dead_end
     );
+    // Registered test functions are consumers, not a required false-positive floor.
+    crate::test_utils::assert_rust_test_registration_contract();
 }
 
 /// T14: stale_reference within expected range.
@@ -440,10 +442,12 @@ fn test_c18_t15_total_findings_baseline_range() {
     let total = results.len();
     eprintln!("T15: total findings = {}", total);
     assert!(
-        total >= 400 && total <= 650,
-        "T15: total={}, expected 400-650",
+        total <= 650,
+        "T15: total={}, must not exceed existing ceiling 650",
         total
     );
+    // Registered test functions are consumers, not a required false-positive floor.
+    crate::test_utils::assert_rust_test_registration_contract();
 }
 
 /// T16: phantom_dependency stable (not affected by either fix).

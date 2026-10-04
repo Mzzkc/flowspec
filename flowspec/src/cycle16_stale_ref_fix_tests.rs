@@ -321,8 +321,8 @@ fn test_c16_t12_other_patterns_unchanged_after_fix() {
     // After C20 dedup: Methods excluded from data_dead_end (dedicated orphaned_impl pattern)
     // data_dead_end dropped from ~311 to ~258
     assert!(
-        (dead_end as i32 - 258).abs() <= 60,
-        "data_dead_end should be bounded around C20 baseline (~258), got {}",
+        dead_end <= 318,
+        "data_dead_end must retain its existing upper bound 318, got {}",
         dead_end
     );
     // orphaned_impl dropped to 0 due to Worker 1's method call tracking (C16)
@@ -337,6 +337,8 @@ fn test_c16_t12_other_patterns_unchanged_after_fix() {
         "phantom_dependency should not increase, got {}",
         phantom
     );
+    // Registered test functions are consumers, not a required false-positive floor.
+    crate::test_utils::assert_rust_test_registration_contract();
 }
 
 /// T13: Total finding count decreases from C15 baseline.
@@ -411,8 +413,8 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
     );
     // After C20 dedup: Methods excluded from data_dead_end (dedicated orphaned_impl pattern)
     assert!(
-        (dead_end as i32 - 258).abs() <= 60,
-        "data_dead_end ~ 258 (C20 baseline after Method dedup), got {}",
+        dead_end <= 318,
+        "data_dead_end must not exceed existing upper bound 318, got {}",
         dead_end
     );
     // Concert 4: Method symbols excluded from re-export candidates.
@@ -431,6 +433,8 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
     assert_eq!(circular, 6, "circular_dependency = 6 (C20 baseline)");
     assert_eq!(partial, 2, "partial_wiring = 2");
     assert_eq!(isolated, 1, "isolated_cluster = 1");
+    // Registered test functions are consumers, not a required false-positive floor.
+    crate::test_utils::assert_rust_test_registration_contract();
 }
 
 /// T15: No stale references for known module segments remain.
@@ -881,10 +885,12 @@ fn test_c16_t33_fix_does_not_affect_dead_end() {
 
     // data_dead_end checks Functions/Methods, not import symbols
     assert!(
-        (dead_end as i32 - 311).abs() <= 60,
-        "data_dead_end bounded around C19 baseline (~311), got {}",
+        dead_end <= 371,
+        "data_dead_end must not exceed existing upper bound 371, got {}",
         dead_end
     );
+    // Registered test functions are consumers, not a required false-positive floor.
+    crate::test_utils::assert_rust_test_registration_contract();
 }
 
 /// T34: Stale reference confidence distribution stable post-fix.

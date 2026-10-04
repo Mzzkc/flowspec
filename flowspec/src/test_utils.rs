@@ -815,3 +815,31 @@ pub fn build_proper_reexport_graph() -> Graph {
 
     g
 }
+
+/// Execute the parsed Rust registration contract independently of dogfood volume.
+#[cfg(test)]
+pub fn assert_rust_test_registration_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "#[test]\nfn check_case() {}\n\nfn unused_private() {}\n",
+    )
+    .unwrap();
+    let config = crate::Config::load(dir.path(), None).unwrap();
+    let report = crate::analyze(dir.path(), &config, &["rust".to_string()]).unwrap();
+    let dead: Vec<_> = report
+        .manifest
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.pattern == "data_dead_end")
+        .map(|finding| finding.entity.as_str())
+        .collect();
+    assert!(
+        dead.iter().any(|name| name.ends_with("unused_private")),
+        "{dead:?}"
+    );
+    assert!(
+        dead.iter().all(|name| !name.ends_with("check_case")),
+        "{dead:?}"
+    );
+}
