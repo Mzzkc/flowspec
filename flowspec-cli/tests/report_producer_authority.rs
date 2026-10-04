@@ -245,7 +245,7 @@ fn explicit_gate_changes_exit_and_display_filter_cannot_change_full_authority() 
 }
 
 #[test]
-fn incomplete_parse_keeps_private_positive_and_ranged_loss() {
+fn incomplete_parse_keeps_ranged_loss_and_unknown_private_proof() {
     let dir = project(&[
         ("helpers.py", HELPER),
         ("main.py", MAIN),
@@ -275,9 +275,37 @@ fn incomplete_parse_keeps_private_positive_and_ranged_loss() {
                 .any(|p| p == "62726f6b656e2e7079")
             && !loss["ranges"].as_array().unwrap().is_empty()
     }));
-    private_finding(&report);
+    assert!(
+        a["findings"]["all"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| {
+                !finding["subject"]["qualified_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with("::_unused_helper"))
+            }),
+        "the unavailable potential-consumer scope cannot prove this top-level private absence"
+    );
+    assert!(
+        a["losses"].as_array().unwrap().iter().any(|loss| {
+            loss["reason"] == "semantic_proof_unavailable"
+                && loss["required_capabilities"]
+                    .as_array()
+                    .is_some_and(|capabilities| {
+                        capabilities
+                            .iter()
+                            .any(|capability| capability == "consumer_closure")
+                    })
+                && loss["affected_patterns"]
+                    .as_array()
+                    .is_some_and(|patterns| {
+                        patterns.iter().any(|pattern| pattern == "data_dead_end")
+                    })
+        }),
+        "incomplete private consumer proof must remain explicit nonfinding debt"
+    );
 }
-
 #[test]
 fn invalid_implicit_config_is_hard_error_without_output_file() {
     let dir = project(&[
