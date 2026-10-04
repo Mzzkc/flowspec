@@ -116,7 +116,9 @@ fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Valu
             // No accessibility/interop proof exists here to narrow that scope
             // based on its language or filename. Policy-excluded known paths
             // are outside the declared scope; omitted walker entries are not.
-            let relevant_scope = inputs.iter().find(|i| path_key(root, &i.path) == key)
+            let relevant_scope = inputs
+                .iter()
+                .find(|i| path_key(root, &i.path) == key)
                 .is_none_or(|input| input.disposition == "selected");
             if relevant_scope {
                 blocked.push(key.to_string());

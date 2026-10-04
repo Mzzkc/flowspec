@@ -754,10 +754,15 @@ fn extract_decorated(
             if let Some(definition) = node.child_by_field_name("definition") {
                 if let Some(name) = definition.child_by_field_name("name") {
                     result.references.push(Reference {
-                        id: ReferenceId::default(), from: SymbolId::default(),
-                        to: SymbolId::default(), kind: ReferenceKind::Read,
+                        id: ReferenceId::default(),
+                        from: SymbolId::default(),
+                        to: SymbolId::default(),
+                        kind: ReferenceKind::Read,
                         location: node_location(path, child),
-                        resolution: ResolutionStatus::Partial(format!("value_use:{}", node_text(content, name))),
+                        resolution: ResolutionStatus::Partial(format!(
+                            "value_use:{}",
+                            node_text(content, name)
+                        )),
                     });
                 }
             }

@@ -134,6 +134,31 @@ pub fn run_analyze_with_gate(
         );
     }
 
+    // Decide the available analysis projection before any presentation choice.
+    // Evaluate the same full report for both structured formats, so a display
+    // filter or format cannot manufacture a different execution or gate state.
+    if let Some(authority) = result.manifest.authority.as_mut() {
+        let total = authority["findings"]["total"].as_u64().unwrap_or(0);
+        authority["display"]["indices"] = serde_json::json!((0..total).collect::<Vec<_>>());
+        authority["continuation"]["shown"] = serde_json::json!(total);
+        authority["continuation"]["matched_total"] = serde_json::json!(total);
+        authority["continuation"]["full"] = serde_json::json!(total);
+    }
+    let full_json =
+        serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?;
+    let full_yaml =
+        serde_yaml::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?;
+    if result.manifest.authority.is_some()
+        && (validate_manifest_size(&full_json, result.source_bytes, "json").is_err()
+            || validate_manifest_size(&full_yaml, result.source_bytes, "yaml").is_err())
+    {
+        bound_analyze_report(&mut result.manifest);
+    }
+
     // Apply diagnostic filters to output only
     apply_diagnostic_filters(
         &mut result.manifest.diagnostics,
@@ -182,9 +207,9 @@ pub fn run_analyze_with_gate(
         &mut result.manifest.summary.diagnostic_summary,
     );
 
-    let mut output = match format {
+    let output = match format {
         OutputFormat::Json => {
-            serde_json::to_string_pretty(&result.manifest).map_err(|e| FlowspecError::Manifest {
+            serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
                 reason: e.to_string(),
             })?
         }
@@ -220,25 +245,6 @@ pub fn run_analyze_with_gate(
         OutputFormat::Sarif => format_with(format, |f| f.format_manifest(&result.manifest))?,
     };
 
-    if validate_manifest_size(&output, result.source_bytes, format_name(format)).is_err()
-        && matches!(format, OutputFormat::Json | OutputFormat::Yaml)
-        && result.manifest.authority.is_some()
-    {
-        bound_analyze_report(&mut result.manifest);
-        output = match format {
-            OutputFormat::Json => {
-                serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
-                    reason: e.to_string(),
-                })?
-            }
-            OutputFormat::Yaml => {
-                serde_yaml::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
-                    reason: e.to_string(),
-                })?
-            }
-            _ => unreachable!(),
-        };
-    }
     // Check exactly the bytes that will be written. The compact projection
     // still carries the full finding catalog and input inventory in authority.
     validate_manifest_size(&output, result.source_bytes, format_name(format))?;
@@ -264,10 +270,21 @@ fn bound_analyze_report(manifest: &mut Manifest) {
     authority["execution"] = serde_json::json!("incomplete");
     authority["outcome"] = serde_json::json!("incomplete");
     authority["continuation"]["truncated"] = serde_json::json!(true);
-    authority["continuation"]["shown"] = serde_json::json!(0);
-    authority["continuation"]["matched_total"] = serde_json::json!(0);
-    authority["display"]["indices"] = serde_json::json!([]);
     authority["gate"]["verdict"] = serde_json::json!("not_evaluated");
+    // The graph projection is unavailable for every affected pattern. Retained
+    // finding proofs remain in the full catalog; omission is explicit loss.
+    for pattern in authority["pattern_state"]
+        .as_array_mut()
+        .expect("pattern states")
+    {
+        for cell in pattern["cells"].as_array_mut().expect("pattern cells") {
+            cell["state"] = serde_json::json!("incomplete");
+            let reasons = cell["reason_codes"].as_array_mut().expect("reason codes");
+            if !reasons.iter().any(|reason| reason == "output_truncation") {
+                reasons.push(serde_json::json!("output_truncation"));
+            }
+        }
+    }
     crate::report_authority::refresh_identity(authority);
 
     manifest.execution = Some(crate::Execution::Incomplete);
@@ -276,8 +293,20 @@ fn bound_analyze_report(manifest: &mut Manifest) {
         .as_array()
         .expect("report losses")
         .clone();
+    manifest.pattern_state = authority["pattern_state"]
+        .as_array()
+        .expect("pattern states")
+        .iter()
+        .flat_map(|pattern| {
+            pattern["cells"].as_array().into_iter().flatten().map(|cell| {
+            serde_json::json!({"pattern_id":pattern["pattern_id"],"language":cell["language"],
+                "state":cell["state"],"reason_codes":cell["reason_codes"]})
+        })
+        })
+        .collect();
     manifest.diagnostics.clear();
     manifest.entities.clear();
+    manifest.metadata.entity_count = 0;
     manifest.flows.clear();
     manifest.boundaries.clear();
     manifest.dependency_graph.clear();
