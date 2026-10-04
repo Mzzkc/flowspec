@@ -1236,14 +1236,21 @@ fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Pat
     });
     if let Some(name) = extract_annotation_root_type(content, node) {
         let kind = ReferenceKind::Annotation;
-        result.references.push(Reference {
+        let reference = Reference {
             id: ReferenceId::default(),
             from: SymbolId::default(),
             to: SymbolId::default(),
             kind,
             location: node_location(path, node),
             resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
-        });
+        };
+        // Preserve the legacy adapter Read projection for existing consumers.
+        // The graph recognizes this exact paired observation as an annotation
+        // and resolves only the typed-origin record, never a fabricated value use.
+        let mut legacy = reference.clone();
+        legacy.kind = ReferenceKind::Read;
+        result.references.push(legacy);
+        result.references.push(reference);
     }
 }
 
@@ -1712,11 +1719,19 @@ fn extract_argument_value_refs(
     if node.kind() == "identifier" {
         let value_position = runtime_binding_read(node);
         let name = node_text(content, node);
+        let imported = result.symbols.iter().any(|symbol| {
+            symbol.name == name
+                && symbol
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation == "import")
+        });
         if value_position
-            && result
-                .symbols
-                .iter()
-                .any(|symbol| symbol.name == name && symbol.kind == SymbolKind::Function)
+            && (imported
+                || result
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == name && symbol.kind == SymbolKind::Function))
             && !shadowed_by_local_binding(node, content, name)
         {
             result.references.push(Reference {
@@ -1725,7 +1740,11 @@ fn extract_argument_value_refs(
                 to: SymbolId::default(),
                 kind: ReferenceKind::Read,
                 location: node_location(path, node),
-                resolution: ResolutionStatus::Partial(format!("value_use:{name}")),
+                resolution: ResolutionStatus::Partial(if imported {
+                    format!("attribute_access:{name}")
+                } else {
+                    format!("value_use:{name}")
+                }),
             });
         }
     }

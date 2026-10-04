@@ -291,7 +291,20 @@ fn insert_references(
     // Created on first module-level call, reused for subsequent ones in the same file.
     let mut module_symbol_id: Option<SymbolId> = None;
 
+    let annotation_origins: Vec<_> = references
+        .iter()
+        .filter(|reference| reference.kind == ReferenceKind::Annotation)
+        .collect();
     for reference in references {
+        if reference.kind == ReferenceKind::Read
+            && annotation_origins.iter().any(|origin| {
+                origin.location == reference.location && origin.resolution == reference.resolution
+            })
+        {
+            // Compatibility projection of this exact annotation node; the
+            // independently retained origin record is the operation authority.
+            continue;
+        }
         let mut new_ref = reference.clone();
 
         match &reference.resolution {
