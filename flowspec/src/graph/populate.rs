@@ -291,20 +291,7 @@ fn insert_references(
     // Created on first module-level call, reused for subsequent ones in the same file.
     let mut module_symbol_id: Option<SymbolId> = None;
 
-    let annotation_origins: Vec<_> = references
-        .iter()
-        .filter(|reference| reference.kind == ReferenceKind::Annotation)
-        .collect();
     for reference in references {
-        if reference.kind == ReferenceKind::Read
-            && annotation_origins.iter().any(|origin| {
-                origin.location == reference.location && origin.resolution == reference.resolution
-            })
-        {
-            // Compatibility projection of this exact annotation node; the
-            // independently retained origin record is the operation authority.
-            continue;
-        }
         let mut new_ref = reference.clone();
 
         match &reference.resolution {
@@ -584,6 +571,36 @@ fn insert_references(
                         new_ref.to = candidates[0].1;
                         new_ref.resolution = ResolutionStatus::Resolved;
                     }
+                }
+                if new_ref.to == SymbolId::default()
+                    && !injected
+                    && reference.kind == ReferenceKind::Annotation
+                    && !matches!(
+                        root_name,
+                        "int"
+                            | "str"
+                            | "float"
+                            | "bool"
+                            | "bytes"
+                            | "bytearray"
+                            | "list"
+                            | "tuple"
+                            | "dict"
+                            | "set"
+                            | "frozenset"
+                            | "object"
+                            | "type"
+                            | "complex"
+                            | "None"
+                    )
+                {
+                    // The real annotation lookup has no binding. Preserve its
+                    // syntax origin rather than silently dropping the obligation.
+                    let mut missing = reference.clone();
+                    missing.resolution = ResolutionStatus::Partial(
+                        "prerequisite_loss:unresolved_type:type_resolution".to_string(),
+                    );
+                    graph.record_prerequisite_loss(missing);
                 }
             }
             _ => {

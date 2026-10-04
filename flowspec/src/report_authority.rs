@@ -592,9 +592,22 @@ pub(crate) fn build(
                 "stale_reference" | "incomplete_migration" => &["imports", "resolution"],
                 _ => &["symbols", "calls", "resolution"],
             };
+            let relevant_losses: Vec<_> = losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).collect();
+            let mut capabilities: std::collections::BTreeSet<String> = capabilities.iter().map(|name| name.to_string()).collect();
+            let mut affected_paths = std::collections::BTreeSet::new();
+            for loss in relevant_losses {
+                for capability in loss["required_capabilities"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    capabilities.insert(capability.to_string());
+                }
+                for key in loss["scope_paths"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    if key.is_empty() {
+                        affected_paths.extend(inputs.iter().filter(|input| input.disposition == "selected").map(|input| path_key(root, &input.path)));
+                    } else { affected_paths.insert(key.to_string()); }
+                }
+            }
             if pattern == "layer_violation" { reasons.push("policy_absent".to_string()); }
             let state=if pattern=="layer_violation" {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
-            json!({"language":lang,"state":state,"required_capabilities":capabilities,"affected_paths":[],"reason_codes":reasons})
+            json!({"language":lang,"state":state,"required_capabilities":capabilities,"affected_paths":affected_paths,"reason_codes":reasons})
         }).collect();
         pattern_state.push(json!({"pattern_id":pattern,"cells":cells}));
     }

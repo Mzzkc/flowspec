@@ -1222,6 +1222,15 @@ fn extract_constructor_type_name(content: &[u8], assignment: Node) -> Option<Str
 ///
 /// Creates an `attribute_access:<name>` reference for each extracted type name.
 fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+    let location = node_location(path, node);
+    if result.references.iter().any(|reference| {
+        reference.kind == ReferenceKind::Annotation
+            && reference.location == location
+            && matches!(&reference.resolution, ResolutionStatus::Partial(info)
+                if info == "prerequisite_loss:capability_unavailable:type_flows")
+    }) {
+        return; // This exact AST node was already visited by the declaration pass.
+    }
     // The adapter captures the annotation syntax, but does not yet construct
     // the type-flow evidence required for an authoritative contract judgment.
     result.references.push(Reference {
@@ -1244,12 +1253,6 @@ fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Pat
             location: node_location(path, node),
             resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
         };
-        // Preserve the legacy adapter Read projection for existing consumers.
-        // The graph recognizes this exact paired observation as an annotation
-        // and resolves only the typed-origin record, never a fabricated value use.
-        let mut legacy = reference.clone();
-        legacy.kind = ReferenceKind::Read;
-        result.references.push(legacy);
         result.references.push(reference);
     }
 }
@@ -1884,8 +1887,21 @@ fn body_binds_name(node: Node, content: &[u8], name: &str) -> bool {
 }
 
 fn parameter_contains_name(node: Node, content: &[u8], name: &str) -> bool {
-    if node.kind() == "identifier" && node_text(content, node) == name {
-        return true;
+    match node.kind() {
+        "identifier" => return node_text(content, node) == name,
+        "default_parameter" | "typed_default_parameter" => {
+            return node
+                .child_by_field_name("name")
+                .is_some_and(|binding| parameter_contains_name(binding, content, name));
+        }
+        "typed_parameter" => {
+            // Its annotation is an enclosing-scope type read, not a parameter binding.
+            return node
+                .named_child(0)
+                .is_some_and(|binding| parameter_contains_name(binding, content, name));
+        }
+        "type" => return false,
+        _ => {}
     }
     let mut cursor = node.walk();
     let found = node
