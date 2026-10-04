@@ -89,6 +89,73 @@ pub(crate) fn loss(reason: &str, path_key: String, range: Option<Value>, stage: 
         "stage":stage,"continuation":"inspect the affected source and rerun analysis"})
 }
 
+fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Value]) -> Vec<String> {
+    let mut blocked = Vec::new();
+    for loss in losses {
+        let reason = loss["reason"].as_str().unwrap_or("");
+        if !matches!(
+            reason,
+            "discovery_error"
+                | "read_error"
+                | "changed_during_run"
+                | "parse_recovery"
+                | "parse_error"
+                | "depth_truncation"
+                | "unsupported_construct"
+                | "unresolved_import"
+                | "unresolved_call"
+                | "unresolved_reference"
+                | "unresolved_type"
+        ) {
+            continue;
+        }
+        let paths = loss["scope_paths"].as_array().into_iter().flatten();
+        for path in paths {
+            let Some(key) = path.as_str() else { continue };
+            let python_scope = if key.is_empty() {
+                // A walker failure with no path can conceal any selected source.
+                true
+            } else if let Some(input) = inputs.iter().find(|i| path_key(root, &i.path) == key) {
+                input.disposition == "selected" && input.language.as_deref() == Some("python")
+            } else {
+                // A failed walker may omit its entry from inventory. Decode
+                // exact path bytes only to determine its source language.
+                key.ends_with("2e7079")
+            };
+            if python_scope {
+                blocked.push(key.to_string());
+            }
+        }
+    }
+    blocked.sort();
+    blocked.dedup();
+    blocked
+}
+
+fn consumer_closure_loss(finding: &Value, blockers: &[String]) -> Value {
+    let mut paths = vec![finding["subject"]["path_key"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()];
+    paths.extend(blockers.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    let symbols = vec![finding["subject"]["qualified_name"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()];
+    let id = hash(
+        "loss",
+        &json!({"reason":"semantic_proof_unavailable",
+        "scope_paths":paths,"symbols":symbols,"required_capabilities":["consumer_closure"],
+        "affected_patterns":["data_dead_end"],"stage":"finding"}),
+    );
+    json!({"id":id,"reason":"semantic_proof_unavailable","scope_paths":paths,
+        "ranges":[],"symbols":symbols,"required_capabilities":["consumer_closure"],
+        "affected_patterns":["data_dead_end"],"stage":"finding",
+        "continuation":"complete the relevant consumer scope before asserting private absence"})
+}
+
 pub(crate) fn point_range(
     path_key: &str,
     line: u64,
@@ -119,16 +186,33 @@ fn byte_at(content: &str, line: u32, column: u32) -> u64 {
     (offset + column.saturating_sub(1) as usize).min(content.len()) as u64
 }
 
+fn position_at(content: &str, offset: u64) -> (u64, u64) {
+    let prefix = &content.as_bytes()[..(offset as usize).min(content.len())];
+    let line = 1 + prefix.iter().filter(|byte| **byte == b'\n').count() as u64;
+    let column = prefix
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(prefix.len(), |index| prefix.len() - index - 1) as u64
+        + 1;
+    (line, column)
+}
+
+fn byte_range(path_key: &str, content: &str, location: &crate::parser::ir::Location) -> Value {
+    let start = byte_at(content, location.line, location.column);
+    let end = byte_at(content, location.end_line, location.end_column).max(start);
+    let (start_line, start_column) = position_at(content, start);
+    let (end_line, end_column) = position_at(content, end);
+    json!({"path_key":path_key,"start_byte":start,"end_byte":end,
+        "start_line":start_line,"start_column":start_column,
+        "end_line":end_line,"end_column":end_column})
+}
+
 pub(crate) fn location_range(
     path_key: &str,
     content: &str,
     location: &crate::parser::ir::Location,
 ) -> Value {
-    let start = byte_at(content, location.line, location.column);
-    let end = byte_at(content, location.end_line, location.end_column).max(start);
-    json!({"path_key":path_key,"start_byte":start,"end_byte":end,
-        "start_line":location.line,"start_column":location.column,
-        "end_line":location.end_line,"end_column":location.end_column})
+    byte_range(path_key, content, location)
 }
 
 fn graph_state(root: &Path, graph: &Graph, inputs: &[InputRecord]) -> Value {
@@ -156,22 +240,15 @@ fn graph_state(root: &Path, graph: &Graph, inputs: &[InputRecord]) -> Value {
             // unique binding or attach edges to that shared key.
             continue;
         }
-        ids.insert(id, binding_id.clone());
-        let mut subject = base;
-        subject["binding_id"] = json!(binding_id);
         let content = inputs
             .iter()
             .find(|input| path_key(root, &input.path) == key)
             .and_then(|input| input.content.as_deref());
-        let start = content
-            .map(|s| byte_at(s, symbol.location.line, symbol.location.column))
-            .unwrap_or(0);
-        let end = content
-            .map(|s| byte_at(s, symbol.location.end_line, symbol.location.end_column))
-            .unwrap_or(start);
-        let range = json!({"path_key":key,"start_byte":start,"end_byte":end.max(start),
-            "start_line":symbol.location.line,"start_column":symbol.location.column,
-            "end_line":symbol.location.end_line,"end_column":symbol.location.end_column});
+        let Some(content) = content else { continue };
+        ids.insert(id, binding_id.clone());
+        let mut subject = base;
+        subject["binding_id"] = json!(binding_id);
+        let range = byte_range(&key, content, &symbol.location);
         entities.push(json!({"key":binding_id,"kind":kind,"subject":subject,"range":range}));
     }
     entities.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
@@ -242,16 +319,7 @@ fn build_finding(
         .iter()
         .find(|input| path_key(root, &input.path) == key && input.parsed)?;
     let content = input.content.as_deref()?;
-    let start_byte = byte_at(content, symbol.location.line, symbol.location.column);
-    let end_byte = byte_at(
-        content,
-        symbol.location.end_line,
-        symbol.location.end_column,
-    )
-    .max(start_byte);
-    let range = json!({"path_key":key,"start_byte":start_byte,"end_byte":end_byte,
-        "start_line":symbol.location.line,"start_column":symbol.location.column,
-        "end_line":symbol.location.end_line,"end_column":symbol.location.end_column});
+    let range = byte_range(&key, content, &symbol.location);
     let subject_base = json!({"path_key":key,"language":"python",
         "qualified_name":symbol.qualified_name,"construct_kind":"function"});
     let binding_id = hash("binding", &subject_base);
@@ -368,10 +436,19 @@ pub(crate) fn build(
     graph: &Graph,
     mut losses: Vec<Value>,
 ) -> Value {
-    let mut findings: Vec<Value> = diagnostics
-        .iter()
-        .filter_map(|d| build_finding(root, d, graph, inputs))
-        .collect();
+    let blockers = consumer_closure_blockers(inputs, root, &losses);
+    let mut findings: Vec<Value> = Vec::new();
+    for diagnostic in diagnostics {
+        if let Some(finding) = build_finding(root, diagnostic, graph, inputs) {
+            if blockers.is_empty() {
+                findings.push(finding);
+            } else {
+                // A top-level Python function can be consumed from any selected
+                // Python module. An unavailable module cannot prove zero uses.
+                losses.push(consumer_closure_loss(&finding, &blockers));
+            }
+        }
+    }
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     // Legacy findings without an implemented cause proof are visible as debt,
     // never promoted into the authoritative finding catalog.

@@ -99,8 +99,8 @@ impl LanguageAdapter for PythonAdapter {
         // Extract attribute accesses to track import usage (e.g., os.path.join, sys.argv)
         extract_attribute_accesses(&mut result, content_bytes, path, root, 0);
 
-        // Passing a local function as a value consumes that binding even when
-        // no direct call to it appears in this module.
+        // A function binding read is a consumer even if it is returned,
+        // stored as a callback, or placed inside a value container.
         extract_argument_value_refs(&mut result, content_bytes, path, root, 0);
 
         // Extract type annotation references (parameter types, return types, annotated assignments)
@@ -1568,9 +1568,9 @@ fn extract_attribute_accesses(
     }
 }
 
-/// Record bare identifiers passed as call arguments. The graph resolver only
-/// connects these to unique same-file function bindings; unknown names do not
-/// become proof of consumption.
+/// Record binding reads in value positions. The resolver connects only unique
+/// same-file function bindings; declarations, call targets, and spellings in
+/// strings are never treated as value reads.
 fn extract_argument_value_refs(
     result: &mut ParseResult,
     content: &[u8],
@@ -1581,37 +1581,63 @@ fn extract_argument_value_refs(
     if depth > super::MAX_AST_DEPTH {
         return;
     }
-    if node.kind() == "argument_list" {
-        let mut cursor = node.walk();
-        for argument in node.named_children(&mut cursor) {
-            let value = if argument.kind() == "keyword_argument" {
-                argument.child_by_field_name("value")
-            } else {
-                Some(argument)
-            };
-            if let Some(value) = value.filter(|value| value.kind() == "identifier") {
-                let name = node_text(content, value);
-                if result
-                    .symbols
-                    .iter()
-                    .any(|symbol| symbol.name == name && symbol.kind == SymbolKind::Function)
-                {
-                    result.references.push(Reference {
-                        id: ReferenceId::default(),
-                        from: SymbolId::default(),
-                        to: SymbolId::default(),
-                        kind: ReferenceKind::Read,
-                        location: node_location(path, value),
-                        resolution: ResolutionStatus::Partial(format!("value_use:{name}")),
-                    });
-                }
-            }
+    if node.kind() == "identifier" {
+        let value_position = node.parent().is_some_and(|parent| match parent.kind() {
+            "return_statement" | "list" | "tuple" | "set" | "argument_list" => true,
+            "assignment" => parent
+                .child_by_field_name("right")
+                .is_some_and(|value| value.id() == node.id()),
+            "keyword_argument" | "pair" => parent
+                .child_by_field_name("value")
+                .is_some_and(|value| value.id() == node.id()),
+            _ => false,
+        });
+        let name = node_text(content, node);
+        if value_position
+            && result
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == name && symbol.kind == SymbolKind::Function)
+            && !shadowed_by_parameter(node, content, name)
+        {
+            result.references.push(Reference {
+                id: ReferenceId::default(),
+                from: SymbolId::default(),
+                to: SymbolId::default(),
+                kind: ReferenceKind::Read,
+                location: node_location(path, node),
+                resolution: ResolutionStatus::Partial(format!("value_use:{name}")),
+            });
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         extract_argument_value_refs(result, content, path, child, depth + 1);
     }
+}
+
+fn shadowed_by_parameter(node: Node, content: &[u8], name: &str) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(current) = ancestor {
+        if current.kind() == "function_definition" {
+            return current
+                .child_by_field_name("parameters")
+                .is_some_and(|parameters| parameter_contains_name(parameters, content, name));
+        }
+        ancestor = current.parent();
+    }
+    false
+}
+
+fn parameter_contains_name(node: Node, content: &[u8], name: &str) -> bool {
+    if node.kind() == "identifier" && node_text(content, node) == name {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| parameter_contains_name(child, content, name));
+    found
 }
 
 /// Extracts the root identifier from an attribute access chain.
