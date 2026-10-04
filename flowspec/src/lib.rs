@@ -437,8 +437,8 @@ fn analyze_core(
                         record.rejected_reason = Some("parse_error".to_string());
                         let key = report_authority::path_key(project_path, file);
                         let range = parser::source_parse_loss_range(file, &content).map(
-                            |(start, end, line, column)| {
-                                report_authority::point_range(&key, line, column, start, end)
+                            |(start, end, _, _)| {
+                                report_authority::offset_range(&key, &content, start, end)
                             },
                         );
                         losses.push(report_authority::loss(

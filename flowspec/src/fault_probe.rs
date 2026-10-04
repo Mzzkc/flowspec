@@ -140,6 +140,21 @@ fn loss(
     stage: &str,
     origin: Option<&str>,
 ) {
+    // All probe ranges bind the bytes read by the real core, including AST
+    // nodes spanning newlines. Caller-supplied coordinates are never evidence.
+    let range = range.map(|range| {
+        state.sources.get(path).map_or_else(
+            || range.clone(),
+            |content| {
+                crate::report_authority::offset_range(
+                    &crate::report_authority::path_key(&state.root, path),
+                    content,
+                    range["start_byte"].as_u64().unwrap_or(0),
+                    range["end_byte"].as_u64().unwrap_or(0),
+                )
+            },
+        )
+    });
     let mut entry = crate::report_authority::loss(
         reason,
         crate::report_authority::path_key(&state.root, path),

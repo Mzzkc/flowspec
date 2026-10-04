@@ -195,14 +195,23 @@ fn position_at(content: &str, offset: u64) -> (u64, u64) {
     (line, column)
 }
 
-fn byte_range(path_key: &str, content: &str, location: &crate::parser::ir::Location) -> Value {
-    let start = byte_at(content, location.line, location.column);
-    let end = byte_at(content, location.end_line, location.end_column).max(start);
+pub(crate) fn offset_range(path_key: &str, content: &str, start: u64, end: u64) -> Value {
+    let start = start.min(content.len() as u64);
+    let end = end.min(content.len() as u64).max(start);
     let (start_line, start_column) = position_at(content, start);
     let (end_line, end_column) = position_at(content, end);
     json!({"path_key":path_key,"start_byte":start,"end_byte":end,
         "start_line":start_line,"start_column":start_column,
         "end_line":end_line,"end_column":end_column})
+}
+
+fn byte_range(path_key: &str, content: &str, location: &crate::parser::ir::Location) -> Value {
+    offset_range(
+        path_key,
+        content,
+        byte_at(content, location.line, location.column),
+        byte_at(content, location.end_line, location.end_column),
+    )
 }
 
 pub(crate) fn location_range(
