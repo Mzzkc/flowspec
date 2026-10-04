@@ -541,14 +541,11 @@ fn insert_references(
                 // Resolve to: find the import symbol with matching name
                 #[cfg(feature = "fault_probe")]
                 let injected = {
-                    #[cfg(all(feature = "fault_probe", not(test)))]
                     let origin = if reference.kind == ReferenceKind::Annotation {
                         "Annotation"
                     } else {
                         "Value"
                     };
-                    #[cfg(test)]
-                    let origin = "Value";
                     crate::fault_probe::attribute_edge(&reference.location, origin, root_name)
                 };
                 #[cfg(not(feature = "fault_probe"))]

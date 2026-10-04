@@ -578,7 +578,6 @@ fn ref_kind_to_edge_kind(kind: ReferenceKind) -> EdgeKind {
     match kind {
         ReferenceKind::Call => EdgeKind::Calls,
         ReferenceKind::Read | ReferenceKind::Write => EdgeKind::References,
-        #[cfg(all(feature = "fault_probe", not(test)))]
         ReferenceKind::Annotation => EdgeKind::References,
         ReferenceKind::Import | ReferenceKind::Export => EdgeKind::References,
         ReferenceKind::Implement | ReferenceKind::Derive => EdgeKind::References,

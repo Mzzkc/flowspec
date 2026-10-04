@@ -154,6 +154,7 @@ fn consumer_closure_loss(finding: &Value, blockers: &[String]) -> Value {
         "continuation":"complete the relevant consumer scope before asserting private absence"})
 }
 
+#[cfg(feature = "fault_probe")]
 pub(crate) fn point_range(
     path_key: &str,
     line: u64,

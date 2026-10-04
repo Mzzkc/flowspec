@@ -1228,17 +1228,14 @@ fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Pat
         id: ReferenceId::default(),
         from: SymbolId::default(),
         to: SymbolId::default(),
-        kind: ReferenceKind::Read,
+        kind: ReferenceKind::Annotation,
         location: node_location(path, node),
         resolution: ResolutionStatus::Partial(
             "prerequisite_loss:capability_unavailable:type_flows".to_string(),
         ),
     });
     if let Some(name) = extract_annotation_root_type(content, node) {
-        #[cfg(all(feature = "fault_probe", not(test)))]
         let kind = ReferenceKind::Annotation;
-        #[cfg(any(not(feature = "fault_probe"), test))]
-        let kind = ReferenceKind::Read;
         result.references.push(Reference {
             id: ReferenceId::default(),
             from: SymbolId::default(),
@@ -1520,10 +1517,20 @@ fn extract_all_calls(
             let callee = extract_callee_name(content, func_node);
             if callee.is_none()
                 || callee.as_deref().is_some_and(|name| {
+                    let stem = path
+                        .file_name()
+                        .map(|stem| stem.to_string_lossy())
+                        .unwrap_or_default();
+                    let declared = result.symbols.iter().any(|symbol| {
+                        symbol.name == name
+                            && (symbol.qualified_name == format!("{stem}::{name}")
+                                || symbol.qualified_name == format!("{stem}::import::{name}"))
+                    });
                     matches!(
                         name,
                         "globals" | "locals" | "eval" | "exec" | "getattr" | "__import__"
-                    )
+                    ) && !declared
+                        && !shadowed_by_local_binding(func_node, content, name)
                 })
             {
                 // The actual operation consults a runtime namespace or a
@@ -1807,6 +1814,18 @@ fn shadowed_by_local_binding(node: Node, content: &[u8], name: &str) -> bool {
             return true;
         }
         if current.kind() == "function_definition" {
+            // Defaults evaluate in the enclosing scope, before this function's
+            // parameter and local bindings exist.
+            if current
+                .child_by_field_name("parameters")
+                .is_some_and(|parameters| {
+                    parameters.start_byte() <= node.start_byte()
+                        && node.end_byte() <= parameters.end_byte()
+                })
+            {
+                ancestor = current.parent();
+                continue;
+            }
             let parameter = current
                 .child_by_field_name("parameters")
                 .is_some_and(|parameters| parameter_contains_name(parameters, content, name));
@@ -1821,10 +1840,12 @@ fn shadowed_by_local_binding(node: Node, content: &[u8], name: &str) -> bool {
 }
 
 fn body_binds_name(node: Node, content: &[u8], name: &str) -> bool {
-    if matches!(
-        node.kind(),
-        "function_definition" | "class_definition" | "lambda"
-    ) {
+    if matches!(node.kind(), "function_definition" | "class_definition") {
+        return node
+            .child_by_field_name("name")
+            .is_some_and(|binding| node_text(content, binding) == name);
+    }
+    if node.kind() == "lambda" {
         return false;
     }
     if matches!(

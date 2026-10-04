@@ -81,7 +81,7 @@ pub enum Visibility {
 
 /// The kind of reference edge between symbols.
 ///
-/// Maps to `architecture.yaml:162`. Exactly 7 variants.
+/// Maps syntax origin to graph edge kinds; annotations preserve their own origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
 pub enum ReferenceKind {
     /// A function or method call (`func()`, `self.method()`, `Class()`).
@@ -89,9 +89,6 @@ pub enum ReferenceKind {
     Call,
     /// A variable read. Maps to `EdgeKind::References`.
     Read,
-    /// Probe build: a type annotation read with preserved parser origin.
-    #[cfg(all(feature = "fault_probe", not(test)))]
-    Annotation,
     /// A variable write / assignment. Maps to `EdgeKind::References`.
     Write,
     /// An import statement (`import x`, `from x import y`). Maps to `EdgeKind::References`.
@@ -102,6 +99,8 @@ pub enum ReferenceKind {
     Implement,
     /// A derive macro or attribute. Maps to `EdgeKind::References`.
     Derive,
+    /// A type annotation read, distinct from a runtime value read in every build.
+    Annotation,
 }
 
 /// The kind of boundary crossed by a reference.

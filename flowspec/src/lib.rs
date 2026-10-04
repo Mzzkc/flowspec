@@ -506,6 +506,12 @@ fn analyze_core(
             },
         );
         loss["required_capabilities"] = serde_json::json!([capability]);
+        loss["origin"] =
+            serde_json::json!(if reference.kind == parser::ir::ReferenceKind::Annotation {
+                "Annotation"
+            } else {
+                "Value"
+            });
         loss["affected_patterns"] = if capability == "type_flows" {
             serde_json::json!(["contract_mismatch", "orphaned_impl"])
         } else {
