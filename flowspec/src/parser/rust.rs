@@ -371,20 +371,6 @@ fn extract_function(
 
     let qualified_name = build_qualified_name(result, scope_stack, file_stem, &name);
 
-    // A test attribute registers this function with the Rust test harness.
-    // The registration is an external consumer even without a lexical call.
-    let mut annotations = Vec::new();
-    let mut previous = node.prev_named_sibling();
-    while let Some(sibling) = previous {
-        if sibling.kind() != "attribute_item" {
-            break;
-        }
-        if node_text(content, sibling).trim() == "#[test]" {
-            annotations.push("entry_point".to_string());
-        }
-        previous = sibling.prev_named_sibling();
-    }
-
     result.symbols.push(Symbol {
         id: SymbolId::default(),
         kind,
@@ -395,7 +381,7 @@ fn extract_function(
         location: node_location(path, node),
         resolution: ResolutionStatus::Resolved,
         scope: ScopeId::default(),
-        annotations,
+        annotations: vec![],
     });
 
     // Create function scope for nested definitions
