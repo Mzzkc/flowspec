@@ -1531,15 +1531,34 @@ fn extract_all_calls(
                         .file_name()
                         .map(|stem| stem.to_string_lossy())
                         .unwrap_or_default();
-                    let declared = result.symbols.iter().any(|symbol| {
-                        symbol.name == name
-                            && (symbol.qualified_name == format!("{stem}::{name}")
-                                || symbol.qualified_name == format!("{stem}::import::{name}"))
+                    let local_provider = result.symbols.iter().any(|symbol| {
+                        symbol.name == name && symbol.qualified_name == format!("{stem}::{name}")
                     });
-                    matches!(
-                        name,
+                    let imported_provider = result.symbols.iter().find(|symbol| {
+                        symbol.name == name
+                            && symbol.qualified_name == format!("{stem}::import::{name}")
+                    });
+                    let provider_name = imported_provider
+                        .and_then(|symbol| {
+                            symbol
+                                .annotations
+                                .iter()
+                                .find_map(|annotation| annotation.strip_prefix("original_name:"))
+                        })
+                        .unwrap_or(name);
+                    let namespace_operation = matches!(
+                        provider_name,
                         "globals" | "locals" | "eval" | "exec" | "getattr" | "__import__"
-                    ) && !declared
+                    );
+                    let builtin_provider = imported_provider.is_some_and(|symbol| {
+                        symbol
+                            .annotations
+                            .iter()
+                            .any(|annotation| annotation == "from:builtins")
+                    });
+                    namespace_operation
+                        && !local_provider
+                        && (imported_provider.is_none() || builtin_provider)
                         && !shadowed_by_local_binding(func_node, content, name)
                 })
             {
