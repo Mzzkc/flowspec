@@ -506,14 +506,18 @@ fn analyze_core(
             },
         );
         loss["required_capabilities"] = serde_json::json!([capability]);
-        loss["affected_patterns"] = serde_json::json!([
-            "data_dead_end",
-            "isolated_cluster",
-            "partial_wiring",
-            "asymmetric_handling",
-            "contract_mismatch",
-            "orphaned_impl"
-        ]);
+        loss["affected_patterns"] = if capability == "type_flows" {
+            serde_json::json!(["contract_mismatch", "orphaned_impl"])
+        } else {
+            serde_json::json!([
+                "data_dead_end",
+                "isolated_cluster",
+                "partial_wiring",
+                "asymmetric_handling",
+                "contract_mismatch",
+                "orphaned_impl"
+            ])
+        };
         losses.push(loss);
     }
     for reference in graph.unresolved_calls() {
