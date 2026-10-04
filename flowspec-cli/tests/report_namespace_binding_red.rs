@@ -6,7 +6,7 @@ fn resolved_local_globals_binding_does_not_invent_namespace_uncertainty() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("module.py"),
-        "def _helper():\n    return 1\ndef globals():\n    return {}\nresult = globals()\n",
+        "def _helper():\n    return 1\ndef globals():\n    return {}\nglobals()\n",
     )
     .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_flowspec"))

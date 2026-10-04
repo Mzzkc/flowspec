@@ -384,6 +384,7 @@ mod tests {
         let variants = vec![
             ReferenceKind::Call,
             ReferenceKind::Read,
+            ReferenceKind::Annotation,
             ReferenceKind::Write,
             ReferenceKind::Import,
             ReferenceKind::Export,
@@ -392,8 +393,8 @@ mod tests {
         ];
         assert_eq!(
             variants.len(),
-            7,
-            "ReferenceKind must have exactly 7 variants per spec"
+            8,
+            "ReferenceKind must have all 8 production reference kinds, including Annotation origin"
         );
     }
 

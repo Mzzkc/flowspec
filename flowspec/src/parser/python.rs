@@ -3048,7 +3048,7 @@ mod tests {
         let content = "def foo(x: int):\n    pass\n";
         let result = parse_fixture_content("type_param.py", content);
         let has_ref = result.references.iter().any(|r| {
-            r.kind == ReferenceKind::Read
+            r.kind == ReferenceKind::Annotation
                 && matches!(&r.resolution, ResolutionStatus::Partial(s) if s == "attribute_access:int")
         });
         assert!(
