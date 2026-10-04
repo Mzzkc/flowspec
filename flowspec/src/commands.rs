@@ -182,7 +182,7 @@ pub fn run_analyze_with_gate(
         &mut result.manifest.summary.diagnostic_summary,
     );
 
-    let output = match format {
+    let mut output = match format {
         OutputFormat::Json => {
             serde_json::to_string_pretty(&result.manifest).map_err(|e| FlowspecError::Manifest {
                 reason: e.to_string(),
@@ -220,40 +220,78 @@ pub fn run_analyze_with_gate(
         OutputFormat::Sarif => format_with(format, |f| f.format_manifest(&result.manifest))?,
     };
 
-    // The additive authority carries one record per discovered input and the
-    // full source-bound graph. Its fixed provenance cost is independent of
-    // diagnostic amplification. Apply the historical ratio to the same
-    // eight-section compatibility payload that established that limit.
-    let size_output = if matches!(format, OutputFormat::Json | OutputFormat::Yaml)
+    if validate_manifest_size(&output, result.source_bytes, format_name(format)).is_err()
+        && matches!(format, OutputFormat::Json | OutputFormat::Yaml)
         && result.manifest.authority.is_some()
     {
-        let mut legacy = result.manifest.clone();
-        legacy.authority = None;
-        legacy.losses.clear();
-        legacy.pattern_state.clear();
-        legacy.full_findings_total = 0;
-        legacy.displayed_findings_total = 0;
-        match format {
+        bound_analyze_report(&mut result.manifest);
+        output = match format {
             OutputFormat::Json => {
-                serde_json::to_string_pretty(&legacy).map_err(|e| FlowspecError::Manifest {
+                serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
                     reason: e.to_string(),
                 })?
             }
             OutputFormat::Yaml => {
-                serde_yaml::to_string(&legacy).map_err(|e| FlowspecError::Manifest {
+                serde_yaml::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
                     reason: e.to_string(),
                 })?
             }
             _ => unreachable!(),
-        }
-    } else {
-        output.clone()
-    };
-    validate_manifest_size(&size_output, result.source_bytes, format_name(format))?;
+        };
+    }
+    // Check exactly the bytes that will be written. The compact projection
+    // still carries the full finding catalog and input inventory in authority.
+    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
 
     write_output(&output, output_path)?;
 
     Ok(crate::report_exit_code(&result.manifest, None))
+}
+
+fn bound_analyze_report(manifest: &mut Manifest) {
+    let Some(authority) = manifest.authority.as_mut() else {
+        return;
+    };
+    authority["analysis_graph"] = serde_json::json!({
+        "entities":[],"flows":[],"boundaries":[],"dependency_graph":[],"type_flows":[]
+    });
+    let loss =
+        crate::report_authority::loss("output_truncation", String::new(), None, "serialization");
+    authority["losses"]
+        .as_array_mut()
+        .expect("report losses")
+        .push(loss);
+    authority["execution"] = serde_json::json!("incomplete");
+    authority["outcome"] = serde_json::json!("incomplete");
+    authority["continuation"]["truncated"] = serde_json::json!(true);
+    authority["continuation"]["shown"] = serde_json::json!(0);
+    authority["continuation"]["matched_total"] = serde_json::json!(0);
+    authority["display"]["indices"] = serde_json::json!([]);
+    authority["gate"]["verdict"] = serde_json::json!("not_evaluated");
+    crate::report_authority::refresh_identity(authority);
+
+    manifest.execution = Some(crate::Execution::Incomplete);
+    manifest.outcome = Some(crate::Outcome::Incomplete);
+    manifest.losses = authority["losses"]
+        .as_array()
+        .expect("report losses")
+        .clone();
+    manifest.diagnostics.clear();
+    manifest.entities.clear();
+    manifest.flows.clear();
+    manifest.boundaries.clear();
+    manifest.dependency_graph.clear();
+    manifest.type_flows.clear();
+    manifest.summary.modules.clear();
+    manifest.summary.entry_points.clear();
+    manifest.summary.exit_points.clear();
+    manifest.summary.key_flows.clear();
+    recompute_diagnostic_summary(
+        &manifest.diagnostics,
+        &mut manifest.summary.diagnostic_summary,
+    );
+    manifest.metadata.diagnostic_count = 0;
+    manifest.displayed_findings_total = 0;
 }
 
 fn execution_name(execution: crate::Execution) -> &'static str {
