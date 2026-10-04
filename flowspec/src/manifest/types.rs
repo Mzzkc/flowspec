@@ -13,6 +13,21 @@ use serde::{Deserialize, Serialize};
 /// empty (empty lists, not omitted) so consumers can rely on a stable schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Full analyzer-produced JSON contract. Legacy sections are display projections.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub authority: Option<serde_json::Value>,
+    /// Compatibility mirror of source loss records in the authoritative report.
+    #[serde(default)]
+    pub losses: Vec<serde_json::Value>,
+    /// Compatibility mirror of pattern state in the authoritative report.
+    #[serde(default)]
+    pub pattern_state: Vec<serde_json::Value>,
+    /// Count of the unfiltered authoritative catalog.
+    #[serde(default)]
+    pub full_findings_total: u64,
+    /// Count of the current display projection.
+    #[serde(default)]
+    pub displayed_findings_total: u64,
     /// Schema version for analyzed reports; absent on legacy empty payloads.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub schema_version: Option<u32>,
@@ -286,6 +301,11 @@ impl Manifest {
     /// Create an empty manifest with all sections present but unpopulated.
     pub fn empty() -> Self {
         Self {
+            authority: None,
+            losses: Vec::new(),
+            pattern_state: Vec::new(),
+            full_findings_total: 0,
+            displayed_findings_total: 0,
             schema_version: None,
             execution: None,
             findings_present: None,
@@ -328,6 +348,11 @@ impl Manifest {
     /// Create a sample fully populated manifest for testing.
     pub fn sample_full() -> Self {
         Self {
+            authority: None,
+            losses: Vec::new(),
+            pattern_state: Vec::new(),
+            full_findings_total: 0,
+            displayed_findings_total: 0,
             schema_version: None,
             execution: None,
             findings_present: None,

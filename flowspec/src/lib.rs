@@ -34,6 +34,7 @@ pub mod graph;
 pub mod manifest;
 /// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
+mod report_authority;
 
 /// MCP (Model Context Protocol) server — behind the `mcp` feature flag.
 #[cfg(feature = "mcp")]
@@ -265,7 +266,8 @@ pub fn analyze(
     }
 
     // Discover source files (respects .gitignore, config exclude, hardcoded skip_dirs)
-    let (files, detected_langs) = discover_source_files(project_path, &config.exclude);
+    let (files, detected_langs, mut input_records, mut losses) =
+        discover_source_files(project_path, &config.exclude);
 
     // Language priority: CLI flags > config languages > auto-detect
     let active_languages = if !languages.is_empty() {
@@ -312,16 +314,29 @@ pub fn analyze(
 
     for file in &files {
         if let Some(adapter) = adapters.iter().find(|a| a.can_handle(file)) {
+            let record = input_records
+                .iter_mut()
+                .find(|record| record.path == *file)
+                .expect("discovered selected source");
             completeness.selected += 1;
             let content = match std::fs::read_to_string(file) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Failed to read {}: {}", file.display(), e);
                     completeness.reject(file.display().to_string(), "read_error");
+                    record.rejected_reason = Some("read_error".to_string());
+                    losses.push(report_authority::loss(
+                        "read_error",
+                        report_authority::path_key(project_path, file),
+                        None,
+                        "read",
+                    ));
                     continue;
                 }
             };
             completeness.read += 1;
+            record.read = true;
+            record.content = Some(content.clone());
             source_bytes += content.len() as u64;
             let parse_loss = parser::source_has_parse_loss(file, &content);
             match adapter.parse_file(file, &content) {
@@ -330,14 +345,35 @@ pub fn analyze(
                     if parse_loss {
                         tracing::warn!("Parse recovery in {}", file.display());
                         completeness.reject(file.display().to_string(), "parse_error");
+                        record.rejected_reason = Some("parse_error".to_string());
+                        let key = report_authority::path_key(project_path, file);
+                        let range = parser::source_parse_loss_range(file, &content).map(
+                            |(start, end, line, column)| {
+                                report_authority::point_range(&key, line, column, start, end)
+                            },
+                        );
+                        losses.push(report_authority::loss(
+                            "parse_recovery",
+                            key,
+                            range,
+                            "parse",
+                        ));
                     } else {
                         parsed_file_count += 1;
                         completeness.parsed += 1;
+                        record.parsed = true;
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse {}: {}", file.display(), e);
                     completeness.reject(file.display().to_string(), "parse_error");
+                    record.rejected_reason = Some("parse_error".to_string());
+                    losses.push(report_authority::loss(
+                        "parse_error",
+                        report_authority::path_key(project_path, file),
+                        None,
+                        "parse",
+                    ));
                 }
             }
         }
@@ -353,6 +389,28 @@ pub fn analyze(
     let module_map = build_module_map(&files);
     if !module_map.is_empty() {
         resolve_cross_file_imports(&mut graph, &module_map);
+    }
+    // A relative import is a declared local obligation. If the real resolver
+    // leaves it unresolved, absence of downstream findings is not established.
+    for (_, symbol) in graph.all_symbols() {
+        if symbol.annotations.iter().any(|a| a.starts_with("from:."))
+            && symbol.resolution != parser::ir::ResolutionStatus::Resolved
+        {
+            let key = report_authority::path_key(project_path, &symbol.location.file);
+            let range = report_authority::point_range(
+                &key,
+                symbol.location.line as u64,
+                symbol.location.column as u64,
+                0,
+                0,
+            );
+            losses.push(report_authority::loss(
+                "unresolved_import",
+                key,
+                Some(range),
+                "resolve",
+            ));
+        }
     }
 
     // Warn when explicitly requested languages produce no analysis results
@@ -642,6 +700,11 @@ pub fn analyze(
     };
 
     let manifest = Manifest {
+        authority: None,
+        losses: Vec::new(),
+        pattern_state: Vec::new(),
+        full_findings_total: 0,
+        displayed_findings_total: 0,
         schema_version: None,
         execution: None,
         findings_present: None,
@@ -651,7 +714,7 @@ pub fn analyze(
             project: project_name,
             analyzed_at: chrono::Utc::now().to_rfc3339(),
             flowspec_version: env!("CARGO_PKG_VERSION").to_string(),
-            languages: active_languages,
+            languages: active_languages.clone(),
             file_count: parsed_file_count,
             entity_count: entities.len() as u64,
             flow_count: flows.len() as u64,
@@ -706,8 +769,71 @@ pub fn analyze(
         type_flows: Vec::new(),
     };
 
+    let authority = report_authority::build(
+        project_path,
+        config,
+        &active_languages,
+        &input_records,
+        &manifest.diagnostics,
+        &graph,
+        losses,
+    );
+    let mut manifest = manifest.with_report(completeness);
+    manifest.execution = Some(if authority["execution"] == "incomplete" {
+        Execution::Incomplete
+    } else {
+        Execution::Complete
+    });
+    manifest.outcome = Some(if authority["outcome"] == "incomplete" {
+        Outcome::Incomplete
+    } else if authority["outcome"] == "findings" {
+        Outcome::Findings
+    } else {
+        Outcome::Clean
+    });
+    manifest.findings_present = Some(authority["findings_present"] == true);
+    manifest.full_findings_total = authority["findings"]["total"].as_u64().unwrap_or(0);
+    manifest.displayed_findings_total = manifest.diagnostics.len() as u64;
+    manifest.losses = authority["losses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|loss| {
+            let mut legacy = loss.clone();
+            let paths: Vec<String> = loss["scope_paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|key| key.as_str())
+                .filter_map(|hex| {
+                    let bytes: Option<Vec<u8>> = (0..hex.len())
+                        .step_by(2)
+                        .map(|i| {
+                            hex.get(i..i + 2)
+                                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                        })
+                        .collect();
+                    bytes.and_then(|bytes| String::from_utf8(bytes).ok())
+                })
+                .collect();
+            legacy["scope"] = serde_json::json!({"paths":paths});
+            legacy
+        })
+        .collect();
+    manifest.pattern_state = authority["pattern_state"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|pattern| {
+            pattern["cells"].as_array().into_iter().flatten().map(|cell| {
+            serde_json::json!({"pattern_id":pattern["pattern_id"],"language":cell["language"],
+                "state":cell["state"],"reason_codes":cell["reason_codes"]})
+        })
+        })
+        .collect();
+    manifest.authority = Some(authority);
     Ok(AnalysisResult {
-        manifest: manifest.with_report(completeness),
+        manifest,
         has_critical,
         has_findings,
         graph,
@@ -869,9 +995,16 @@ pub fn diagnose(
 fn discover_source_files(
     project_path: &Path,
     exclude_patterns: &[String],
-) -> (Vec<PathBuf>, Vec<String>) {
+) -> (
+    Vec<PathBuf>,
+    Vec<String>,
+    Vec<report_authority::InputRecord>,
+    Vec<serde_json::Value>,
+) {
     let mut files = Vec::new();
     let mut languages = HashSet::new();
+    let mut records = Vec::new();
+    let mut losses = Vec::new();
 
     // Hardcoded safety-net directories — always skipped, even without config
     let skip_dirs: HashSet<&str> = [
@@ -912,6 +1045,12 @@ fn discover_source_files(
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Directory walk error: {}", e);
+                losses.push(report_authority::loss(
+                    "discovery_error",
+                    String::new(),
+                    None,
+                    "discovery",
+                ));
                 continue;
             }
         };
@@ -960,6 +1099,13 @@ fn discover_source_files(
                 })
         });
         if matches_exclude {
+            let mut record = report_authority::InputRecord::new(
+                path.to_path_buf(),
+                "policy_excluded",
+                report_authority::language_for(path),
+            );
+            record.reason = Some("config_exclude".to_string());
+            records.push(record);
             continue;
         }
 
@@ -968,27 +1114,57 @@ fn discover_source_files(
             match ext.to_str() {
                 Some("py") => {
                     files.push(path.to_path_buf());
+                    records.push(report_authority::InputRecord::new(
+                        path.to_path_buf(),
+                        "selected",
+                        Some("python".to_string()),
+                    ));
                     languages.insert("python".to_string());
                 }
                 Some("js" | "jsx" | "mjs" | "cjs") => {
                     files.push(path.to_path_buf());
+                    records.push(report_authority::InputRecord::new(
+                        path.to_path_buf(),
+                        "selected",
+                        Some("javascript".to_string()),
+                    ));
                     languages.insert("javascript".to_string());
                 }
                 Some("ts" | "tsx") => {
                     files.push(path.to_path_buf());
+                    records.push(report_authority::InputRecord::new(
+                        path.to_path_buf(),
+                        "selected",
+                        Some("typescript".to_string()),
+                    ));
                     languages.insert("typescript".to_string());
                 }
                 Some("rs") => {
                     files.push(path.to_path_buf());
+                    records.push(report_authority::InputRecord::new(
+                        path.to_path_buf(),
+                        "selected",
+                        Some("rust".to_string()),
+                    ));
                     languages.insert("rust".to_string());
                 }
-                _ => {}
+                _ => records.push(report_authority::InputRecord::new(
+                    path.to_path_buf(),
+                    "unsupported",
+                    None,
+                )),
             }
+        } else {
+            records.push(report_authority::InputRecord::new(
+                path.to_path_buf(),
+                "unsupported",
+                None,
+            ));
         }
     }
 
     let detected: Vec<String> = languages.into_iter().collect();
-    (files, detected)
+    (files, detected, records, losses)
 }
 
 /// Maps a [`SymbolKind`] to the abbreviated string used in entity entries.

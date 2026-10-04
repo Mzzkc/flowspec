@@ -81,6 +81,12 @@ enum Commands {
         /// Minimum confidence to report (high, moderate, low).
         #[arg(long)]
         confidence: Option<ConfidenceArg>,
+        /// Minimum severity for the finding gate, independent of display filtering.
+        #[arg(long)]
+        gate_severity: Option<SeverityArg>,
+        /// Minimum confidence for the finding gate, independent of display filtering.
+        #[arg(long)]
+        gate_confidence: Option<ConfidenceArg>,
     },
 
     /// Run diagnostics only — output structural issues found.
@@ -290,8 +296,10 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             checks,
             severity,
             confidence,
+            gate_severity,
+            gate_confidence,
             ..
-        } => commands::run_analyze(
+        } => commands::run_analyze_with_gate(
             &path,
             &language,
             format,
@@ -300,6 +308,8 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             &checks,
             severity.map(|s| s.to_severity()),
             confidence.map(|c| c.to_confidence()),
+            gate_severity.map(|s| s.to_severity()),
+            gate_confidence.map(|c| c.to_confidence()),
         )?,
         Commands::Diagnose {
             path,

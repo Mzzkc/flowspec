@@ -32,6 +32,10 @@ pub struct Config {
     pub languages: Vec<String>,
     /// Patterns to exclude from analysis.
     pub exclude: Vec<String>,
+    /// How this exact effective policy entered the analyzer.
+    pub origin: String,
+    /// Digest of the bytes consumed while loading the policy file.
+    pub source_sha256: Option<String>,
 }
 
 impl Config {
@@ -55,27 +59,33 @@ impl Config {
                     ),
                 });
             }
-            let config_file = read_config_file(path)?;
+            let (config_file, source_sha256) = read_config_file(path)?;
             return Ok(Self {
                 config_path: Some(path.to_path_buf()),
                 languages: config_file.languages,
                 exclude: config_file.exclude,
+                origin: "explicit".to_string(),
+                source_sha256: Some(source_sha256),
             });
         }
 
         let default_path = project_root.join(".flowspec").join("config.yaml");
         if default_path.exists() {
-            let config_file = read_config_file(&default_path)?;
+            let (config_file, source_sha256) = read_config_file(&default_path)?;
             Ok(Self {
                 config_path: Some(default_path),
                 languages: config_file.languages,
                 exclude: config_file.exclude,
+                origin: "implicit".to_string(),
+                source_sha256: Some(source_sha256),
             })
         } else {
             Ok(Self {
                 config_path: None,
                 languages: Vec::new(),
                 exclude: Vec::new(),
+                origin: "default".to_string(),
+                source_sha256: None,
             })
         }
     }
@@ -85,17 +95,18 @@ impl Config {
 ///
 /// Handles: empty files, comment-only YAML, malformed YAML, encoding issues.
 /// Logs a warning on parse failure rather than crashing.
-fn read_config_file(path: &Path) -> Result<ConfigFile, crate::error::FlowspecError> {
+fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::FlowspecError> {
     let failure = |reason: String| crate::error::FlowspecError::Config {
         reason: format!("{}: {}", path.display(), reason),
         suggestion: "Correct the config YAML or pass a valid --config path".to_string(),
     };
-    let content =
-        std::fs::read_to_string(path).map_err(|e| failure(format!("read failed: {e}")))?;
+    let bytes = std::fs::read(path).map_err(|e| failure(format!("read failed: {e}")))?;
+    let source_sha256 = crate::report_authority::digest(&bytes);
+    let content = std::str::from_utf8(&bytes).map_err(|e| failure(format!("read failed: {e}")))?;
 
     // Empty content or whitespace-only → defaults
     if content.trim().is_empty() {
-        return Ok(ConfigFile::default());
+        return Ok((ConfigFile::default(), source_sha256));
     }
 
     // Warn on unknown top-level config keys (dogfood 2026-06-15: the silent-drop of
@@ -106,7 +117,7 @@ fn read_config_file(path: &Path) -> Result<ConfigFile, crate::error::FlowspecErr
     let value = serde_yaml::from_str::<serde_yaml::Value>(&content)
         .map_err(|e| failure(format!("parse failed: {e}")))?;
     if value.is_null() {
-        return Ok(ConfigFile::default());
+        return Ok((ConfigFile::default(), source_sha256));
     }
     if let serde_yaml::Value::Mapping(map) = value {
         for key in map.keys() {
@@ -130,7 +141,7 @@ fn read_config_file(path: &Path) -> Result<ConfigFile, crate::error::FlowspecErr
             return Err(failure(format!("exclude path escapes project: {pattern}")));
         }
     }
-    Ok(config)
+    Ok((config, source_sha256))
 }
 
 #[cfg(test)]

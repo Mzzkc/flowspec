@@ -64,6 +64,34 @@ pub fn run_analyze(
     severity: Option<crate::Severity>,
     confidence: Option<crate::Confidence>,
 ) -> Result<u8, FlowspecError> {
+    run_analyze_with_gate(
+        path,
+        languages,
+        format,
+        output_path,
+        config_path,
+        checks,
+        severity,
+        confidence,
+        None,
+        None,
+    )
+}
+
+/// Analyze with a gate threshold independent of presentation filters.
+#[allow(clippy::too_many_arguments)]
+pub fn run_analyze_with_gate(
+    path: &Path,
+    languages: &[String],
+    format: OutputFormat,
+    output_path: Option<&Path>,
+    config_path: Option<&Path>,
+    checks: &[String],
+    severity: Option<crate::Severity>,
+    confidence: Option<crate::Confidence>,
+    gate_severity: Option<crate::Severity>,
+    gate_confidence: Option<crate::Confidence>,
+) -> Result<u8, FlowspecError> {
     if !matches!(
         format,
         OutputFormat::Yaml | OutputFormat::Json | OutputFormat::Sarif | OutputFormat::Summary
@@ -95,6 +123,17 @@ pub fn run_analyze(
 
     // Exit code is based on UNFILTERED diagnostics — CI gate contract
     let has_critical = result.has_critical;
+    if let Some(authority) = result.manifest.authority.as_mut() {
+        crate::report_authority::set_gate(
+            authority,
+            &gate_severity
+                .unwrap_or(crate::Severity::Critical)
+                .to_string(),
+            &gate_confidence
+                .unwrap_or(crate::Confidence::Low)
+                .to_string(),
+        );
+    }
 
     // Apply diagnostic filters to output only
     apply_diagnostic_filters(
@@ -103,6 +142,39 @@ pub fn run_analyze(
         severity,
         confidence,
     );
+    result.manifest.displayed_findings_total = result.manifest.diagnostics.len() as u64;
+    if let Some(authority) = result.manifest.authority.as_mut() {
+        authority["display"]["filters"] = serde_json::json!({
+            "checks":checks,"min_severity":severity.map(|s|s.to_string()),
+            "min_confidence":confidence.map(|c|c.to_string())});
+        let indices: Vec<usize> = authority["findings"]["all"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, finding)| {
+                let pattern = finding["pattern_id"].as_str().unwrap_or("");
+                (checks.is_empty() || checks.iter().any(|c| c == pattern))
+                    && severity.is_none_or(|min| {
+                        crate::Severity::from_str_checked(
+                            finding["severity"].as_str().unwrap_or(""),
+                        )
+                        .is_some_and(|s| s >= min)
+                    })
+                    && confidence.is_none_or(|min| {
+                        crate::Confidence::from_str_checked(
+                            finding["confidence"].as_str().unwrap_or(""),
+                        )
+                        .is_some_and(|c| c >= min)
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        authority["display"]["indices"] = serde_json::json!(indices);
+        authority["continuation"]["shown"] = serde_json::json!(indices.len());
+        authority["continuation"]["matched_total"] = serde_json::json!(indices.len());
+        authority["continuation"]["full"] = authority["findings"]["total"].clone();
+    }
 
     // Update metadata and summary counts to reflect filtered diagnostics (#16)
     result.manifest.metadata.diagnostic_count = result.manifest.diagnostics.len() as u64;
@@ -155,7 +227,13 @@ pub fn run_analyze(
 
     if result.manifest.execution == Some(crate::Execution::Incomplete) {
         Ok(3)
-    } else if has_critical {
+    } else if result
+        .manifest
+        .authority
+        .as_ref()
+        .is_some_and(|a| a["gate"]["verdict"] == "fail")
+        || has_critical && result.manifest.authority.is_none()
+    {
         Ok(2)
     } else {
         Ok(0)
