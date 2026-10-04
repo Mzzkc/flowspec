@@ -559,13 +559,12 @@ mod tests {
             "_internal_helper should be detected as dead end"
         );
         assert!(
-            public_fn.is_some(),
-            "format_timestamp should be detected (at lower confidence)"
+            public_fn.is_none(),
+            "Public API is not a proven private dead end"
         );
-
-        assert!(
-            internal.unwrap().confidence > public_fn.unwrap().confidence,
-            "Private zero-caller function must have higher confidence than public"
+        assert_eq!(
+            internal.unwrap().confidence,
+            crate::analyzer::diagnostic::Confidence::High
         );
     }
 

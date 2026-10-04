@@ -199,7 +199,7 @@ fn t12_e2e_pathological_input_still_rejected_after_byte_floor() {
     let tmp = tempfile::tempdir().unwrap();
     let mut source = String::new();
     for i in 0..80 {
-        source.push_str(&format!("def function_{:03}(): pass\n", i));
+        source.push_str(&format!("def _function_{:03}(): pass\n", i));
     }
     std::fs::write(tmp.path().join("pathological.py"), &source).unwrap();
 
@@ -693,7 +693,7 @@ fn t31_regression_c10_size_validation_wired() {
     let tmp = tempfile::tempdir().unwrap();
     let mut source = String::new();
     for i in 0..80 {
-        source.push_str(&format!("def function_{:03}(): pass\n", i));
+        source.push_str(&format!("def _function_{:03}(): pass\n", i));
     }
     std::fs::write(tmp.path().join("pathological.py"), &source).unwrap();
 

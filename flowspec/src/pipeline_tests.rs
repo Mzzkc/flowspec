@@ -920,6 +920,12 @@ fn test_pipeline_project_with_issues_fixture() {
         }
     }
 
+    std::fs::write(
+        tmp.path().join("private_unused.py"),
+        "def _private_unused_helper():\n    return 1\n",
+    )
+    .unwrap();
+
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 

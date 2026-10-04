@@ -1075,7 +1075,7 @@ fn test_c21_t29_massive_graph_partition_zero_overlap() {
         graph.add_symbol(make_symbol(
             &format!("func_{}", i),
             SymbolKind::Function,
-            Visibility::Public,
+            Visibility::Private,
             "big_module.py",
             i as u32 + 1,
         ));
@@ -1235,14 +1235,14 @@ fn test_c21_t34_evidence_includes_file_count() {
     graph.add_symbol(make_symbol(
         "func_a",
         SymbolKind::Function,
-        Visibility::Public,
+        Visibility::Private,
         "a.py",
         1,
     ));
     graph.add_symbol(make_symbol(
         "func_b",
         SymbolKind::Function,
-        Visibility::Public,
+        Visibility::Private,
         "b.py",
         1,
     ));

@@ -2586,10 +2586,10 @@ result = setup()
         let diagnostics = data_dead_end::detect(&graph, Path::new(""));
         let flagged_names: Vec<String> = diagnostics.iter().map(|d| d.entity.clone()).collect();
 
-        // True positives: unused_helper, _private_util
+        // Private true positive and public API negative.
         assert!(
-            flagged_names.iter().any(|n| n.contains("unused_helper")),
-            "unused_helper must be flagged as dead end. Flagged: {:?}",
+            !flagged_names.iter().any(|n| n.contains("unused_helper")),
+            "Public unused_helper must not be claimed as a private dead end. Flagged: {:?}",
             flagged_names
         );
         assert!(
@@ -3252,8 +3252,8 @@ def factorial(n):
         let flagged: Vec<_> = diagnostics.iter().map(|d| d.entity.clone()).collect();
 
         assert!(
-            flagged.iter().any(|n| n.contains("unused_helper")),
-            "Regression: unused_helper must still be flagged"
+            !flagged.iter().any(|n| n.contains("unused_helper")),
+            "Regression: public unused_helper must not be claimed as a private dead end"
         );
         assert!(
             flagged.iter().any(|n| n.contains("_private_util")),
@@ -4134,7 +4134,7 @@ def setup():
             ("main.py", "from utils import helper\nhelper()"),
             (
                 "utils.py",
-                "def helper():\n    pass\ndef unused_func():\n    pass",
+                "def helper():\n    pass\ndef _unused_func():\n    pass",
             ),
         ]);
 
@@ -4142,11 +4142,11 @@ def setup():
 
         let unused_dead_end = diagnostics
             .iter()
-            .find(|d| d.entity.contains("unused_func"));
+            .find(|d| d.entity.contains("_unused_func"));
 
         assert!(
             unused_dead_end.is_some(),
-            "data_dead_end MUST fire on truly unused utils.py::unused_func"
+            "data_dead_end MUST fire on truly unused utils.py::_unused_func"
         );
 
         let helper_dead_end = diagnostics

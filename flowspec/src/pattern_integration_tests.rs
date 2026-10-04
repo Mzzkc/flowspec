@@ -914,7 +914,7 @@ fn test_windows_path_normalization_in_exclusion() {
     graph.add_symbol(make_symbol(
         "my_func",
         SymbolKind::Function,
-        Visibility::Public,
+        Visibility::Private,
         "src\\tests\\my_module.py",
         5,
     ));

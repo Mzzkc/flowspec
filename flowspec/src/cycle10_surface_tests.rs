@@ -12,12 +12,12 @@ fn t1_size_validation_wired_pathological_input_rejected() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Generate 80 minimal Python functions — enough to exceed 10x ratio
-    // Each `def function_NNN(): pass\n` is ~25 bytes. 80 * 25 = ~2000 bytes source.
+    // Each `def _function_NNN(): pass\n` is ~25 bytes. 80 * 25 = ~2000 bytes source.
     // Manifest overhead per entity: ~250-400 bytes YAML. 80 * 300 = ~24000 bytes manifest.
     // Ratio: 24000/2000 ≈ 12x — exceeds 10x limit.
     let mut source = String::new();
     for i in 0..80 {
-        source.push_str(&format!("def function_{:03}(): pass\n", i));
+        source.push_str(&format!("def _function_{:03}(): pass\n", i));
     }
     std::fs::write(tmp.path().join("pathological.py"), &source).unwrap();
 
@@ -84,7 +84,7 @@ fn t3_size_check_before_write_output() {
     // Same pathological input as T1
     let mut source = String::new();
     for i in 0..80 {
-        source.push_str(&format!("def function_{:03}(): pass\n", i));
+        source.push_str(&format!("def _function_{:03}(): pass\n", i));
     }
     std::fs::write(tmp.path().join("pathological.py"), &source).unwrap();
 
