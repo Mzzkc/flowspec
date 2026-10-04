@@ -1598,7 +1598,7 @@ fn extract_argument_value_refs(
                 .symbols
                 .iter()
                 .any(|symbol| symbol.name == name && symbol.kind == SymbolKind::Function)
-            && !shadowed_by_parameter(node, content, name)
+            && !shadowed_by_local_binding(node, content, name)
         {
             result.references.push(Reference {
                 id: ReferenceId::default(),
@@ -1616,17 +1616,44 @@ fn extract_argument_value_refs(
     }
 }
 
-fn shadowed_by_parameter(node: Node, content: &[u8], name: &str) -> bool {
+fn shadowed_by_local_binding(node: Node, content: &[u8], name: &str) -> bool {
     let mut ancestor = node.parent();
     while let Some(current) = ancestor {
         if current.kind() == "function_definition" {
-            return current
+            let parameter = current
                 .child_by_field_name("parameters")
                 .is_some_and(|parameters| parameter_contains_name(parameters, content, name));
+            let assignment = current
+                .child_by_field_name("body")
+                .is_some_and(|body| body_binds_name(body, content, name));
+            return parameter || assignment;
         }
         ancestor = current.parent();
     }
     false
+}
+
+fn body_binds_name(node: Node, content: &[u8], name: &str) -> bool {
+    if matches!(
+        node.kind(),
+        "function_definition" | "class_definition" | "lambda"
+    ) {
+        return false;
+    }
+    if matches!(
+        node.kind(),
+        "assignment" | "augmented_assignment" | "for_statement"
+    ) && node
+        .child_by_field_name("left")
+        .is_some_and(|left| left.kind() == "identifier" && node_text(content, left) == name)
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| body_binds_name(child, content, name));
+    found
 }
 
 fn parameter_contains_name(node: Node, content: &[u8], name: &str) -> bool {
