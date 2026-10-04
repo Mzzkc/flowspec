@@ -70,6 +70,8 @@ pub struct Graph {
     #[serde(default)]
     unresolved_calls: Vec<Reference>,
     #[serde(default)]
+    prerequisite_losses: Vec<Reference>,
+    #[serde(default)]
     dynamic_exports: HashSet<PathBuf>,
 
     outgoing: HashMap<SymbolId, Vec<Edge>>,
@@ -91,6 +93,14 @@ impl Graph {
     /// Call sites examined by the local resolver with no proven target.
     pub fn unresolved_calls(&self) -> &[Reference] {
         &self.unresolved_calls
+    }
+
+    pub(crate) fn prerequisite_losses(&self) -> &[Reference] {
+        &self.prerequisite_losses
+    }
+
+    pub(crate) fn record_prerequisite_loss(&mut self, reference: Reference) {
+        self.prerequisite_losses.push(reference);
     }
 
     pub(crate) fn record_unresolved_call(&mut self, reference: Reference) {

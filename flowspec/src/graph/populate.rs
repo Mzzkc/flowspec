@@ -295,6 +295,10 @@ fn insert_references(
         let mut new_ref = reference.clone();
 
         match &reference.resolution {
+            ResolutionStatus::Partial(info) if info.starts_with("prerequisite_loss:") => {
+                graph.record_prerequisite_loss(reference.clone());
+                continue;
+            }
             ResolutionStatus::Partial(info) if info == "dynamic_export" => {
                 graph.record_dynamic_export(reference.location.file.clone());
                 continue;

@@ -224,6 +224,33 @@ fn visit_node(
     }
 
     match node.kind() {
+        "match_statement" => {
+            // The adapter visits this actual node but has no pattern/guard CFG
+            // or match-bound-name resolver. Keep the missing prerequisite in IR.
+            result.references.push(Reference {
+                id: ReferenceId::default(),
+                from: SymbolId::default(),
+                to: SymbolId::default(),
+                kind: ReferenceKind::Read,
+                location: node_location(path, node),
+                resolution: ResolutionStatus::Partial(
+                    "prerequisite_loss:unsupported_construct:control_flow".to_string(),
+                ),
+            });
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                visit_node(
+                    result,
+                    scope_stack,
+                    content,
+                    path,
+                    file_stem,
+                    child,
+                    decorators,
+                    depth + 1,
+                );
+            }
+        }
         "function_definition" => {
             extract_function(
                 result,

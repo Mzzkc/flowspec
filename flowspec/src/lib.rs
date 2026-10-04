@@ -479,6 +479,34 @@ fn analyze_core(
     if !module_map.is_empty() {
         resolve_cross_file_imports(&mut graph, &module_map);
     }
+    for reference in graph.prerequisite_losses() {
+        let parser::ir::ResolutionStatus::Partial(info) = &reference.resolution else {
+            continue;
+        };
+        let Some((reason, capability)) = info
+            .strip_prefix("prerequisite_loss:")
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
+        let key = report_authority::path_key(project_path, &reference.location.file);
+        let range = input_records
+            .iter()
+            .find(|input| input.path == reference.location.file)
+            .and_then(|input| input.content.as_deref())
+            .map(|content| report_authority::location_range(&key, content, &reference.location));
+        let mut loss = report_authority::loss(reason, key, range, "parse");
+        loss["required_capabilities"] = serde_json::json!([capability]);
+        loss["affected_patterns"] = serde_json::json!([
+            "data_dead_end",
+            "isolated_cluster",
+            "partial_wiring",
+            "asymmetric_handling",
+            "contract_mismatch",
+            "orphaned_impl"
+        ]);
+        losses.push(loss);
+    }
     for reference in graph.unresolved_calls() {
         let key = report_authority::path_key(project_path, &reference.location.file);
         let range = input_records
@@ -511,17 +539,15 @@ fn analyze_core(
             && !matches!(&symbol.resolution, parser::ir::ResolutionStatus::Partial(reason) if reason == "injected unresolved local import")
         {
             let key = report_authority::path_key(project_path, &symbol.location.file);
-            let range = report_authority::point_range(
-                &key,
-                symbol.location.line as u64,
-                symbol.location.column as u64,
-                0,
-                0,
-            );
+            let range = input_records
+                .iter()
+                .find(|input| input.path == symbol.location.file)
+                .and_then(|input| input.content.as_deref())
+                .map(|content| report_authority::location_range(&key, content, &symbol.location));
             losses.push(report_authority::loss(
                 "unresolved_import",
                 key,
-                Some(range),
+                range,
                 "resolve",
             ));
         }

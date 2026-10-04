@@ -571,9 +571,10 @@ pub(crate) fn build(
     let mut pattern_state = Vec::new();
     for pattern in PATTERNS {
         let cells:Vec<Value>=scope["effective_languages"].as_array().unwrap().iter().map(|lang|{
-            let mut reasons:Vec<String>=losses.iter().filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
+            let mut reasons:Vec<String>=losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
+            reasons.sort(); reasons.dedup();
             let capabilities: &[&str] = match pattern {
-                "data_dead_end" => &["symbols", "calls", "value_references", "exports"],
+                "data_dead_end" => &["symbols", "calls", "value_references", "exports", "registration", "consumer_closure"],
                 "phantom_dependency" | "missing_reexport" => &["imports", "exports", "value_references"],
                 "circular_dependency" | "layer_violation" => &["imports", "dependency_edges"],
                 "duplication" => &["symbols", "binding_structure"],
