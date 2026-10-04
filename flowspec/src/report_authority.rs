@@ -112,17 +112,13 @@ fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Valu
         let paths = loss["scope_paths"].as_array().into_iter().flatten();
         for path in paths {
             let Some(key) = path.as_str() else { continue };
-            let python_scope = if key.is_empty() {
-                // A walker failure with no path can conceal any selected source.
-                true
-            } else if let Some(input) = inputs.iter().find(|i| path_key(root, &i.path) == key) {
-                input.disposition == "selected" && input.language.as_deref() == Some("python")
-            } else {
-                // A failed walker may omit its entry from inventory. Decode
-                // exact path bytes only to determine its source language.
-                key.ends_with("2e7079")
-            };
-            if python_scope {
+            // Lost selected input may contain a consumer or an escape bridge.
+            // No accessibility/interop proof exists here to narrow that scope
+            // based on its language or filename. Policy-excluded known paths
+            // are outside the declared scope; omitted walker entries are not.
+            let relevant_scope = inputs.iter().find(|i| path_key(root, &i.path) == key)
+                .is_none_or(|input| input.disposition == "selected");
+            if relevant_scope {
                 blocked.push(key.to_string());
             }
         }
@@ -443,8 +439,8 @@ pub(crate) fn build(
             if blockers.is_empty() {
                 findings.push(finding);
             } else {
-                // A top-level Python function can be consumed from any selected
-                // Python module. An unavailable module cannot prove zero uses.
+                // Project-level bindings require a closed selected consumer
+                // universe. Missing source/resolution cannot prove zero uses.
                 losses.push(consumer_closure_loss(&finding, &blockers));
             }
         }

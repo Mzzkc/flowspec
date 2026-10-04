@@ -748,6 +748,19 @@ fn extract_decorated(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "decorator" {
+            // Python applies every decorator to the newly defined object.
+            // That application is a real value consumer, even when a decorator
+            // returns the same object or registers it for an external caller.
+            if let Some(definition) = node.child_by_field_name("definition") {
+                if let Some(name) = definition.child_by_field_name("name") {
+                    result.references.push(Reference {
+                        id: ReferenceId::default(), from: SymbolId::default(),
+                        to: SymbolId::default(), kind: ReferenceKind::Read,
+                        location: node_location(path, child),
+                        resolution: ResolutionStatus::Partial(format!("value_use:{}", node_text(content, name))),
+                    });
+                }
+            }
             let text = node_text(content, child).trim().to_string();
             let deco_name = text.strip_prefix('@').unwrap_or(&text).trim().to_string();
             decorators.push(deco_name);
