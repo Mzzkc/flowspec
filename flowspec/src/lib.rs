@@ -495,7 +495,16 @@ fn analyze_core(
             .find(|input| input.path == reference.location.file)
             .and_then(|input| input.content.as_deref())
             .map(|content| report_authority::location_range(&key, content, &reference.location));
-        let mut loss = report_authority::loss(reason, key, range, "parse");
+        let mut loss = report_authority::loss(
+            reason,
+            key,
+            range,
+            if reason.starts_with("unresolved_") {
+                "resolve"
+            } else {
+                "parse"
+            },
+        );
         loss["required_capabilities"] = serde_json::json!([capability]);
         loss["affected_patterns"] = serde_json::json!([
             "data_dead_end",

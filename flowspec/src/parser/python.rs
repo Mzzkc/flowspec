@@ -203,6 +203,7 @@ fn visit_node(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         tracing::warn!(
             "AST depth limit ({}) reached at {}:{}",
             super::MAX_AST_DEPTH,
@@ -900,6 +901,7 @@ fn extract_type_annotation_refs(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         return;
     }
 
@@ -975,6 +977,7 @@ fn walk_for_classes(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         return;
     }
 
@@ -1054,6 +1057,7 @@ fn walk_init_body_for_attrs(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         return;
     }
 
@@ -1489,6 +1493,7 @@ fn extract_all_calls(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         tracing::warn!(
             "AST depth limit ({}) reached in call extraction at {}:{}",
             super::MAX_AST_DEPTH,
@@ -1500,6 +1505,28 @@ fn extract_all_calls(
 
     if node.kind() == "call" {
         if let Some(func_node) = node.child_by_field_name("function") {
+            let callee = extract_callee_name(content, func_node);
+            if callee.is_none()
+                || callee.as_deref().is_some_and(|name| {
+                    matches!(
+                        name,
+                        "globals" | "locals" | "eval" | "exec" | "getattr" | "__import__"
+                    )
+                })
+            {
+                // The actual operation consults a runtime namespace or a
+                // computed callable. This resolver cannot close its consumers.
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(
+                        "prerequisite_loss:unresolved_reference:consumer_closure".to_string(),
+                    ),
+                });
+            }
             if let Some(name) = extract_callee_name(content, func_node) {
                 result.references.push(Reference {
                     id: ReferenceId::default(),
@@ -1570,6 +1597,7 @@ fn extract_attribute_accesses(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         tracing::warn!(
             "AST depth limit ({}) reached in attribute extraction at {}:{}",
             super::MAX_AST_DEPTH,
@@ -1659,6 +1687,7 @@ fn extract_argument_value_refs(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         return;
     }
     if node.kind() == "identifier" {

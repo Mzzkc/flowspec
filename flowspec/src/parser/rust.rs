@@ -235,6 +235,7 @@ fn visit_children(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         tracing::warn!(
             "AST depth limit reached at {}:{}",
             path.display(),
@@ -931,6 +932,7 @@ fn extract_all_calls(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         tracing::warn!(
             "AST depth limit reached in call extraction at {}:{}",
             path.display(),
@@ -1039,6 +1041,7 @@ fn extract_all_type_references(
     depth: usize,
 ) {
     if depth > super::MAX_AST_DEPTH {
+        super::record_depth_loss(result, path, node);
         return;
     }
 

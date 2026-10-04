@@ -112,6 +112,33 @@ pub(crate) fn source_parse_loss_range(path: &Path, content: &str) -> Option<(u64
     None
 }
 
+/// Keep actual adapter traversal loss in the same IR that enters resolution.
+/// Source coordinates come from the node that exceeded the real depth budget.
+pub(crate) fn record_depth_loss(
+    result: &mut ParseResult,
+    path: &Path,
+    node: tree_sitter::Node<'_>,
+) {
+    let start = node.start_position();
+    let end = node.end_position();
+    result.references.push(ir::Reference {
+        id: ir::ReferenceId::default(),
+        from: ir::SymbolId::default(),
+        to: ir::SymbolId::default(),
+        kind: ir::ReferenceKind::Read,
+        location: ir::Location {
+            file: path.to_path_buf(),
+            line: start.row as u32 + 1,
+            column: start.column as u32 + 1,
+            end_line: end.row as u32 + 1,
+            end_column: end.column as u32 + 1,
+        },
+        resolution: ir::ResolutionStatus::Partial(
+            "prerequisite_loss:depth_truncation:parser_traversal".to_string(),
+        ),
+    });
+}
+
 /// Trait implemented by each language adapter.
 ///
 /// Language adapters translate tree-sitter AST into flowspec IR. This is one of
