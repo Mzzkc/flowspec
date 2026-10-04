@@ -429,19 +429,8 @@ fn test_c15_t12_data_dead_end_method_dispatch_not_traced() {
     // NO inbound edges
     let diagnostics = data_dead_end::detect(&graph, Path::new(""));
     assert!(
-        diagnostics.iter().any(|d| d.entity.contains("add_symbol")),
-        "T12: data_dead_end MUST fire on 'add_symbol' — method dispatch not traced. \
-         Worker 2 found 25 graph/mod.rs dead ends."
-    );
-    // LOW confidence because public
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.entity.contains("add_symbol"))
-        .unwrap();
-    assert_eq!(
-        diag.confidence,
-        crate::analyzer::diagnostic::Confidence::Low,
-        "T12: public function with zero callers must have LOW confidence"
+        diagnostics.iter().all(|d| !d.entity.contains("add_symbol")),
+        "T12: missing method-dispatch edges cannot prove a public API unused"
     );
 }
 

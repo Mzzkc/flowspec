@@ -269,21 +269,26 @@ mod tests {
     }
 
     #[test]
-    fn test_config_load_malformed_yaml_returns_defaults() {
+    fn test_config_load_malformed_default_yaml_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let flowspec_dir = tmp.path().join(".flowspec");
         std::fs::create_dir_all(&flowspec_dir).unwrap();
-        std::fs::write(flowspec_dir.join("config.yaml"), "{{{{not valid yaml!@#$").unwrap();
+        let path = flowspec_dir.join("config.yaml");
+        std::fs::write(&path, "{{{{not valid yaml!@#$").unwrap();
 
-        let config = Config::load(tmp.path(), None).unwrap();
-        assert!(
-            config.languages.is_empty(),
-            "Malformed YAML → default empty languages"
-        );
-        assert!(
-            config.config_path.is_some(),
-            "config_path still set even with malformed content"
-        );
+        match Config::load(tmp.path(), None) {
+            Err(crate::error::FlowspecError::Config { reason, suggestion }) => {
+                assert!(reason.contains(&path.display().to_string()), "{reason}");
+                assert!(
+                    reason.to_lowercase().contains("parse")
+                        || reason.to_lowercase().contains("yaml")
+                        || reason.to_lowercase().contains("syntax"),
+                    "missing parse cause: {reason}"
+                );
+                assert!(!suggestion.trim().is_empty(), "missing fix suggestion");
+            }
+            other => panic!("present malformed default config must fail: {other:?}"),
+        }
     }
 
     #[test]
@@ -314,18 +319,39 @@ mod tests {
     }
 
     #[test]
-    fn test_config_load_unknown_fields_ignored() {
+    fn test_config_load_unknown_fields_error() {
         let tmp = tempfile::tempdir().unwrap();
         let flowspec_dir = tmp.path().join(".flowspec");
         std::fs::create_dir_all(&flowspec_dir).unwrap();
-        std::fs::write(
-            flowspec_dir.join("config.yaml"),
-            "languages:\n  - rust\nfuture_field: value\ndiagnostics:\n  suppressions: []\n",
-        )
-        .unwrap();
+        let path = flowspec_dir.join("config.yaml");
 
-        let config = Config::load(tmp.path(), None).unwrap();
-        assert_eq!(config.languages, vec!["rust".to_string()]);
+        let mut accepted_unknown_keys = Vec::new();
+        for (key, yaml) in [
+            ("future_field", "languages: [rust]\nfuture_field: value\n"),
+            (
+                "diagnostics",
+                "languages: [rust]\ndiagnostics:\n  suppressions: []\n",
+            ),
+            ("ignore", "languages: [rust]\nignore: [vendor/]\n"),
+        ] {
+            std::fs::write(&path, yaml).unwrap();
+            match Config::load(tmp.path(), None) {
+                Err(crate::error::FlowspecError::Config { reason, suggestion }) => {
+                    assert!(
+                        reason.contains(&path.display().to_string()),
+                        "{key}: {reason}"
+                    );
+                    assert!(reason.contains(key), "missing rejected key {key}: {reason}");
+                    assert!(!suggestion.trim().is_empty(), "missing fix for {key}");
+                }
+                other => accepted_unknown_keys.push(format!("{key} returned {other:?}")),
+            }
+        }
+        assert!(
+            accepted_unknown_keys.is_empty(),
+            "unknown keys must fail separately: {}",
+            accepted_unknown_keys.join("; ")
+        );
     }
 
     #[test]
@@ -347,22 +373,21 @@ mod tests {
     }
 
     #[test]
-    fn test_config_path_not_from_yaml() {
+    fn test_config_path_yaml_key_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let flowspec_dir = tmp.path().join(".flowspec");
         std::fs::create_dir_all(&flowspec_dir).unwrap();
-        std::fs::write(
-            flowspec_dir.join("config.yaml"),
-            "config_path: /etc/evil\nlanguages: []\n",
-        )
-        .unwrap();
+        let path = flowspec_dir.join("config.yaml");
+        std::fs::write(&path, "config_path: /etc/evil\nlanguages: []\n").unwrap();
 
-        let config = Config::load(tmp.path(), None).unwrap();
-        assert_ne!(
-            config.config_path,
-            Some(std::path::PathBuf::from("/etc/evil")),
-            "config_path must not be deserialized from YAML"
-        );
+        match Config::load(tmp.path(), None) {
+            Err(crate::error::FlowspecError::Config { reason, suggestion }) => {
+                assert!(reason.contains(&path.display().to_string()), "{reason}");
+                assert!(reason.contains("config_path"), "{reason}");
+                assert!(!suggestion.trim().is_empty(), "missing fix suggestion");
+            }
+            other => panic!("YAML config_path must be rejected: {other:?}"),
+        }
     }
 
     #[test]
@@ -378,17 +403,30 @@ mod tests {
     // === QA-3 Category 6: Error Handling & Edge Cases ===
 
     #[test]
-    fn test_config_file_is_directory() {
+    fn test_config_directory_errors_without_panic() {
         let tmp = tempfile::tempdir().unwrap();
         let flowspec_dir = tmp.path().join(".flowspec");
         std::fs::create_dir_all(&flowspec_dir).unwrap();
-        // Create config.yaml as a directory instead of a file
-        std::fs::create_dir_all(flowspec_dir.join("config.yaml")).unwrap();
+        let path = flowspec_dir.join("config.yaml");
+        std::fs::create_dir_all(&path).unwrap();
 
-        // Must NOT panic — returns defaults
-        let config = Config::load(tmp.path(), None).unwrap();
-        assert!(config.config_path.is_some());
-        assert!(config.languages.is_empty());
+        let result = std::panic::catch_unwind(|| Config::load(tmp.path(), None));
+        assert!(
+            result.is_ok(),
+            "directory read must return an error, not panic"
+        );
+        match result.unwrap() {
+            Err(crate::error::FlowspecError::Config { reason, suggestion }) => {
+                assert!(reason.contains(&path.display().to_string()), "{reason}");
+                assert!(
+                    reason.to_lowercase().contains("read")
+                        || reason.to_lowercase().contains("directory"),
+                    "missing read cause: {reason}"
+                );
+                assert!(!suggestion.trim().is_empty(), "missing fix suggestion");
+            }
+            other => panic!("directory config must fail: {other:?}"),
+        }
     }
 
     #[test]
@@ -411,33 +449,46 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let flowspec_dir = tmp.path().join(".flowspec");
         std::fs::create_dir_all(&flowspec_dir).unwrap();
-        std::fs::write(
-            flowspec_dir.join("config.yaml"),
-            "defaults: &defaults\n  - python\nlanguages: *defaults\n",
-        )
-        .unwrap();
+        let path = flowspec_dir.join("config.yaml");
+        std::fs::write(&path, "languages: &values [python]\nexclude: *values\n").unwrap();
 
-        // Either parses correctly or degrades to defaults — must not crash
         let config = Config::load(tmp.path(), None).unwrap();
-        // YAML anchors: serde_yaml supports them, so languages should be ["python"]
-        // But if it fails, that's also acceptable — just no crash
-        let _ = config.languages;
+        assert_eq!(config.config_path, Some(path.clone()));
+        assert_eq!(config.languages, vec!["python".to_string()]);
+        assert_eq!(config.exclude, vec!["python".to_string()]);
+
+        std::fs::write(&path, "defaults: &values [python]\nlanguages: *values\n").unwrap();
+        match Config::load(tmp.path(), None) {
+            Err(crate::error::FlowspecError::Config { reason, suggestion }) => {
+                assert!(reason.contains(&path.display().to_string()), "{reason}");
+                assert!(reason.contains("defaults"), "{reason}");
+                assert!(!suggestion.trim().is_empty(), "missing fix suggestion");
+            }
+            other => panic!("anchor on unknown defaults key must fail: {other:?}"),
+        }
     }
 
     #[test]
-    fn test_config_malformed_yaml_explicit_path() {
+    fn test_config_malformed_yaml_explicit_path_errors() {
         let tmp = tempfile::tempdir().unwrap();
+        let flowspec_dir = tmp.path().join(".flowspec");
+        std::fs::create_dir_all(&flowspec_dir).unwrap();
+        std::fs::write(flowspec_dir.join("config.yaml"), "languages: [python]\n").unwrap();
         let custom = tmp.path().join("bad.yaml");
         std::fs::write(&custom, "{{{{invalid!").unwrap();
 
-        let config = Config::load(tmp.path(), Some(&custom)).unwrap();
-        assert!(
-            config.languages.is_empty(),
-            "Malformed YAML on explicit path → defaults"
-        );
-        assert!(
-            config.config_path.is_some(),
-            "config_path still set for explicit path"
-        );
+        match Config::load(tmp.path(), Some(&custom)) {
+            Err(crate::error::FlowspecError::Config { reason, suggestion }) => {
+                assert!(reason.contains(&custom.display().to_string()), "{reason}");
+                assert!(
+                    reason.to_lowercase().contains("parse")
+                        || reason.to_lowercase().contains("yaml")
+                        || reason.to_lowercase().contains("syntax"),
+                    "missing parse cause: {reason}"
+                );
+                assert!(!suggestion.trim().is_empty(), "missing fix suggestion");
+            }
+            other => panic!("invalid explicit config must not use valid implicit: {other:?}"),
+        }
     }
 }

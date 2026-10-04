@@ -35,7 +35,7 @@ fn test_c21_t01_function_partition_data_dead_end_only() {
     graph.add_symbol(make_symbol(
         "unused_func",
         SymbolKind::Function,
-        Visibility::Public,
+        Visibility::Private,
         "module.py",
         1,
     ));
@@ -475,11 +475,9 @@ fn test_c21_t19_public_function_low_confidence_data_dead_end() {
     ));
 
     let dde = data_dead_end::detect(&graph, Path::new(""));
-    assert_eq!(dde.len(), 1);
-    assert_eq!(
-        dde[0].confidence,
-        Confidence::Low,
-        "Public function → Low confidence (might be external API)"
+    assert!(
+        dde.is_empty(),
+        "Public API without an in-scope consumer is not a proven private dead end"
     );
 }
 

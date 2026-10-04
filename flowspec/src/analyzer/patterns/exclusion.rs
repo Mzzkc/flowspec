@@ -648,21 +648,16 @@ mod tests {
 
     #[test]
     fn test_public_dead_end_has_low_confidence() {
-        use crate::analyzer::diagnostic::Confidence;
         use crate::analyzer::patterns::data_dead_end;
 
         let graph = crate::test_utils::build_public_api_graph();
         let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
-        let public_diag = diagnostics
-            .iter()
-            .find(|d| d.entity.contains("format_timestamp"))
-            .expect("format_timestamp must be detected");
-
-        assert_eq!(
-            public_diag.confidence,
-            Confidence::Low,
-            "Public function with zero callers must be LOW confidence"
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| !d.entity.contains("format_timestamp")),
+            "Public API is not a proven private dead end"
         );
     }
 

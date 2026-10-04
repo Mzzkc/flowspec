@@ -113,16 +113,16 @@ fn test_data_dead_end_real_data_true_positive() {
 
     assert!(
         !diagnostics.is_empty(),
-        "data_dead_end MUST fire on dead_code.py — unused_helper and _private_util \
+        "data_dead_end MUST fire on dead_code.py — _private_util \
         have zero callers. Got 0 diagnostics."
     );
 
     let entities: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
 
-    // True positives: unused_helper and _private_util have zero callers
+    // Private unconsumed function is positive; public unused_helper is not proven unused.
     assert!(
-        entities.iter().any(|e| e.contains("unused_helper")),
-        "Must flag unused_helper as dead end. Found entities: {:?}",
+        !entities.iter().any(|e| e.contains("unused_helper")),
+        "Public unused_helper must not be a proven private dead end. Entities: {:?}",
         entities
     );
     assert!(
@@ -587,28 +587,14 @@ fn test_data_dead_end_confidence_calibration() {
     let graph = fixture_graph("public_api.py");
     let diagnostics = data_dead_end::detect(&graph, Path::new(""));
 
-    assert!(
-        diagnostics.len() >= 2,
-        "public_api.py should have at least 2 dead-end functions. Got {}",
-        diagnostics.len()
-    );
-
-    for d in &diagnostics {
-        if d.entity.contains("_internal_helper") {
-            assert_eq!(
-                d.confidence,
-                Confidence::High,
-                "_internal_helper is private/underscore — must be High confidence"
-            );
-        } else if d.entity.contains("format_timestamp") || d.entity.contains("parse_duration") {
-            assert_eq!(
-                d.confidence,
-                Confidence::Low,
-                "Public function '{}' with no underscore — must be Low confidence",
-                d.entity
-            );
-        }
-    }
+    let private = diagnostics
+        .iter()
+        .find(|d| d.entity.contains("_internal_helper"))
+        .expect("private unconsumed helper must remain detected");
+    assert_eq!(private.confidence, Confidence::High);
+    assert!(diagnostics.iter().all(|d|
+        !d.entity.contains("format_timestamp") && !d.entity.contains("parse_duration")),
+        "public functions cannot be proven private dead ends");
 }
 
 /// Verify the confidence split: private functions get High, public get Low.
@@ -623,19 +609,19 @@ fn test_confidence_split_private_vs_public_real_data() {
         .iter()
         .filter(|d| d.confidence == Confidence::High)
         .collect();
-    let low_confidence: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| d.confidence == Confidence::Low)
-        .collect();
-
     assert!(
         !high_confidence.is_empty(),
         "Must have at least one High confidence diagnostic (_internal_helper)"
     );
     assert!(
-        !low_confidence.is_empty(),
-        "Must have at least one Low confidence diagnostic (public functions)"
+        diagnostics
+            .iter()
+            .any(|d| d.entity.contains("_internal_helper")),
+        "private unconsumed helper must remain detected"
     );
+    assert!(diagnostics.iter().all(|d|
+        !d.entity.contains("format_timestamp") && !d.entity.contains("parse_duration")),
+        "public functions cannot be proven private dead ends");
 }
 
 // =========================================================================
@@ -990,8 +976,8 @@ fn test_regression_data_dead_end_true_positive() {
     );
     let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
     assert!(
-        entities.iter().any(|e| e.contains("unused_helper")),
-        "Must flag unused_helper"
+        !entities.iter().any(|e| e.contains("unused_helper")),
+        "Public unused_helper must not be reported as proven private dead end"
     );
     assert!(
         entities.iter().any(|e| e.contains("_private_util")),
