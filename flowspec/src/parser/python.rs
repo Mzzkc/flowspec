@@ -1686,7 +1686,12 @@ fn extract_attribute_accesses(
                     "assignment" => parent
                         .child_by_field_name("right")
                         .is_some_and(|value| value.id() == node.id()),
-                    "keyword_argument" | "pair" => parent
+                    // Defaults are evaluated in the definition's enclosing
+                    // scope, before the new parameter bindings exist.
+                    "default_parameter"
+                    | "typed_default_parameter"
+                    | "keyword_argument"
+                    | "pair" => parent
                         .child_by_field_name("value")
                         .is_some_and(|value| value.id() == node.id()),
                     _ => false,
