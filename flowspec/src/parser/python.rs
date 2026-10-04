@@ -1554,6 +1554,41 @@ fn extract_attribute_accesses(
                         root_name
                     )),
                 });
+                // In a value position, a direct module attribute names a
+                // specific exported binding. Keep that leaf alongside the
+                // existing root-use reference for cross-file resolution.
+                let direct_attribute = node
+                    .child_by_field_name("object")
+                    .is_some_and(|object| object.kind() == "identifier");
+                let value_position = node.parent().is_some_and(|parent| match parent.kind() {
+                    "return_statement" | "list" | "tuple" | "set" | "argument_list" => true,
+                    "assignment" => parent
+                        .child_by_field_name("right")
+                        .is_some_and(|value| value.id() == node.id()),
+                    "keyword_argument" | "pair" => parent
+                        .child_by_field_name("value")
+                        .is_some_and(|value| value.id() == node.id()),
+                    _ => false,
+                });
+                if direct_attribute
+                    && value_position
+                    && !shadowed_by_local_binding(node, content, &root_name)
+                {
+                    if let Some(leaf) = node.child_by_field_name("attribute") {
+                        result.references.push(Reference {
+                            id: ReferenceId::default(),
+                            from: SymbolId::default(),
+                            to: SymbolId::default(),
+                            kind: ReferenceKind::Read,
+                            location: node_location(path, node),
+                            resolution: ResolutionStatus::Partial(format!(
+                                "module_attribute_value:{}:{}",
+                                root_name,
+                                node_text(content, leaf)
+                            )),
+                        });
+                    }
+                }
             }
         }
         // Don't recurse into this attribute's children — the root is already handled.

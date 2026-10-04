@@ -496,6 +496,29 @@ fn insert_references(
                 new_ref.to = candidates[0].1;
                 new_ref.resolution = ResolutionStatus::Resolved;
             }
+            ResolutionStatus::Partial(info) if info.starts_with("module_attribute_value:") => {
+                let Some((root_name, leaf)) =
+                    info["module_attribute_value:".len()..].split_once(':')
+                else {
+                    continue;
+                };
+                new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                    .unwrap_or_else(|| {
+                        *module_symbol_id
+                            .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
+                    });
+                new_ref.to = resolve_import_by_name(
+                    root_name,
+                    symbol_id_map,
+                    symbols,
+                    reference.location.line,
+                );
+                if new_ref.to == SymbolId::default() {
+                    continue;
+                }
+                new_ref.resolution =
+                    ResolutionStatus::Partial(format!("module_attribute_value:{leaf}"));
+            }
             ResolutionStatus::Partial(info) if info.starts_with("attribute_access:") => {
                 // Attribute access references (e.g., `obj.attr`) are resolved differently
                 // from direct calls. The info string encodes "attribute_access:<root_name>"
@@ -1166,6 +1189,7 @@ pub fn resolve_cross_file_imports(
     // CF: A1 dotted-call-to-import resolutions, applied as CALL edges (not Import)
     // so the flow tracer (resolve_call_targets walks EdgeKind::Calls) traverses them.
     let mut dotted_calls: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
+    let mut attribute_values: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
     let mut resolution_updates: Vec<(SymbolId, ResolutionStatus)> = Vec::new();
 
     for (import_id, module_name, lookup_name, importing_file) in &imports_to_resolve {
@@ -1231,6 +1255,29 @@ pub fn resolve_cross_file_imports(
         // when such an edge exists; named imports / non-dotted calls are unaffected.
         if let Some(module_syms) = file_symbols_cache.get(target_file) {
             for edge in graph.edges_to(*import_id) {
+                if edge.kind == EdgeKind::References {
+                    if let Some(reference) =
+                        edge.reference_id.and_then(|id| graph.get_reference(id))
+                    {
+                        if let ResolutionStatus::Partial(info) = &reference.resolution {
+                            if let Some(leaf) = info.strip_prefix("module_attribute_value:") {
+                                let matches: Vec<_> = module_syms
+                                    .iter()
+                                    .filter(|(_, name, kind)| {
+                                        name == leaf && *kind == SymbolKind::Function
+                                    })
+                                    .collect();
+                                if matches.len() == 1 {
+                                    attribute_values.push((
+                                        edge.target,
+                                        matches[0].0,
+                                        reference.location.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
                 if edge.kind != EdgeKind::Calls {
                     continue;
                 }
@@ -1360,6 +1407,17 @@ pub fn resolve_cross_file_imports(
             from: from_id,
             to: to_id,
             kind: ReferenceKind::Import,
+            location,
+            resolution: ResolutionStatus::Resolved,
+        });
+    }
+
+    for (from_id, to_id, location) in attribute_values {
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from: from_id,
+            to: to_id,
+            kind: ReferenceKind::Read,
             location,
             resolution: ResolutionStatus::Resolved,
         });
