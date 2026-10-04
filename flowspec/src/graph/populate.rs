@@ -601,6 +601,9 @@ fn create_module_symbol(graph: &mut Graph, ref_location: &Location) -> SymbolId 
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    let location = graph
+        .file_scope_location(&ref_location.file)
+        .unwrap_or_else(|| ref_location.clone());
     graph.add_symbol(Symbol {
         id: SymbolId::default(),
         kind: SymbolKind::Module,
@@ -608,13 +611,7 @@ fn create_module_symbol(graph: &mut Graph, ref_location: &Location) -> SymbolId 
         qualified_name: format!("{}::<module>", file_name),
         visibility: Visibility::Public,
         signature: None,
-        location: Location {
-            file: ref_location.file.clone(),
-            line: 1,
-            column: 1,
-            end_line: u32::MAX,
-            end_column: 1,
-        },
+        location,
         resolution: ResolutionStatus::Resolved,
         scope: ScopeId::default(),
         annotations: vec![],

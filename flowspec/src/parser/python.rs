@@ -1662,16 +1662,7 @@ fn extract_argument_value_refs(
         return;
     }
     if node.kind() == "identifier" {
-        let value_position = node.parent().is_some_and(|parent| match parent.kind() {
-            "return_statement" | "list" | "tuple" | "set" | "argument_list" => true,
-            "assignment" => parent
-                .child_by_field_name("right")
-                .is_some_and(|value| value.id() == node.id()),
-            "keyword_argument" | "pair" => parent
-                .child_by_field_name("value")
-                .is_some_and(|value| value.id() == node.id()),
-            _ => false,
-        });
+        let value_position = runtime_binding_read(node);
         let name = node_text(content, node);
         if value_position
             && result
@@ -1696,9 +1687,84 @@ fn extract_argument_value_refs(
     }
 }
 
+/// Classify a real identifier use from AST fields rather than a spelling or
+/// a short list of surrounding value containers. Declarations and attribute
+/// labels are not reads; calls and type annotations have separate operations.
+fn runtime_binding_read(node: Node) -> bool {
+    let mut child = node;
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor {
+        match parent.kind() {
+            "import_statement"
+            | "import_from_statement"
+            | "type"
+            | "parameters"
+            | "lambda_parameters" => return false,
+            "attribute"
+                if parent
+                    .child_by_field_name("attribute")
+                    .is_some_and(|n| n.id() == child.id()) =>
+            {
+                return false
+            }
+            "keyword_argument"
+                if parent
+                    .child_by_field_name("name")
+                    .is_some_and(|n| n.id() == child.id()) =>
+            {
+                return false
+            }
+            "call"
+                if parent
+                    .child_by_field_name("function")
+                    .is_some_and(|n| n.id() == child.id()) =>
+            {
+                return false
+            }
+            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause"
+                if parent
+                    .child_by_field_name("left")
+                    .is_some_and(|n| n.id() == child.id()) =>
+            {
+                return false
+            }
+            "default_parameter" | "typed_default_parameter"
+                if parent
+                    .child_by_field_name("value")
+                    .is_some_and(|n| n.id() == child.id()) =>
+            {
+                return true
+            }
+            "function_definition" | "class_definition"
+                if parent
+                    .child_by_field_name("name")
+                    .is_some_and(|n| n.id() == child.id()) =>
+            {
+                return false
+            }
+            "function_definition" | "lambda" => {
+                return parent
+                    .child_by_field_name("body")
+                    .is_some_and(|n| n.id() == child.id())
+            }
+            _ => {}
+        }
+        child = parent;
+        ancestor = parent.parent();
+    }
+    true
+}
+
 fn shadowed_by_local_binding(node: Node, content: &[u8], name: &str) -> bool {
     let mut ancestor = node.parent();
     while let Some(current) = ancestor {
+        if current.kind() == "lambda"
+            && current
+                .child_by_field_name("parameters")
+                .is_some_and(|parameters| parameter_contains_name(parameters, content, name))
+        {
+            return true;
+        }
         if current.kind() == "function_definition" {
             let parameter = current
                 .child_by_field_name("parameters")

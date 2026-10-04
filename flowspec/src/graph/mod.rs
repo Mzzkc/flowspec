@@ -208,6 +208,15 @@ impl Graph {
         self.scopes.get(id)
     }
 
+    pub(crate) fn file_scope_location(&self, path: &Path) -> Option<Location> {
+        self.file_scopes
+            .get(path)?
+            .iter()
+            .filter_map(|id| self.scopes.get(*id))
+            .find(|scope| scope.kind == ScopeKind::File)
+            .map(|scope| scope.location.clone())
+    }
+
     /// Returns the total number of scopes.
     pub fn scope_count(&self) -> usize {
         self.scopes.len()
