@@ -65,3 +65,14 @@ fn unrelated_string_and_shadow_parameter_do_not_consume_binding() {
         "same spelling is not a binding read"
     );
 }
+
+#[test]
+fn local_assignment_shadows_outer_function_binding() {
+    let report =
+        analyze("def main():\n    _unused_helper = 42\n    return _unused_helper\nmain()\n");
+    assert_eq!(
+        helper_count(&report),
+        1,
+        "local value is a different binding"
+    );
+}
