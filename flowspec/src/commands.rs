@@ -122,7 +122,6 @@ pub fn run_analyze_with_gate(
     let mut result = crate::analyze(&canonical, &config, &normalized)?;
 
     // Exit code is based on UNFILTERED diagnostics — CI gate contract
-    let has_critical = result.has_critical;
     if let Some(authority) = result.manifest.authority.as_mut() {
         crate::report_authority::set_gate(
             authority,
@@ -225,19 +224,7 @@ pub fn run_analyze_with_gate(
 
     write_output(&output, output_path)?;
 
-    if result.manifest.execution == Some(crate::Execution::Incomplete) {
-        Ok(3)
-    } else if result
-        .manifest
-        .authority
-        .as_ref()
-        .is_some_and(|a| a["gate"]["verdict"] == "fail")
-        || has_critical && result.manifest.authority.is_none()
-    {
-        Ok(2)
-    } else {
-        Ok(0)
-    }
+    Ok(crate::report_exit_code(&result.manifest, None))
 }
 
 fn execution_name(execution: crate::Execution) -> &'static str {

@@ -89,6 +89,9 @@ pub enum ReferenceKind {
     Call,
     /// A variable read. Maps to `EdgeKind::References`.
     Read,
+    /// Probe build: a type annotation read with preserved parser origin.
+    #[cfg(all(feature = "fault_probe", not(test)))]
+    Annotation,
     /// A variable write / assignment. Maps to `EdgeKind::References`.
     Write,
     /// An import statement (`import x`, `from x import y`). Maps to `EdgeKind::References`.

@@ -27,3 +27,4 @@ tempfile = "3"
 
 [features]
 mcp = []
+fault_probe = []

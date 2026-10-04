@@ -206,6 +206,16 @@ fn visit_node(
     exported: bool,
     depth: usize,
 ) {
+    #[cfg(feature = "fault_probe")]
+    if crate::fault_probe::js_node(
+        path,
+        node.kind(),
+        node.start_position().row as u64 + 1,
+        node.start_byte() as u64,
+        node.end_byte() as u64,
+    ) {
+        return;
+    }
     match node.kind() {
         "function_declaration" | "generator_function_declaration" => {
             extract_function_declaration(

@@ -36,6 +36,11 @@ pub mod manifest;
 pub mod parser;
 mod report_authority;
 
+#[cfg(feature = "fault_probe")]
+pub mod fault_probe;
+#[cfg(all(feature = "fault_probe", not(debug_assertions)))]
+compile_error!("fault_probe is test-only");
+
 /// MCP (Model Context Protocol) server — behind the `mcp` feature flag.
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -201,6 +206,27 @@ pub struct AnalysisResult {
     pub source_bytes: u64,
 }
 
+/// Project the analyzer-produced report into the CLI exit contract.
+/// Incomplete execution dominates the finding gate.
+pub fn report_exit_code(manifest: &AnalysisReport, _gate_override: Option<Severity>) -> u8 {
+    if manifest.execution == Some(Execution::Incomplete) {
+        3
+    } else if manifest
+        .authority
+        .as_ref()
+        .is_some_and(|a| a["gate"]["verdict"] == "fail")
+        || (manifest.authority.is_none()
+            && manifest
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == "critical"))
+    {
+        2
+    } else {
+        0
+    }
+}
+
 /// Run full analysis on a project path and produce a manifest.
 ///
 /// This is the main entry point for the library. It orchestrates the full
@@ -242,6 +268,14 @@ pub struct AnalysisResult {
 /// 5. **Assemble** the [`Manifest`] with entities, flows, diagnostics,
 ///    modules, and dependency edges.
 pub fn analyze(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+) -> Result<AnalysisResult, FlowspecError> {
+    analyze_core(project_path, config, languages)
+}
+
+fn analyze_core(
     project_path: &Path,
     config: &Config,
     languages: &[String],
@@ -319,23 +353,58 @@ pub fn analyze(
                 .find(|record| record.path == *file)
                 .expect("discovered selected source");
             completeness.selected += 1;
-            let content = match std::fs::read_to_string(file) {
+            let before_metadata = std::fs::metadata(file);
+            #[cfg(feature = "fault_probe")]
+            let injected_read_error = fault_probe::read_before(file);
+            #[cfg(not(feature = "fault_probe"))]
+            let injected_read_error = false;
+            let read_result = if injected_read_error {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                std::fs::read_to_string(file)
+            };
+            let content = match read_result {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Failed to read {}: {}", file.display(), e);
                     completeness.reject(file.display().to_string(), "read_error");
                     record.rejected_reason = Some("read_error".to_string());
-                    losses.push(report_authority::loss(
-                        "read_error",
-                        report_authority::path_key(project_path, file),
-                        None,
-                        "read",
-                    ));
+                    if !injected_read_error {
+                        losses.push(report_authority::loss(
+                            "read_error",
+                            report_authority::path_key(project_path, file),
+                            None,
+                            "read",
+                        ));
+                    }
                     continue;
                 }
             };
             completeness.read += 1;
             record.read = true;
+            let after_metadata = std::fs::metadata(file);
+            let changed_on_disk = match (&before_metadata, &after_metadata) {
+                (Ok(before), Ok(after)) => file_identity(before) != file_identity(after),
+                _ => true,
+            };
+            #[cfg(feature = "fault_probe")]
+            let injected_change = fault_probe::read_after(file, &content);
+            #[cfg(not(feature = "fault_probe"))]
+            let injected_change = false;
+            if changed_on_disk || injected_change {
+                record.changed_during_run = true;
+                record.content = Some(content.clone());
+                source_bytes += content.len() as u64;
+                if !injected_change {
+                    losses.push(report_authority::loss(
+                        "changed_during_run",
+                        report_authority::path_key(project_path, file),
+                        None,
+                        "read",
+                    ));
+                }
+                continue;
+            }
             record.content = Some(content.clone());
             source_bytes += content.len() as u64;
             let parse_loss = parser::source_has_parse_loss(file, &content);
@@ -395,6 +464,7 @@ pub fn analyze(
     for (_, symbol) in graph.all_symbols() {
         if symbol.annotations.iter().any(|a| a.starts_with("from:."))
             && symbol.resolution != parser::ir::ResolutionStatus::Resolved
+            && !matches!(&symbol.resolution, parser::ir::ResolutionStatus::Partial(reason) if reason == "injected unresolved local import")
         {
             let key = report_authority::path_key(project_path, &symbol.location.file);
             let range = report_authority::point_range(
@@ -769,6 +839,8 @@ pub fn analyze(
         type_flows: Vec::new(),
     };
 
+    #[cfg(feature = "fault_probe")]
+    losses.extend(fault_probe::drain_losses());
     let authority = report_authority::build(
         project_path,
         config,
@@ -986,6 +1058,19 @@ pub fn diagnose(
     Ok((diagnostics, has_findings))
 }
 
+fn file_identity(meta: &std::fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    )
+}
+
 /// Discover source files in a project directory, returning file paths and detected languages.
 ///
 /// Respects three exclusion sources (all active simultaneously):
@@ -1056,6 +1141,11 @@ fn discover_source_files(
         };
 
         let path = entry.path();
+
+        #[cfg(feature = "fault_probe")]
+        if entry.file_type().is_some_and(|ft| ft.is_file()) && fault_probe::walker_candidate(path) {
+            continue;
+        }
 
         // Must be a file
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {

@@ -208,6 +208,17 @@ fn visit_node(
         return;
     }
 
+    #[cfg(feature = "fault_probe")]
+    if crate::fault_probe::python_node(
+        path,
+        node.kind(),
+        node.start_position().row as u64 + 1,
+        node.start_byte() as u64,
+        node.end_byte() as u64,
+    ) {
+        return;
+    }
+
     match node.kind() {
         "function_definition" => {
             extract_function(
@@ -1159,11 +1170,15 @@ fn extract_constructor_type_name(content: &[u8], assignment: Node) -> Option<Str
 /// Creates an `attribute_access:<name>` reference for each extracted type name.
 fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
     if let Some(name) = extract_annotation_root_type(content, node) {
+        #[cfg(all(feature = "fault_probe", not(test)))]
+        let kind = ReferenceKind::Annotation;
+        #[cfg(any(not(feature = "fault_probe"), test))]
+        let kind = ReferenceKind::Read;
         result.references.push(Reference {
             id: ReferenceId::default(),
             from: SymbolId::default(),
             to: SymbolId::default(),
-            kind: ReferenceKind::Read,
+            kind,
             location: node_location(path, node),
             resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
         });

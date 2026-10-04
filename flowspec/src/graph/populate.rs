@@ -398,6 +398,18 @@ fn insert_references(
                     }
                 }
 
+                #[cfg(feature = "fault_probe")]
+                if crate::fault_probe::call_edge(
+                    &reference.location,
+                    graph
+                        .get_symbol(new_ref.from)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or(""),
+                    callee_name,
+                ) {
+                    new_ref.to = SymbolId::default();
+                }
+
                 // Skip adding unresolved call edges — they create phantom edges to
                 // SymbolId::default() that pollute callees()/callers() results.
                 if new_ref.to == SymbolId::default() {
@@ -420,12 +432,30 @@ fn insert_references(
                     });
 
                 // Resolve to: find the import symbol with matching name
-                new_ref.to = resolve_import_by_name(
-                    root_name,
-                    symbol_id_map,
-                    symbols,
-                    reference.location.line,
-                );
+                #[cfg(feature = "fault_probe")]
+                let injected = {
+                    #[cfg(all(feature = "fault_probe", not(test)))]
+                    let origin = if reference.kind == ReferenceKind::Annotation {
+                        "Annotation"
+                    } else {
+                        "Value"
+                    };
+                    #[cfg(test)]
+                    let origin = "Value";
+                    crate::fault_probe::attribute_edge(&reference.location, origin, root_name)
+                };
+                #[cfg(not(feature = "fault_probe"))]
+                let injected = false;
+                new_ref.to = if injected {
+                    SymbolId::default()
+                } else {
+                    resolve_import_by_name(
+                        root_name,
+                        symbol_id_map,
+                        symbols,
+                        reference.location.line,
+                    )
+                };
             }
             _ => {
                 // Non-call references: keep existing behavior
@@ -1077,6 +1107,25 @@ pub fn resolve_cross_file_imports(
             }
         };
         let target_file = target_file.as_ref();
+
+        #[cfg(feature = "fault_probe")]
+        if target_file.is_some()
+            && crate::fault_probe::import_edge(
+                importing_file,
+                module_name,
+                lookup_name,
+                graph
+                    .get_symbol(*import_id)
+                    .map(|s| s.location.line as u64)
+                    .unwrap_or(0),
+            )
+        {
+            resolution_updates.push((
+                *import_id,
+                ResolutionStatus::Partial("injected unresolved local import".into()),
+            ));
+            continue;
+        }
 
         let Some(target_file) = target_file else {
             // Module not found in map — likely stdlib/third-party. Leave as-is.
