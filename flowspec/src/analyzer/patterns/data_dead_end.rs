@@ -49,6 +49,22 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
             continue;
         }
 
+        // Only a private executable binding can be proved dead from this graph.
+        // Python's leading underscore is a language-level private convention;
+        // the same spelling does not make an exported Rust or JS API private.
+        if symbol.kind == SymbolKind::Function
+            && symbol.visibility == Visibility::Public
+            && !(symbol
+                .location
+                .file
+                .extension()
+                .is_some_and(|ext| ext == "py")
+                && symbol.name.starts_with('_')
+                && !symbol.name.starts_with("__"))
+        {
+            continue;
+        }
+
         // Count inbound consumption edges (Calls + References, not Contains)
         let inbound_count = graph
             .edges_to(id)

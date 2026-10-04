@@ -55,7 +55,7 @@ impl Config {
                     ),
                 });
             }
-            let config_file = read_config_file(path);
+            let config_file = read_config_file(path)?;
             return Ok(Self {
                 config_path: Some(path.to_path_buf()),
                 languages: config_file.languages,
@@ -65,7 +65,7 @@ impl Config {
 
         let default_path = project_root.join(".flowspec").join("config.yaml");
         if default_path.exists() {
-            let config_file = read_config_file(&default_path);
+            let config_file = read_config_file(&default_path)?;
             Ok(Self {
                 config_path: Some(default_path),
                 languages: config_file.languages,
@@ -85,22 +85,17 @@ impl Config {
 ///
 /// Handles: empty files, comment-only YAML, malformed YAML, encoding issues.
 /// Logs a warning on parse failure rather than crashing.
-fn read_config_file(path: &Path) -> ConfigFile {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to read config file {}: {} — using defaults",
-                path.display(),
-                e
-            );
-            return ConfigFile::default();
-        }
+fn read_config_file(path: &Path) -> Result<ConfigFile, crate::error::FlowspecError> {
+    let failure = |reason: String| crate::error::FlowspecError::Config {
+        reason: format!("{}: {}", path.display(), reason),
+        suggestion: "Correct the config YAML or pass a valid --config path".to_string(),
     };
+    let content =
+        std::fs::read_to_string(path).map_err(|e| failure(format!("read failed: {e}")))?;
 
     // Empty content or whitespace-only → defaults
     if content.trim().is_empty() {
-        return ConfigFile::default();
+        return Ok(ConfigFile::default());
     }
 
     // Warn on unknown top-level config keys (dogfood 2026-06-15: the silent-drop of
@@ -108,38 +103,34 @@ fn read_config_file(path: &Path) -> ConfigFile {
     // the test-pollution pain). Only `languages` + `exclude` are read; surface the rest
     // loudly so misconfigured keys (e.g. `analysis.ignore` vs top-level `exclude`) aren't
     // silently ignored.
-    if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(&content)
-    {
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&content)
+        .map_err(|e| failure(format!("parse failed: {e}")))?;
+    if value.is_null() {
+        return Ok(ConfigFile::default());
+    }
+    if let serde_yaml::Value::Mapping(map) = value {
         for key in map.keys() {
             if let Some(k) = key.as_str() {
                 if k != "languages" && k != "exclude" {
-                    let hint = if k == "ignore" {
-                        " (did you mean top-level `exclude`?)"
-                    } else {
-                        ""
-                    };
-                    tracing::warn!(
-                        "Unknown config key `{}` in {} — ignored{} (ConfigFile reads only `languages` + `exclude`)",
-                        k,
-                        path.display(),
-                        hint
-                    );
+                    return Err(failure(format!("unknown config key `{k}`")));
                 }
+            } else {
+                return Err(failure("non-string config key".to_string()));
             }
         }
     }
 
-    match serde_yaml::from_str::<ConfigFile>(&content) {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to parse config file {}: {} — check YAML syntax, using defaults",
-                path.display(),
-                e
-            );
-            ConfigFile::default()
+    let config = serde_yaml::from_str::<ConfigFile>(&content)
+        .map_err(|e| failure(format!("parse failed: {e}")))?;
+    for pattern in &config.exclude {
+        if Path::new(pattern)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(failure(format!("exclude path escapes project: {pattern}")));
         }
     }
+    Ok(config)
 }
 
 #[cfg(test)]
