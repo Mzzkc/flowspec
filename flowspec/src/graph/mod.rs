@@ -503,6 +503,9 @@ impl Graph {
     ///
     /// If the file path is not in the graph, this is a no-op.
     pub fn remove_file(&mut self, path: &Path) {
+        self.unresolved_calls
+            .retain(|call| call.location.file != path);
+        self.dynamic_exports.remove(path);
         // Collect symbol IDs for the file
         let symbol_ids: Vec<SymbolId> = self.file_symbols.remove(path).unwrap_or_default();
 
