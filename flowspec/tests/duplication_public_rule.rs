@@ -139,13 +139,46 @@ fn unsupported_subject_keeps_a_complete_pair_and_locates_its_loss() {
 }
 #[test]
 fn repeated_declaration_names_receive_distinct_source_ordinals() {
- let source=[js("a","x","t",1),js("a","y","u",1),js("b","z","v",1)].join("\n");
- let r=report(&source,"javascript","js");let pairs=duplicates(&r);
- assert_eq!(pairs.len(),3);
- let ids:std::collections::BTreeSet<_>=pairs.iter().map(|f|f["semantic_id"].as_str().unwrap()).collect();assert_eq!(ids.len(),3,"same-name declarations need exact source ordinals");
+    let source = [
+        js("a", "x", "t", 1),
+        js("a", "y", "u", 1),
+        js("b", "z", "v", 1),
+    ]
+    .join("\n");
+    let r = report(&source, "javascript", "js");
+    let pairs = duplicates(&r);
+    assert_eq!(pairs.len(), 3);
+    let ids: std::collections::BTreeSet<_> = pairs
+        .iter()
+        .map(|f| f["semantic_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        3,
+        "same-name declarations need exact source ordinals"
+    );
 }
 #[test]
 fn unknown_environment_does_not_manufacture_protocol_equivalence() {
- let root=tempfile::tempdir().unwrap();std::fs::write(root.path().join("source.js"),format!("{}\n{}",js("a","x","t",1),js("b","y","u",1))).unwrap();
- let path=root.path().join("policy.yaml");std::fs::write(&path,"semantic_policy:\n  version: 1\n  environments:\n    javascript:\n      version: invented-protocol\n      target: ECMAScript\n").unwrap();let config=Config::load(root.path(),Some(&path)).unwrap();let r=analyze(root.path(),&config,&[]).unwrap().manifest.authority.unwrap();assert!(duplicates(&r).is_empty());assert_eq!(r["execution"],"incomplete");
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("source.js"),
+        format!("{}\n{}", js("a", "x", "t", 1), js("b", "y", "u", 1)),
+    )
+    .unwrap();
+    let path = root.path().join("policy.yaml");
+    std::fs::write(&path,"semantic_policy:\n  version: 1\n  environments:\n    javascript:\n      version: invented-protocol\n      target: ECMAScript\n").unwrap();
+    let config = Config::load(root.path(), Some(&path)).unwrap();
+    let r = analyze(root.path(), &config, &[])
+        .unwrap()
+        .manifest
+        .authority
+        .unwrap();
+    assert!(duplicates(&r).is_empty());
+    assert_eq!(r["execution"], "incomplete");
+}
+#[test]
+fn python_methods_are_unsupported_subjects_even_with_equivalent_bodies() {
+ let source="class A:\n    def a(x, /):\n        t = ((x + 1) * 2) - 3\n        if t > 0:\n            return (t + 4) * 5\n        return t - 6\n    def b(y, /):\n        u = ((y + 1) * 2) - 3\n        if u > 0:\n            return (u + 4) * 5\n        return u - 6\n";
+ let r=report(source,"python","py");assert!(duplicates(&r).is_empty(),"methods are outside the admitted v1 domain");assert!(r["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="DUP_UNSUPPORTED_SUBJECT"));
 }
