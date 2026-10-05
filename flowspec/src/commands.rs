@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::analyzer::flow::{trace_flows_from, trace_flows_to, FlowPath};
+use crate::analyzer::flow::FlowPath;
 use crate::error::{FlowspecError, ManifestError};
 use crate::manifest::types::{DiagnosticEntry, FlowEntry, Manifest};
 use crate::manifest::{validate_manifest_size, OutputFormatter};
@@ -78,6 +78,35 @@ pub fn run_analyze_with_gate(
     gate_severity: Option<crate::Severity>,
     gate_confidence: Option<crate::Confidence>,
 ) -> Result<u8, FlowspecError> {
+    run_analyze_with_gate_and_mode(
+        path,
+        languages,
+        format,
+        output_path,
+        config_path,
+        checks,
+        severity,
+        confidence,
+        gate_severity,
+        gate_confidence,
+        crate::cache::AnalysisMode::Full,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_analyze_with_gate_and_mode(
+    path: &Path,
+    languages: &[String],
+    format: OutputFormat,
+    output_path: Option<&Path>,
+    config_path: Option<&Path>,
+    checks: &[String],
+    severity: Option<crate::Severity>,
+    confidence: Option<crate::Confidence>,
+    gate_severity: Option<crate::Severity>,
+    gate_confidence: Option<crate::Confidence>,
+    mode: crate::cache::AnalysisMode,
+) -> Result<u8, FlowspecError> {
     if !matches!(
         format,
         OutputFormat::Yaml | OutputFormat::Json | OutputFormat::Sarif | OutputFormat::Summary
@@ -105,7 +134,7 @@ pub fn run_analyze_with_gate(
 
     tracing::info!("Analyzing project at {}", canonical.display());
 
-    let result = prepare_report(
+    let result = prepare_report_with_analysis_options(
         &canonical,
         &config,
         &normalized,
@@ -116,7 +145,14 @@ pub fn run_analyze_with_gate(
             gate_severity: gate_severity.unwrap_or(crate::Severity::Critical),
             gate_confidence: gate_confidence.unwrap_or(crate::Confidence::Low),
         },
+        &crate::AnalysisOptions {
+            mode,
+            ..Default::default()
+        },
     )?;
+    if !result.cache_stats.fallbacks.is_empty() {
+        tracing::warn!("Cache fallback: {:?}", result.cache_stats.fallbacks);
+    }
 
     let output = render_report(&result.manifest, format)?;
 
@@ -136,11 +172,27 @@ pub(crate) fn prepare_report(
     languages: &[String],
     options: &crate::ReportOptions,
 ) -> Result<crate::AnalysisResult, FlowspecError> {
+    prepare_report_with_analysis_options(
+        path,
+        config,
+        languages,
+        options,
+        &crate::AnalysisOptions::default(),
+    )
+}
+
+pub(crate) fn prepare_report_with_analysis_options(
+    path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &crate::ReportOptions,
+    analysis: &crate::AnalysisOptions,
+) -> Result<crate::AnalysisResult, FlowspecError> {
     let checks = &options.checks;
     let severity = options.severity;
     let confidence = options.confidence;
     validate_check_patterns(checks)?;
-    let mut result = crate::analyze(path, config, languages)?;
+    let mut result = crate::analyze_with_options(path, config, languages, analysis)?;
 
     // Exit code is based on UNFILTERED diagnostics — CI gate contract
     if let Some(authority) = result.manifest.authority.as_mut() {
@@ -524,6 +576,35 @@ pub fn run_diagnose_with_gate(
     gate_severity: Option<crate::Severity>,
     gate_confidence: Option<crate::Confidence>,
 ) -> Result<u8, FlowspecError> {
+    run_diagnose_with_gate_and_mode(
+        path,
+        languages,
+        checks,
+        severity,
+        confidence,
+        format,
+        output_path,
+        config_path,
+        gate_severity,
+        gate_confidence,
+        crate::cache::AnalysisMode::Full,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_diagnose_with_gate_and_mode(
+    path: &Path,
+    languages: &[String],
+    checks: &[String],
+    severity: Option<crate::Severity>,
+    confidence: Option<crate::Confidence>,
+    format: OutputFormat,
+    output_path: Option<&Path>,
+    config_path: Option<&Path>,
+    gate_severity: Option<crate::Severity>,
+    gate_confidence: Option<crate::Confidence>,
+    mode: crate::cache::AnalysisMode,
+) -> Result<u8, FlowspecError> {
     if path.as_os_str().is_empty() {
         return Err(FlowspecError::EmptyPath);
     }
@@ -533,7 +614,7 @@ pub fn run_diagnose_with_gate(
     for language in languages {
         validate_language(language)?;
     }
-    let result = crate::diagnose_report_with_source(
+    let result = prepare_report_with_analysis_options(
         &canonical,
         &config,
         &normalize_languages(languages),
@@ -544,7 +625,15 @@ pub fn run_diagnose_with_gate(
             gate_severity: gate_severity.unwrap_or(crate::Severity::Info),
             gate_confidence: gate_confidence.unwrap_or(crate::Confidence::Low),
         },
+        &crate::AnalysisOptions {
+            mode,
+            ..Default::default()
+        },
     )?;
+    if !result.cache_stats.fallbacks.is_empty() {
+        tracing::warn!("Cache fallback: {:?}", result.cache_stats.fallbacks);
+    }
+
     let output = render_report(&result.manifest, format)?;
     validate_manifest_size(&output, result.source_bytes, format_name(format))?;
     write_output(&output, output_path)?;
@@ -602,18 +691,17 @@ pub fn run_trace(
     // Look up the matched symbol's SymbolId in the graph
     let matched_sym_id = find_symbol_id_in_graph(&result.graph, &matched_entity)?;
 
-    // Graph-direct tracing — FROM semantics (forward) / TO semantics (backward)
-    let flow_paths = match direction {
-        TraceDirection::Forward => trace_flows_from(&result.graph, matched_sym_id, depth),
-        TraceDirection::Backward => trace_flows_to(&result.graph, matched_sym_id, depth),
+    let forward = crate::analyzer::flow::trace_report(&result.graph, matched_sym_id, depth, false);
+    let backward = crate::analyzer::flow::trace_report(&result.graph, matched_sym_id, depth, true);
+    let (flow_paths, incomplete) = match direction {
+        TraceDirection::Forward => (forward.paths, forward.incomplete),
+        TraceDirection::Backward => (backward.paths, backward.incomplete),
         TraceDirection::Both => {
-            let mut forward = trace_flows_from(&result.graph, matched_sym_id, depth);
-            let backward = trace_flows_to(&result.graph, matched_sym_id, depth);
-            forward.extend(backward);
-            forward
+            let mut paths = forward.paths;
+            paths.extend(backward.paths);
+            (paths, forward.incomplete || backward.incomplete)
         }
     };
-
     // Convert FlowPath (graph-level) → FlowEntry (manifest-level)
     let mut flow_entries = flow_paths_to_entries(&result.graph, &flow_paths, &matched_entity);
 
@@ -662,7 +750,7 @@ pub fn run_trace(
 
     write_output(&output, output_path)?;
 
-    Ok(0)
+    Ok(if incomplete { 3 } else { 0 })
 }
 
 /// Find a SymbolId in the graph by matching qualified_name.
@@ -718,7 +806,10 @@ pub fn flow_paths_to_entries(
                         .unwrap_or_else(|| "unknown".to_string());
                     crate::manifest::types::FlowStep {
                         entity,
-                        action: "call".to_string(),
+                        action: match step.edge_kind {
+                            crate::parser::ir::EdgeKind::Calls => "call".into(),
+                            kind => format!("{:?}", kind).to_lowercase(),
+                        },
                         in_type: "unknown".to_string(),
                         out_type: "unknown".to_string(),
                     }
@@ -737,7 +828,11 @@ pub fn flow_paths_to_entries(
                 entry: entry_name,
                 exit: exit_name,
                 steps,
-                issues: Vec::new(),
+                issues: if path.truncated {
+                    vec!["depth_truncation".into()]
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect()
@@ -2581,4 +2676,307 @@ mod tests {
         assert!(field_names.contains(&"sig"));
         assert!(field_names.contains(&"loc"));
     }
+}
+
+/// One exact symbol identity and source site in a trace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSymbol {
+    pub binding_id: String,
+    pub qualified_name: String,
+    pub location: crate::parser::ir::Location,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceHop {
+    pub symbol: TraceSymbol,
+    pub edge_kind: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExactTracePath {
+    pub id: String,
+    pub entry: TraceSymbol,
+    pub hops: Vec<TraceHop>,
+    pub cyclic: bool,
+    pub truncated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceOutput {
+    pub schema_version: u32,
+    pub producer: serde_json::Value,
+    pub scope: serde_json::Value,
+    pub execution: String,
+    pub outcome: String,
+    pub symbol: String,
+    pub direction: String,
+    pub paths: Vec<ExactTracePath>,
+    pub unresolved: Vec<crate::parser::ir::Location>,
+    pub continuation: Vec<String>,
+    pub losses: Vec<serde_json::Value>,
+    pub losses_total: usize,
+    pub paths_enumerated: usize,
+    pub unresolved_total: usize,
+    pub continuation_total: usize,
+    pub details_truncated: bool,
+    pub next_path: Option<String>,
+}
+/// Same graph and loss policy for library, CLI and MCP trace consumers.
+pub fn exact_trace_output(
+    root: &Path,
+    result: &crate::AnalysisResult,
+    symbol: &str,
+    depth: usize,
+    direction: TraceDirection,
+) -> Result<TraceOutput, FlowspecError> {
+    let name = find_matching_symbol(symbol, &result.manifest.entities)?;
+    let mut matches = result
+        .graph
+        .all_symbols()
+        .filter(|(_, s)| s.qualified_name == name);
+    let (id, _) = matches
+        .next()
+        .ok_or_else(|| FlowspecError::SymbolNotFound(name.clone()))?;
+    if matches.next().is_some() {
+        return Err(FlowspecError::SymbolNotFound(format!(
+            "Ambiguous binding: {name}"
+        )));
+    }
+    let directions: Vec<_> = match direction {
+        TraceDirection::Forward => vec![false],
+        TraceDirection::Backward => vec![true],
+        TraceDirection::Both => vec![false, true],
+    };
+    let identity = |id: SymbolId| -> Option<TraceSymbol> {
+        let s = result.graph.get_symbol(id)?;
+        let mut location = s.location.clone();
+        location.file = s
+            .location
+            .file
+            .strip_prefix(root)
+            .unwrap_or(&s.location.file)
+            .to_path_buf();
+        let language = crate::registry::Registry::default()
+            .language_for_path(&s.location.file)
+            .map(|d| d.id.clone());
+        let base = serde_json::json!({"path_key":crate::report_authority::path_key(root,&s.location.file),"language":language,"qualified_name":s.qualified_name,"construct_kind":format!("{:?}",s.kind).to_lowercase()});
+        Some(TraceSymbol {
+            binding_id: crate::report_authority::hash("binding", &base),
+            qualified_name: s.qualified_name.clone(),
+            location,
+        })
+    };
+    let mut paths = vec![];
+    let mut unresolved = vec![];
+    let mut continuation = vec![];
+    let mut incomplete = false;
+    let mut seen = HashSet::new();
+    for backward in directions {
+        let report = crate::analyzer::flow::trace_report(&result.graph, id, depth, backward);
+        incomplete |= report.incomplete;
+        unresolved.extend(report.unresolved.into_iter().map(|mut location| {
+            location.file = location
+                .file
+                .strip_prefix(root)
+                .unwrap_or(&location.file)
+                .to_path_buf();
+            location
+        }));
+        for path in report.paths {
+            let Some(entry) = identity(path.entry) else {
+                continue;
+            };
+            let hops: Vec<_> = path
+                .steps
+                .iter()
+                .filter_map(|step| {
+                    identity(step.symbol).map(|symbol| TraceHop {
+                        symbol,
+                        edge_kind: format!("{:?}", step.edge_kind).to_lowercase(),
+                    })
+                })
+                .collect();
+            let key = crate::report_authority::hash(
+                "trace-path",
+                &serde_json::json!({"entry":entry.binding_id,"hops":hops,"backward":backward}),
+            );
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if path.truncated {
+                continuation.push(key.clone());
+            }
+            paths.push(ExactTracePath {
+                id: key,
+                entry,
+                hops,
+                cyclic: path.is_cyclic,
+                truncated: path.truncated,
+            });
+        }
+    }
+    paths.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut sites = vec![result
+        .graph
+        .get_symbol(id)
+        .expect("matched trace entry")
+        .location
+        .clone()];
+    sites.extend(paths.iter().flat_map(|p| p.hops.iter()).map(|hop| {
+        let mut location = hop.symbol.location.clone();
+        location.file = root.join(&location.file);
+        location
+    }));
+    let mut losses = Vec::new();
+    for loss in result
+        .manifest
+        .authority
+        .as_ref()
+        .and_then(|a| a["losses"].as_array())
+        .into_iter()
+        .flatten()
+    {
+        if loss["reason"] == "output_truncation" {
+            continue;
+        }
+        let required: Vec<_> = loss["required_capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        if !required.is_empty()
+            && !required.iter().any(|cap| {
+                matches!(
+                    *cap,
+                    "calls"
+                        | "imports"
+                        | "resolution"
+                        | "dispatch"
+                        | "parser_traversal"
+                        | "symbols"
+                        | "scopes"
+                        | "name_use"
+                )
+            })
+        {
+            continue;
+        }
+        let affected = sites.iter().any(|site| {
+            let key = crate::report_authority::path_key(root, &site.file);
+            let path_matches = loss["scope_paths"]
+                .as_array()
+                .is_some_and(|keys| keys.iter().any(|k| k == &key));
+            let ranges: Vec<_> = loss["ranges"].as_array().into_iter().flatten().collect();
+            path_matches
+                && (ranges.is_empty()
+                    || ranges.iter().any(|range| {
+                        range["start_line"].as_u64().unwrap_or(0) <= site.end_line as u64
+                            && range["end_line"].as_u64().unwrap_or(u64::MAX) >= site.line as u64
+                    }))
+        });
+        if affected {
+            incomplete = true;
+            losses.push(loss.clone());
+        }
+    }
+    unresolved.sort_by(|a, b| {
+        (&a.file, a.line, a.column, a.end_line, a.end_column).cmp(&(
+            &b.file,
+            b.line,
+            b.column,
+            b.end_line,
+            b.end_column,
+        ))
+    });
+    unresolved.dedup();
+    let mut output = TraceOutput {
+        schema_version: 2,
+        producer: result
+            .manifest
+            .authority
+            .as_ref()
+            .map(|a| a["producer"].clone())
+            .unwrap_or_default(),
+        scope: result
+            .manifest
+            .authority
+            .as_ref()
+            .map(|a| a["scope"].clone())
+            .unwrap_or_default(),
+        execution: if incomplete { "incomplete" } else { "complete" }.into(),
+        outcome: if incomplete { "incomplete" } else { "clean" }.into(),
+        symbol: name,
+        direction: format!("{direction:?}").to_lowercase(),
+        losses_total: losses.len(),
+        paths_enumerated: paths.len(),
+        unresolved_total: unresolved.len(),
+        continuation_total: continuation.len(),
+        details_truncated: false,
+        next_path: None,
+        paths,
+        unresolved,
+        continuation,
+        losses,
+    };
+    // Bound once for all consumers, allowing MCP to carry equal text + structured content.
+    loop {
+        let json = serde_json::to_vec(&output).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?;
+        let yaml = serde_yaml::to_string(&output).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?;
+        if json.len() <= 9_000 && yaml.len() <= 9_000 {
+            break;
+        }
+        output.details_truncated = true;
+        output.execution = "incomplete".into();
+        output.outcome = "incomplete".into();
+        if let Some(path) = output.paths.pop() {
+            if output.next_path.is_none() {
+                output.next_path = Some(path.id.clone());
+            }
+            if !output.continuation.contains(&path.id) {
+                output.continuation_total += 1;
+                output.continuation.push(path.id);
+            }
+        } else if !output.losses.is_empty() {
+            output.losses.pop();
+        } else if !output.unresolved.is_empty() {
+            output.unresolved.pop();
+        } else if output.continuation.len() > 1 {
+            output.continuation.pop();
+        } else {
+            return Err(FlowspecError::Manifest {
+                reason: "trace scope/provenance exceeds the output byte budget".into(),
+            });
+        }
+    }
+    Ok(output)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn run_trace_report(
+    path: &Path,
+    symbol: &str,
+    languages: &[String],
+    depth: usize,
+    direction: TraceDirection,
+    format: OutputFormat,
+    output: Option<&Path>,
+    config_path: Option<&Path>,
+) -> Result<u8, FlowspecError> {
+    let root = resolve_path(path)?;
+    let config = Config::load(&root, config_path)?;
+    let result = crate::analyze(&root, &config, &normalize_languages(languages))?;
+    let trace = exact_trace_output(&root, &result, symbol, depth, direction)?;
+    let text=match format {
+        OutputFormat::Json=>serde_json::to_string(&trace),
+        OutputFormat::Yaml=>return {let text=serde_yaml::to_string(&trace).map_err(|e|FlowspecError::Manifest{reason:e.to_string()})?;write_output(&text,output)?;Ok(if trace.execution=="incomplete"{3}else{0})},
+        OutputFormat::Summary=>Ok(format!("Trace: {}\nExecution: {}\nPaths: {}\nUnresolved: {}\nContinuation: {}\n",trace.symbol,trace.execution,trace.paths.len(),trace.unresolved.len(),trace.continuation.len())),
+        OutputFormat::Sarif=>Ok(serde_json::json!({"version":"2.1.0","runs":[{"tool":{"driver":{"name":"flowspec"}},"invocations":[{"executionSuccessful":trace.execution=="complete","properties":{"flowspec":trace}}],"results":[]}]}).to_string()),
+    }.map_err(|e|FlowspecError::Manifest{reason:e.to_string()})?;
+    write_output(&text, output)?;
+    Ok(if trace.execution == "incomplete" {
+        3
+    } else {
+        0
+    })
 }

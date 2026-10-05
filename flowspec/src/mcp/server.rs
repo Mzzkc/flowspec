@@ -93,7 +93,7 @@ impl Workspace {
         }
         Ok(())
     }
-    fn analyze(&self, args: &Value) -> Result<crate::AnalysisReport, FlowspecError> {
+    fn analyze_result(&self, args: &Value) -> Result<crate::AnalysisResult, FlowspecError> {
         let path = self.path(Path::new(args["path"].as_str().expect("validated path")))?;
         if !path.is_dir() {
             return Err(refusal("analysis target must be a directory"));
@@ -131,13 +131,45 @@ impl Workspace {
                 .and_then(crate::Confidence::from_str_checked)
                 .unwrap_or(crate::Confidence::Low),
         };
-        let result = crate::diagnose_report_with_source(&path, &config, &languages, &options)?;
+        let result = crate::diagnose_report_with_analysis_options(
+            &path,
+            &config,
+            &languages,
+            &options,
+            &crate::AnalysisOptions {
+                mode: if args["incremental"] == true {
+                    crate::cache::AnalysisMode::Incremental
+                } else {
+                    crate::cache::AnalysisMode::Full
+                },
+                ..Default::default()
+            },
+        )?;
         let serialized =
             serde_json::to_string(&result.manifest).map_err(|error| FlowspecError::Manifest {
                 reason: error.to_string(),
             })?;
         crate::manifest::validate_manifest_size(&serialized, result.source_bytes, "json")?;
-        Ok(result.manifest)
+        Ok(result)
+    }
+    fn analyze(&self, args: &Value) -> Result<crate::AnalysisReport, FlowspecError> {
+        Ok(self.analyze_result(args)?.manifest)
+    }
+    fn trace(&self, args: &Value) -> Result<crate::commands::TraceOutput, FlowspecError> {
+        let root = self.path(Path::new(args["path"].as_str().expect("validated path")))?;
+        let result = self.analyze_result(args)?;
+        let direction = match args["direction"].as_str().unwrap_or("forward") {
+            "backward" => crate::commands::TraceDirection::Backward,
+            "both" => crate::commands::TraceDirection::Both,
+            _ => crate::commands::TraceDirection::Forward,
+        };
+        crate::commands::exact_trace_output(
+            &root,
+            &result,
+            args["symbol"].as_str().expect("validated symbol"),
+            args["depth"].as_u64().unwrap_or(10) as usize,
+            direction,
+        )
     }
 }
 fn strings(value: Option<&Value>) -> Vec<String> {
@@ -168,6 +200,7 @@ fn valid_args(args: &Value) -> bool {
     }
     map.iter().all(|(key, value)| match key.as_str() {
         "path" => value.is_string(),
+        "incremental" => value.is_boolean(),
         "language" | "checks" => value
             .as_array()
             .is_some_and(|a| a.iter().all(Value::is_string)),
@@ -186,6 +219,7 @@ fn error(id: Value, code: i32, message: &str) -> Value {
 fn tools() -> Value {
     let schema = json!({"type":"object","properties":{
         "path":{"type":"string","minLength":1},
+        "incremental":{"type":"boolean"},
         "language":{"type":"array","items":{"type":"string"}},
         "checks":{"type":"array","items":{"type":"string"}},
         "severity":{"type":"string","enum":["critical","warning","info"]},
@@ -193,7 +227,15 @@ fn tools() -> Value {
         "gate_severity":{"type":"string","enum":["critical","warning","info"]},
         "gate_confidence":{"type":"string","enum":["high","moderate","low"]}
     },"required":["path"],"additionalProperties":false});
+    let mut trace_schema = schema.clone();
+    trace_schema["properties"]["symbol"] = json!({"type":"string","minLength":1});
+    trace_schema["properties"]["depth"] = json!({"type":"integer","minimum":0,"maximum":256});
+    trace_schema["properties"]["direction"] =
+        json!({"type":"string","enum":["forward","backward","both"]});
+    trace_schema["required"] = json!(["path", "symbol"]);
     json!({"tools":[{"name":"flowspec_analyze","description":"Full AnalysisReport; Critical/Low gate, display filters preserve authority findings", "inputSchema":schema,
+        "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}},
+        {"name":"flowspec_trace","description":"Exact ordered graph hops with scoped uncertainty and depth continuation","inputSchema":trace_schema,
         "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}]})
 }
 fn dispatch(workspace: &Workspace, request: Value) -> Option<Value> {
@@ -232,10 +274,40 @@ fn dispatch(workspace: &Workspace, request: Value) -> Option<Value> {
             tools()
         }
         "tools/call" => {
-            if params["name"] != "flowspec_analyze" || !valid_args(&params["arguments"]) {
+            let arguments = &params["arguments"];
+            let traced = params["name"] == "flowspec_trace";
+            let mut common = arguments.clone();
+            if traced {
+                if arguments["symbol"].as_str().is_none_or(|s| s.is_empty())
+                    || arguments
+                        .get("depth")
+                        .is_some_and(|d| d.as_u64().is_none_or(|n| n > 256))
+                    || arguments.get("direction").is_some_and(|d| {
+                        !d.as_str()
+                            .is_some_and(|s| matches!(s, "forward" | "backward" | "both"))
+                    })
+                {
+                    return Some(error(id, -32602, "Invalid trace arguments"));
+                }
+                if let Some(map) = common.as_object_mut() {
+                    map.remove("symbol");
+                    map.remove("depth");
+                    map.remove("direction");
+                }
+            }
+            if (!traced && params["name"] != "flowspec_analyze") || !valid_args(&common) {
                 return Some(error(id, -32602, "Unknown tool or invalid arguments"));
             }
-            match workspace.analyze(&params["arguments"]) {
+            let report = if traced {
+                workspace
+                    .trace(arguments)
+                    .map(|report| serde_json::to_value(report).expect("serializable trace"))
+            } else {
+                workspace
+                    .analyze(arguments)
+                    .map(|report| serde_json::to_value(report).expect("serializable report"))
+            };
+            match report {
                 Ok(report) => {
                     let structured = serde_json::to_value(report).expect("serializable report");
                     let text = serde_json::to_string(&structured).expect("serializable report");

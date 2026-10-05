@@ -1,12 +1,15 @@
 //! Exact, bounded traversal of real call and import-reference graph edges.
-use std::collections::HashSet;
 use crate::graph::Graph;
 use crate::parser::ir::{EdgeKind, SymbolId, SymbolKind};
+use std::collections::HashSet;
 const MAX_FLOW_DEPTH: usize = 64;
 const MAX_TRACE_PATHS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowStep { pub symbol: SymbolId, pub edge_kind: EdgeKind }
+pub struct FlowStep {
+    pub symbol: SymbolId,
+    pub edge_kind: EdgeKind,
+}
 #[derive(Debug, Clone)]
 pub struct FlowPath {
     pub entry: SymbolId,
@@ -26,68 +29,185 @@ pub struct TraceReport {
 }
 
 fn trace_edges(graph: &Graph, current: SymbolId, backward: bool) -> Vec<(SymbolId, EdgeKind)> {
-    let import=graph.get_symbol(current).is_some_and(|s|s.annotations.iter().any(|a|a=="import"));
-    let edges=if backward {graph.edges_to(current)} else {graph.edges_from(current)};
-    let mut selected: Vec<_>=edges.iter().filter(|e| {
-        e.kind == EdgeKind::Calls || (e.kind == EdgeKind::References &&
-            if backward { graph.get_symbol(e.target).is_some_and(|s|s.annotations.iter().any(|a|a=="import")) } else { import })
-    }).filter(|e| e.target != SymbolId::default() && graph.get_symbol(e.target).is_some())
-      .map(|e|(e.target,e.kind)).collect();
-    selected.sort_by(|a,b| {
-        let key=|id|graph.get_symbol(id).map(|s|(&s.qualified_name,&s.location.file,s.location.line,s.location.column));
-        key(a.0).cmp(&key(b.0)).then(format!("{:?}",a.1).cmp(&format!("{:?}",b.1)))
+    let import = graph
+        .get_symbol(current)
+        .is_some_and(|s| s.annotations.iter().any(|a| a == "import"));
+    let edges = if backward {
+        graph.edges_to(current)
+    } else {
+        graph.edges_from(current)
+    };
+    let mut selected: Vec<_> = edges
+        .iter()
+        .filter(|e| {
+            e.kind == EdgeKind::Calls
+                || (e.kind == EdgeKind::References
+                    && if backward {
+                        graph
+                            .get_symbol(e.target)
+                            .is_some_and(|s| s.annotations.iter().any(|a| a == "import"))
+                    } else {
+                        import
+                    })
+        })
+        .filter(|e| e.target != SymbolId::default() && graph.get_symbol(e.target).is_some())
+        .map(|e| (e.target, e.kind))
+        .collect();
+    selected.sort_by(|a, b| {
+        let key = |id| {
+            graph.get_symbol(id).map(|s| {
+                (
+                    &s.qualified_name,
+                    &s.location.file,
+                    s.location.line,
+                    s.location.column,
+                )
+            })
+        };
+        key(a.0)
+            .cmp(&key(b.0))
+            .then(format!("{:?}", a.1).cmp(&format!("{:?}", b.1)))
     });
-    selected.dedup();selected
+    selected.dedup();
+    selected
 }
 
-pub fn trace_report(graph:&Graph,start:SymbolId,max_depth:usize,backward:bool)->TraceReport {
-    let max_depth=max_depth.min(256);
-    let mut paths=Vec::new();
-    let mut pending=vec![(start,Vec::<FlowStep>::new(),HashSet::from([start]))];
-    let mut reached=HashSet::from([start]);
-    let mut continuation=Vec::new();
-    while let Some((current,steps,visited))=pending.pop() {
+pub fn trace_report(
+    graph: &Graph,
+    start: SymbolId,
+    max_depth: usize,
+    backward: bool,
+) -> TraceReport {
+    let max_depth = max_depth.min(256);
+    let mut paths = Vec::new();
+    let mut pending = vec![(start, Vec::<FlowStep>::new(), HashSet::from([start]))];
+    let mut reached = HashSet::from([start]);
+    let mut continuation = Vec::new();
+    while let Some((current, steps, visited)) = pending.pop() {
         reached.insert(current);
-        let edges=trace_edges(graph,current,backward);
-        if !edges.is_empty() && (steps.len()>=max_depth || paths.len()>=MAX_TRACE_PATHS) {
-            let path=FlowPath {entry:start,steps,is_cyclic:false,truncated:true};
-            continuation.push(path.clone());paths.push(path);
-            if paths.len()>=MAX_TRACE_PATHS {
+        if paths.len() >= MAX_TRACE_PATHS - 1 && !pending.is_empty() {
+            let frontier = FlowPath {
+                entry: start,
+                steps,
+                is_cyclic: false,
+                truncated: true,
+            };
+            continuation.push(frontier.clone());
+            paths.push(frontier);
+            break;
+        }
+        let edges = trace_edges(graph, current, backward);
+        if !edges.is_empty() && (steps.len() >= max_depth || paths.len() >= MAX_TRACE_PATHS) {
+            let path = FlowPath {
+                entry: start,
+                steps,
+                is_cyclic: false,
+                truncated: true,
+            };
+            continuation.push(path.clone());
+            paths.push(path);
+            if paths.len() >= MAX_TRACE_PATHS {
                 // Keep bounded frontier metadata without walking the omitted branches.
                 break;
             }
             continue;
         }
         if edges.is_empty() {
-            if !steps.is_empty() {paths.push(FlowPath {entry:start,steps,is_cyclic:false,truncated:false});}
+            if !steps.is_empty() {
+                paths.push(FlowPath {
+                    entry: start,
+                    steps,
+                    is_cyclic: false,
+                    truncated: false,
+                });
+            }
             continue;
         }
-        for (target,kind) in edges.into_iter().rev() {
-            let mut next=steps.clone();next.push(FlowStep {symbol:target,edge_kind:kind});
+        for (target, kind) in edges.into_iter().rev() {
+            let mut next = steps.clone();
+            next.push(FlowStep {
+                symbol: target,
+                edge_kind: kind,
+            });
             if visited.contains(&target) {
-                paths.push(FlowPath {entry:start,steps:next,is_cyclic:true,truncated:false});
+                paths.push(FlowPath {
+                    entry: start,
+                    steps: next,
+                    is_cyclic: true,
+                    truncated: false,
+                });
             } else {
-                let mut seen=visited.clone();seen.insert(target);pending.push((target,next,seen));
+                let mut seen = visited.clone();
+                seen.insert(target);
+                pending.push((target, next, seen));
             }
         }
     }
-    let mut identities=HashSet::new();
-    paths.retain(|p|identities.insert(p.steps.iter().map(|s|(s.symbol,s.edge_kind)).collect::<Vec<_>>()));
-    let files:HashSet<_>=reached.iter().filter_map(|id|graph.get_symbol(*id).map(|s|s.location.file.clone())).collect();
+    let mut identities = HashSet::new();
+    paths.retain(|p| {
+        identities.insert(
+            p.steps
+                .iter()
+                .map(|s| (s.symbol, s.edge_kind))
+                .collect::<Vec<_>>(),
+        )
+    });
     let mut unresolved:Vec<_>=graph.unresolved_calls().iter().chain(graph.prerequisite_losses()).filter(|r| {
-        reached.contains(&r.from) || (r.from==SymbolId::default() && files.contains(&r.location.file))
+        if matches!(&r.resolution,crate::parser::ir::ResolutionStatus::Partial(info) if info.ends_with(":type_flows")) {return false;}
+        reached.contains(&r.from) || (r.from==SymbolId::default() && reached.iter().filter_map(|id|graph.get_symbol(*id)).any(|s|
+            s.location.file==r.location.file && (s.location.line,s.location.column)<=(r.location.end_line,r.location.end_column)
+                && (s.location.end_line,s.location.end_column)>=(r.location.line,r.location.column)))
     }).map(|r|r.location.clone()).collect();
-    unresolved.sort_by(|a,b|(&a.file,a.line,a.column,a.end_line,a.end_column).cmp(&(&b.file,b.line,b.column,b.end_line,b.end_column)));
+    unresolved.extend(
+        reached
+            .iter()
+            .filter_map(|id| graph.get_symbol(*id))
+            .filter(|s| {
+                s.annotations.iter().any(|a| a == "import")
+                    && s.resolution != crate::parser::ir::ResolutionStatus::Resolved
+            })
+            .map(|s| s.location.clone()),
+    );
+    unresolved.sort_by(|a, b| {
+        (&a.file, a.line, a.column, a.end_line, a.end_column).cmp(&(
+            &b.file,
+            b.line,
+            b.column,
+            b.end_line,
+            b.end_column,
+        ))
+    });
     unresolved.dedup();
-    let incomplete=!unresolved.is_empty() || !continuation.is_empty();
-    TraceReport {symbol:start,paths,unresolved,continuation,incomplete}
+    let incomplete = !unresolved.is_empty() || !continuation.is_empty();
+    TraceReport {
+        symbol: start,
+        paths,
+        unresolved,
+        continuation,
+        incomplete,
+    }
 }
-pub fn trace_flows_from(graph:&Graph,start:SymbolId,max_depth:usize)->Vec<FlowPath> {trace_report(graph,start,max_depth,false).paths}
-pub fn trace_flows_to(graph:&Graph,start:SymbolId,max_depth:usize)->Vec<FlowPath> {trace_report(graph,start,max_depth,true).paths}
-pub fn trace_all_flows(graph:&Graph)->Vec<FlowPath> {
-    let mut entries:Vec<_>=graph.all_symbols().filter(|(_,s)|s.kind!=SymbolKind::Module && (s.name=="main"||s.name=="__main__"||s.annotations.iter().any(|a|a=="entry_point"))).collect();
-    entries.sort_by(|(_,a),(_,b)|a.qualified_name.cmp(&b.qualified_name));
-    entries.into_iter().flat_map(|(id,_)|trace_flows_from(graph,id,MAX_FLOW_DEPTH)).collect()
+pub fn trace_flows_from(graph: &Graph, start: SymbolId, max_depth: usize) -> Vec<FlowPath> {
+    trace_report(graph, start, max_depth, false).paths
+}
+pub fn trace_flows_to(graph: &Graph, start: SymbolId, max_depth: usize) -> Vec<FlowPath> {
+    trace_report(graph, start, max_depth, true).paths
+}
+pub fn trace_all_flows(graph: &Graph) -> Vec<FlowPath> {
+    let mut entries: Vec<_> = graph
+        .all_symbols()
+        .filter(|(_, s)| {
+            s.kind != SymbolKind::Module
+                && (s.name == "main"
+                    || s.name == "__main__"
+                    || s.annotations.iter().any(|a| a == "entry_point"))
+        })
+        .collect();
+    entries.sort_by(|(_, a), (_, b)| a.qualified_name.cmp(&b.qualified_name));
+    entries
+        .into_iter()
+        .flat_map(|(id, _)| trace_flows_from(graph, id, MAX_FLOW_DEPTH))
+        .collect()
 }
 
 #[cfg(test)]

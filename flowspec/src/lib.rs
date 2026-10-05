@@ -22,6 +22,8 @@
 
 /// Diagnostic detection, flow tracing, and boundary analysis.
 pub mod analyzer;
+/// Structured, content-addressed per-file IR storage.
+pub mod cache;
 /// Extracted CLI command logic — testable library functions for analyze, diagnose, trace, diff, init.
 pub mod commands;
 /// Configuration loading and validation.
@@ -181,6 +183,8 @@ pub struct AnalysisResult {
     pub graph: Graph,
     /// Total bytes of source code read during analysis.
     pub source_bytes: u64,
+    /// Cache execution evidence, separate from semantic report loss.
+    pub cache_stats: cache::CacheStats,
 }
 
 /// Project the analyzer-produced report into the CLI exit contract.
@@ -257,15 +261,69 @@ pub fn analyze(
     )
 }
 
+/// Structured parser entry point supplied by an adapter integration. Legacy IR is never reused.
+pub type StructuredParser = fn(
+    &dyn parser::LanguageAdapter,
+    &Path,
+    &str,
+    &registry::LanguageDescriptor,
+) -> Result<cache::ParsedFile, FlowspecError>;
+#[derive(Clone, Default)]
+pub struct AnalysisOptions {
+    pub mode: cache::AnalysisMode,
+    pub cache_dir: Option<PathBuf>,
+    pub structured_parser: Option<StructuredParser>,
+    /// Versioned identity for the structured provider; it is a cache-determining input.
+    pub structured_parser_identity: Option<&'static str>,
+}
+/// Run the normal pipeline with explicit cache policy.
+pub fn analyze_with_options(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &AnalysisOptions,
+) -> Result<AnalysisResult, FlowspecError> {
+    analyze_with_registry_and_options(
+        project_path,
+        config,
+        languages,
+        &registry::Registry::default(),
+        options,
+    )
+}
 /// Analyze through the same production pipeline with an isolated registry.
-/// Custom adapters are selected explicitly and never become a fifth default.
 pub fn analyze_with_registry(
     project_path: &Path,
     config: &Config,
     languages: &[String],
     registry: &registry::Registry,
 ) -> Result<AnalysisResult, FlowspecError> {
+    analyze_with_registry_and_options(
+        project_path,
+        config,
+        languages,
+        registry,
+        &AnalysisOptions::default(),
+    )
+}
+/// Always rebuild a fresh global graph from sorted cached/fresh per-file output, then resolve globally.
+pub fn analyze_with_registry_and_options(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    registry: &registry::Registry,
+    options: &AnalysisOptions,
+) -> Result<AnalysisResult, FlowspecError> {
     registry.validate()?;
+    if options.structured_parser.is_some()
+        && options.structured_parser_identity.is_none_or(str::is_empty)
+    {
+        return Err(FlowspecError::Config {
+            reason: "structured parser requires a versioned identity".into(),
+            suggestion:
+                "bind the actual provider implementation/version before enabling cache reuse".into(),
+        });
+    }
     // Validate path
     if project_path.as_os_str().is_empty() {
         return Err(FlowspecError::EmptyPath);
@@ -325,6 +383,7 @@ pub fn analyze_with_registry(
         });
     }
 
+    files.sort();
     // Build the project name from the directory
     let project_name = project_path
         .file_name()
@@ -339,6 +398,30 @@ pub fn analyze_with_registry(
         .map(|d| (d, (d.factory.expect("validated adapter factory"))()))
         .collect();
 
+    let mut cache_stats = cache::CacheStats::default();
+    let cache_store = if options.structured_parser.is_some() {
+        let directory = options
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| project_path.join(".flowspec/cache/ir-v1"));
+        match cache::CacheStore::open(&directory) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                cache_stats
+                    .fallbacks
+                    .push(format!("cache_open:{:?}", e.kind()));
+                None
+            }
+        }
+    } else {
+        if options.mode == cache::AnalysisMode::Incremental {
+            cache_stats
+                .fallbacks
+                .push("structured_adapter_not_joined".into());
+        }
+        None
+    };
+    let mut source_identities = std::collections::BTreeMap::new();
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
     let mut source_bytes: u64 = 0;
@@ -356,6 +439,9 @@ pub fn analyze_with_registry(
                 .expect("discovered selected source");
             completeness.selected += 1;
             let before_metadata = std::fs::metadata(file);
+            if let Ok(metadata) = &before_metadata {
+                source_identities.insert(file.clone(), file_identity(metadata));
+            }
             #[cfg(feature = "fault_probe")]
             let injected_read_error = fault_probe::read_before(file);
             #[cfg(not(feature = "fault_probe"))]
@@ -409,11 +495,80 @@ pub fn analyze_with_registry(
             }
             record.content = Some(content.clone());
             source_bytes += content.len() as u64;
-            let parse_loss = descriptor
-                .recovery
-                .map(|probe| probe(file, &content))
-                .unwrap_or(false);
-            if descriptor.recovery.is_none() {
+            let key = cache::CacheKey::new(
+                &serde_json::json!({
+                    "tool":env!("CARGO_PKG_VERSION"),"build_sha":option_env!("FLOWSPEC_BUILD_SHA").unwrap_or("unbound"),
+                    "source_tree":option_env!("FLOWSPEC_SOURCE_TREE_SHA").unwrap_or("unbound"),
+                    "schema":2,"registry":registry.digest(),"adapter":descriptor.metadata(),
+                    "root":report_authority::hash("cache-root",&serde_json::json!(project_path)),
+                    "path":report_authority::path_key(project_path,file),"language":descriptor.id,
+                    "config":{"path":config.config_path,"languages":config.languages,"exclude":config.exclude,"origin":config.origin,"source_sha256":config.source_sha256,"read_root":config.read_root},
+                    "requested_languages":languages,"effective_languages":active_languages,"ast_depth":parser::MAX_AST_DEPTH,"structured_parser_identity":options.structured_parser_identity
+                }),
+                content.as_bytes(),
+            );
+            let cached = if options.mode == cache::AnalysisMode::Incremental {
+                cache_store
+                    .as_ref()
+                    .and_then(|store| match store.load(&key) {
+                        Ok(output) => output,
+                        Err(e) => {
+                            cache_stats.fallbacks.push(format!("cache_read:{e}"));
+                            None
+                        }
+                    })
+            } else {
+                None
+            };
+            let parsed = if let Some(output) = cached {
+                cache_stats.hits += 1;
+                Ok((output.ir, Some(output.report)))
+            } else {
+                cache_stats.parsed += 1;
+                if let Some(parse) = options.structured_parser {
+                    parse(adapter.as_ref(), file, &content, descriptor).and_then(|output| {
+                        if !cache::valid_output(&output, &key)
+                            || output.report["file"] != serde_json::json!(file)
+                            || output.report["language"] != descriptor.id
+                        {
+                            return Err(FlowspecError::Cache {
+                                path: file.clone(),
+                                reason: "structured output source identity mismatch".into(),
+                            });
+                        }
+                        if let Some(store) = &cache_store {
+                            if let Err(e) = store.store(&key, output.clone()) {
+                                cache_stats.fallbacks.push(format!("cache_write:{e}"));
+                            }
+                        }
+                        Ok((output.ir, Some(output.report)))
+                    })
+                } else {
+                    adapter.parse_file(file, &content).map(|ir| (ir, None))
+                }
+            };
+            let structured_report = parsed.as_ref().ok().and_then(|(_, report)| report.as_ref());
+            let parse_loss =
+                if let Some(report) = structured_report {
+                    report["events"].as_array().into_iter().flatten().any(|e| {
+                        matches!(e["code"].as_str(), Some("parser_recovery" | "missing_node"))
+                    })
+                } else {
+                    descriptor
+                        .recovery
+                        .map(|probe| probe(file, &content))
+                        .unwrap_or(false)
+                };
+            if let Some(report) = structured_report {
+                cache::reduce_parse_report(
+                    report,
+                    project_path,
+                    file,
+                    &content,
+                    registry,
+                    &mut losses,
+                );
+            } else if descriptor.recovery.is_none() {
                 losses.push(report_authority::loss(
                     "semantic_proof_unavailable",
                     report_authority::path_key(project_path, file),
@@ -445,8 +600,8 @@ pub fn analyze_with_registry(
                     }
                 }
             }
-            match adapter.parse_file(file, &content) {
-                Ok(result) => {
+            match parsed {
+                Ok((result, _report)) => {
                     populate_graph(&mut graph, &result);
                     if parse_loss {
                         tracing::warn!("Parse recovery in {}", file.display());
@@ -741,7 +896,12 @@ pub fn analyze_with_registry(
             }
         })
         .collect();
-    modules.sort_by_key(|module| std::cmp::Reverse(module.entity_count));
+    modules.sort_by(|a, b| {
+        b.entity_count
+            .cmp(&a.entity_count)
+            .then(a.name.cmp(&b.name))
+            .then(a.role.cmp(&b.role))
+    });
 
     // Stage 4b: Trace data flows through the call graph
     let flow_paths = trace_all_flows(&graph);
@@ -774,7 +934,10 @@ pub fn analyze_with_registry(
                         .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
                     manifest::types::FlowStep {
                         entity,
-                        action: format!("{:?}", step.edge_kind).to_lowercase(),
+                        action: match step.edge_kind {
+                            parser::ir::EdgeKind::Calls => "call".into(),
+                            kind => format!("{:?}", kind).to_lowercase(),
+                        },
                         in_type,
                         out_type,
                     }
@@ -899,8 +1062,9 @@ pub fn analyze_with_registry(
             entity_count: entities.len() as u64,
             flow_count: flows.len() as u64,
             diagnostic_count,
-            incremental: false,
-            files_changed: 0,
+            incremental: options.mode == cache::AnalysisMode::Incremental
+                && options.structured_parser.is_some(),
+            files_changed: cache_stats.parsed,
         },
         summary: Summary {
             architecture,
@@ -946,12 +1110,34 @@ pub fn analyze_with_registry(
                 }
             })
             .collect(),
-        type_flows: analyzer::type_flow::derive_type_flows(&graph, input_records.iter().filter_map(|r| r.content.as_deref().map(|s| (r.path.as_path(), s)))),
+        type_flows: analyzer::type_flow::derive_type_flows(
+            &graph,
+            input_records
+                .iter()
+                .filter_map(|r| r.content.as_deref().map(|s| (r.path.as_path(), s))),
+        ),
     };
 
+    // The captured IR is valid for its consumed bytes; a later edit invalidates absence claims.
+    for input in &mut input_records {
+        if input.read
+            && !input.changed_during_run
+            && source_identities.get(&input.path).is_some_and(|before| {
+                std::fs::metadata(&input.path).map_or(true, |now| file_identity(&now) != *before)
+            })
+        {
+            input.changed_during_run = true;
+            losses.push(report_authority::loss(
+                "changed_during_run",
+                report_authority::path_key(project_path, &input.path),
+                None,
+                "read",
+            ));
+        }
+    }
     #[cfg(feature = "fault_probe")]
     losses.extend(fault_probe::drain_losses());
-    let authority = report_authority::build(
+    let mut authority = report_authority::build(
         (project_path, config),
         &active_languages,
         &input_records,
@@ -960,6 +1146,9 @@ pub fn analyze_with_registry(
         losses,
         registry,
     );
+    authority["analysis_graph"]["type_flows"] =
+        serde_json::to_value(&manifest.type_flows).expect("serializable type flows");
+    report_authority::refresh_identity(&mut authority);
     let mut manifest = manifest.with_report(completeness);
     manifest.execution = Some(if authority["execution"] == "incomplete" {
         Execution::Incomplete
@@ -1020,6 +1209,7 @@ pub fn analyze_with_registry(
         has_findings,
         graph,
         source_bytes,
+        cache_stats,
     };
     commands::normalize_report(&mut result)?;
     Ok(result)
@@ -1085,7 +1275,7 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
         let step_entities: String = flow
             .steps
             .iter()
-            .map(|s| s.entity.as_str())
+            .map(|s| format!("{}:{}", s.entity, s.action))
             .collect::<Vec<_>>()
             .join(",");
         let key = format!("{}|{}|{}", flow.entry, flow.exit, step_entities);
@@ -1141,6 +1331,23 @@ pub fn diagnose_report(
     options: &ReportOptions,
 ) -> Result<AnalysisReport, FlowspecError> {
     Ok(diagnose_report_with_source(project_path, config, languages, options)?.manifest)
+}
+
+/// Full report plus operation evidence under explicit cache/adapter policy.
+pub fn diagnose_report_with_analysis_options(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &ReportOptions,
+    analysis: &AnalysisOptions,
+) -> Result<AnalysisResult, FlowspecError> {
+    commands::prepare_report_with_analysis_options(
+        project_path,
+        config,
+        languages,
+        options,
+        analysis,
+    )
 }
 
 /// Shared report API implementation retaining the measured source-byte budget.

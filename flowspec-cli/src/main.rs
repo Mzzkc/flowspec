@@ -60,7 +60,7 @@ enum Commands {
         #[arg(long)]
         full: bool,
 
-        /// Use cached graph for incremental analysis.
+        /// Reuse structured per-file IR and rebuild the global graph.
         #[arg(long, conflicts_with = "full")]
         incremental: bool,
 
@@ -140,6 +140,10 @@ enum Commands {
         /// Restrict analysis to specific language(s).
         #[arg(short, long, help = format!("Restrict analysis to registered languages: {}", flowspec::registry::language_names()))]
         language: Vec<String>,
+
+        /// Emit exact binding identities, source ranges, execution and continuation.
+        #[arg(long)]
+        report: bool,
 
         /// Maximum traversal depth for flow tracing.
         #[arg(long, short = 'd', default_value = "10")]
@@ -323,8 +327,9 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             confidence,
             gate_severity,
             gate_confidence,
+            incremental,
             ..
-        } => commands::run_analyze_with_gate(
+        } => commands::run_analyze_with_gate_and_mode(
             &path,
             &language,
             format,
@@ -335,6 +340,11 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             confidence.map(|c| c.to_confidence()),
             gate_severity.map(|s| s.to_severity()),
             gate_confidence.map(|c| c.to_confidence()),
+            if incremental {
+                flowspec::cache::AnalysisMode::Incremental
+            } else {
+                flowspec::cache::AnalysisMode::Full
+            },
         )?,
         Commands::Diagnose {
             path,
@@ -374,7 +384,12 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             language,
             depth,
             direction,
-        } => commands::run_trace(
+            report,
+        } => (if report {
+            commands::run_trace_report
+        } else {
+            commands::run_trace
+        })(
             &path,
             &symbol,
             &language,
