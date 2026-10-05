@@ -782,7 +782,14 @@ fn append_duplication_proofs(
                 .semantic_policy
                 .as_ref()
                 .and_then(|p| p.environments.get(language));
-            if environment.is_none() {
+            let known_environment = environment.is_some_and(|e| match language {
+                "javascript" => e.version == "ECMA-262/2025" && e.target == "ECMAScript",
+                "python" => e.version == "Python/3.14" && e.target == "Python",
+                // These protocols have no complete type/ownership normalizer yet.
+                "typescript" | "rust" => false,
+                _ => false,
+            });
+            if !known_environment {
                 let mut item = loss(
                     "DUP_ENVIRONMENT_UNRESOLVED",
                     key.clone(),
@@ -831,7 +838,7 @@ fn append_duplication_proofs(
                             .to_string_lossy()
                             .replace('\\', "/"),
                         f.declaration_path,
-                        0
+                        f.declaration_ordinal
                     ])
                 };
             let mut locators = [locator(file_a, a), locator(file_b, b)];

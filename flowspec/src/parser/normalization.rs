@@ -11,6 +11,7 @@ pub const RULE_SHA256: &str = "8da06b2a92262e831d20a728d3f9fc8c62853b39e727009e1
 pub struct NormalizedFunction {
     pub name: String,
     pub declaration_path: Vec<String>,
+    pub declaration_ordinal: usize,
     pub range: (usize, usize),
     pub body_range: (usize, usize),
     pub normal_form: Option<Value>,
@@ -280,7 +281,13 @@ impl Context<'_> {
                 } else {
                     "binary"
                 };
-                let domain = json!(["result-of-operation", self.language, operator, l, r]);
+                let domain = json!([
+                    "result-of-operation",
+                    self.language,
+                    operator,
+                    ["operand", 0],
+                    ["operand", 1]
+                ]);
                 let effect = json!([
                     "exact-language-operation",
                     self.language,
@@ -316,7 +323,7 @@ impl Context<'_> {
                         self.language,
                         op,
                         ["operand"],
-                        ["result", value],
+                        ["result", ["operand", 0]],
                         ["normal", "language-protocol-exception"]
                     ])],
                     vec![value],
@@ -387,7 +394,9 @@ impl Context<'_> {
                     "directive",
                     self.language,
                     child.kind(),
-                    vec![json!(text(self.source, literal))],
+                    vec![json!(
+                        &text(self.source, literal)[1..text(self.source, literal).len() - 1]
+                    )],
                     vec![],
                 ));
             } else {
@@ -543,7 +552,10 @@ impl Context<'_> {
                     return self.issue(n, "DUP_CONTROL_UNRESOLVED", "if fields");
                 };
                 let cond = self.expr(condition, depth + 1);
+                let before = self.scopes.clone();
                 let yes = self.statement(then, depth + 1);
+                let then_scopes = self.scopes.clone();
+                self.scopes = before.clone();
                 let no = alt.map_or(Value::Null, |a| {
                     if a.kind() == "else_clause" {
                         children(a)
@@ -553,6 +565,13 @@ impl Context<'_> {
                         self.statement(a, depth + 1)
                     }
                 });
+                for (index, scope) in self.scopes.iter_mut().enumerate() {
+                    for binding in scope {
+                        binding.initialized &= then_scopes
+                            .get(index)
+                            .is_some_and(|s| s.iter().any(|b| b.id == binding.id && b.initialized));
+                    }
+                }
                 node("if", self.language, n.kind(), vec![], vec![cond, yes, no])
             }
             "while_statement" => {
@@ -562,11 +581,16 @@ impl Context<'_> {
                 ) else {
                     return self.issue(n, "DUP_CONTROL_UNRESOLVED", "while fields");
                 };
+                if n.child_by_field_name("alternative").is_some() {
+                    return self.issue(n, "DUP_UNSUPPORTED_CONSTRUCT", "while-else control");
+                }
                 let id = self.next_loop;
                 self.next_loop += 1;
                 self.loops.push(id);
                 let cond = self.expr(condition, depth + 1);
+                let before = self.scopes.clone();
                 let body = self.statement(body, depth + 1);
+                self.scopes = before;
                 self.loops.pop();
                 node(
                     "while",
@@ -663,15 +687,24 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                 loops: Vec::new(),
                 next_loop: 0,
             };
-            let ordinary = parents.is_empty()
+            let mut ancestor = n.parent();
+            let mut member_context = false;
+            while let Some(parent) = ancestor {
+                member_context |= matches!(
+                    parent.kind(),
+                    "class_definition" | "class_declaration" | "impl_item" | "trait_item"
+                );
+                ancestor = parent.parent();
+            }
+            let ordinary = !member_context
+                && parents.is_empty()
                 && matches!(
                     n.kind(),
                     "function_declaration" | "function_definition" | "function_item"
                 )
                 && !text(source, n).trim_start().starts_with("async ")
-                && !n
-                    .parent()
-                    .is_some_and(|p| p.kind() == "decorated_definition");
+                && n.parent()
+                    .is_none_or(|p| p.kind() != "decorated_definition");
             if !ordinary {
                 cx.issue(
                     n,
@@ -709,7 +742,7 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                     let ty = cx.runtime_type();
                     let id = cx.bind(name, "parameter", ty.clone(), true, Some(position));
                     let visible = if language == "python"
-                        && !positional_only.is_some_and(|end| position < end)
+                        && positional_only.is_none_or(|end| position >= end)
                     {
                         json!(name)
                     } else {
@@ -765,9 +798,14 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                 effects,
                 control_edges
             ]);
+            let declaration_ordinal = output
+                .iter()
+                .filter(|f: &&NormalizedFunction| f.declaration_path == next)
+                .count();
             output.push(NormalizedFunction {
                 name,
                 declaration_path: next.clone(),
+                declaration_ordinal,
                 range: range(n),
                 body_range,
                 normal_form: cx.issues.is_empty().then_some(normal),

@@ -179,6 +179,15 @@ fn unknown_environment_does_not_manufacture_protocol_equivalence() {
 }
 #[test]
 fn python_methods_are_unsupported_subjects_even_with_equivalent_bodies() {
- let source="class A:\n    def a(x, /):\n        t = ((x + 1) * 2) - 3\n        if t > 0:\n            return (t + 4) * 5\n        return t - 6\n    def b(y, /):\n        u = ((y + 1) * 2) - 3\n        if u > 0:\n            return (u + 4) * 5\n        return u - 6\n";
- let r=report(source,"python","py");assert!(duplicates(&r).is_empty(),"methods are outside the admitted v1 domain");assert!(r["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="DUP_UNSUPPORTED_SUBJECT"));
+    let source="class A:\n    def a(x, /):\n        t = ((x + 1) * 2) - 3\n        if t > 0:\n            return (t + 4) * 5\n        return t - 6\n    def b(y, /):\n        u = ((y + 1) * 2) - 3\n        if u > 0:\n            return (u + 4) * 5\n        return u - 6\n";
+    let r = report(source, "python", "py");
+    assert!(
+        duplicates(&r).is_empty(),
+        "methods are outside the admitted v1 domain"
+    );
+    assert!(r["losses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["reason"] == "DUP_UNSUPPORTED_SUBJECT"));
 }

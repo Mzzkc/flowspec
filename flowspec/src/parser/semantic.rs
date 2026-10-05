@@ -528,9 +528,9 @@ fn collect_rust_executables(source: &str, path: &Path, root: Node<'_>) -> Vec<Ex
             };
             uses.push((format!("{}::{}", file, resolved.join("::")), range(node)));
         } else if node.kind() == "identifier"
-            && !node
+            && node
                 .parent()
-                .is_some_and(|p| p.kind() == "scoped_identifier")
+                .is_none_or(|p| p.kind() != "scoped_identifier")
         {
             uses.push((qualified(&file, &modules, text(source, node)), range(node)));
         }
