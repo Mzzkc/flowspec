@@ -399,7 +399,7 @@ pub fn analyze_with_registry_and_options(
         .collect();
 
     let mut cache_stats = cache::CacheStats::default();
-    let cache_store = if options.structured_parser.is_some() {
+    let cache_store = {
         let directory = options
             .cache_dir
             .clone()
@@ -413,13 +413,6 @@ pub fn analyze_with_registry_and_options(
                 None
             }
         }
-    } else {
-        if options.mode == cache::AnalysisMode::Incremental {
-            cache_stats
-                .fallbacks
-                .push("structured_adapter_not_joined".into());
-        }
-        None
     };
     let mut source_identities = std::collections::BTreeMap::new();
     let mut graph = Graph::new();
@@ -502,7 +495,7 @@ pub fn analyze_with_registry_and_options(
                     "schema":2,"registry":registry.digest(),"adapter":descriptor.metadata(),
                     "root":report_authority::hash("cache-root",&serde_json::json!(project_path)),
                     "path":report_authority::path_key(project_path,file),"language":descriptor.id,
-                    "config":{"path":config.config_path,"languages":config.languages,"exclude":config.exclude,"origin":config.origin,"source_sha256":config.source_sha256,"read_root":config.read_root},
+                    "config":{"path":config.config_path,"languages":config.languages,"exclude":config.exclude,"origin":config.origin,"source_sha256":config.source_sha256,"read_root":config.read_root,"semantic_policy":config.semantic_policy},
                     "requested_languages":languages,"effective_languages":active_languages,"ast_depth":parser::MAX_AST_DEPTH,"structured_parser_identity":options.structured_parser_identity
                 }),
                 content.as_bytes(),
@@ -544,60 +537,58 @@ pub fn analyze_with_registry_and_options(
                         Ok((output.ir, Some(output.report)))
                     })
                 } else {
-                    adapter.parse_file(file, &content).map(|ir| (ir, None))
+                    adapter.parse_output(file, &content).map(|output| {
+                        let report = serde_json::to_value(&output.report)
+                            .expect("parse report serialization");
+                        let parsed = cache::ParsedFile {
+                            ir: output.ir,
+                            report,
+                        };
+                        if cache::valid_output(&parsed, &key) {
+                            if let Some(store) = &cache_store {
+                                if let Err(e) = store.store(&key, parsed.clone()) {
+                                    cache_stats.fallbacks.push(format!("cache_write:{e}"));
+                                }
+                            }
+                        }
+                        (parsed.ir, Some(parsed.report))
+                    })
                 }
             };
             let structured_report = parsed.as_ref().ok().and_then(|(_, report)| report.as_ref());
             let parse_loss =
-                if let Some(report) = structured_report {
+                structured_report.is_some_and(|report| {
                     report["events"].as_array().into_iter().flatten().any(|e| {
                         matches!(e["code"].as_str(), Some("parser_recovery" | "missing_node"))
                     })
-                } else {
-                    descriptor
-                        .recovery
-                        .map(|probe| probe(file, &content))
-                        .unwrap_or(false)
-                };
+                });
             if let Some(report) = structured_report {
-                cache::reduce_parse_report(
-                    report,
-                    project_path,
-                    file,
-                    &content,
-                    registry,
-                    &mut losses,
-                );
-            } else if descriptor.recovery.is_none() {
-                losses.push(report_authority::loss(
-                    "semantic_proof_unavailable",
-                    report_authority::path_key(project_path, file),
-                    None,
-                    "adapter_recovery",
-                ));
-            }
-            // Built-in capability declarations describe implemented evidence,
-            // not a claim of semantic completeness. Opt-in adapters must declare
-            // each missing diagnostic prerequisite explicitly in the report.
-            if !descriptor.default_enabled {
-                for pattern in registry.patterns() {
-                    let missing: Vec<_> = pattern
-                        .required_capabilities
-                        .iter()
-                        .filter(|cap| !descriptor.capabilities.iter().any(|have| have == **cap))
-                        .copied()
-                        .collect();
-                    if !missing.is_empty() {
-                        let mut loss = report_authority::loss(
+                if options.structured_parser.is_none() {
+                    match serde_json::from_value::<parser::report::ParseReport>(report.clone()) {
+                        Ok(report) => losses.extend(report_authority::parser_losses(
+                            project_path,
+                            file,
+                            &content,
+                            descriptor,
+                            registry,
+                            &report,
+                        )),
+                        Err(_) => losses.push(report_authority::loss(
                             "semantic_proof_unavailable",
                             report_authority::path_key(project_path, file),
                             None,
-                            "adapter_capability",
-                        );
-                        loss["affected_patterns"] = serde_json::json!([pattern.id]);
-                        loss["required_capabilities"] = serde_json::json!(missing);
-                        losses.push(loss);
+                            "adapter_recovery",
+                        )),
                     }
+                } else {
+                    cache::reduce_parse_report(
+                        report,
+                        project_path,
+                        file,
+                        &content,
+                        registry,
+                        &mut losses,
+                    );
                 }
             }
             match parsed {
@@ -1084,8 +1075,7 @@ pub fn analyze_with_registry_and_options(
             entity_count: entities.len() as u64,
             flow_count: flows.len() as u64,
             diagnostic_count,
-            incremental: options.mode == cache::AnalysisMode::Incremental
-                && options.structured_parser.is_some(),
+            incremental: options.mode == cache::AnalysisMode::Incremental,
             files_changed: cache_stats.parsed,
         },
         summary: Summary {

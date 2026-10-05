@@ -634,7 +634,7 @@ fn test_c18_t24_file_symbols_cache_excludes_modules() {
     // We verify the graph still has both symbols (no data loss).
     let all_syms: Vec<_> = graph
         .all_symbols()
-        .filter(|(_, s)| s.location.file == PathBuf::from("src/test_file.rs"))
+        .filter(|(_, s)| s.location.file.as_path() == std::path::Path::new("src/test_file.rs"))
         .collect();
     assert!(
         all_syms.len() >= 2,

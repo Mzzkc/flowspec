@@ -354,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)] // Deliberately exercise the Clone trait.
     fn test_symbol_kind_clone() {
         let kind = SymbolKind::Class;
         let cloned = kind.clone();

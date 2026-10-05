@@ -44,6 +44,12 @@ struct Cli {
     /// Path to .flowspec/config.yaml.
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+    /// Maximum displayed findings; full catalog and gate are retained.
+    #[arg(long, global = true)]
+    limit: Option<usize>,
+    /// Starting display offset; continuation gives the next cursor.
+    #[arg(long, global = true, default_value_t = 0)]
+    offset: usize,
 }
 
 #[derive(Subcommand)]
@@ -329,22 +335,33 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             gate_confidence,
             incremental,
             ..
-        } => commands::run_analyze_with_gate_and_mode(
+        } => commands::run_report_page(
             &path,
             &language,
+            config_path,
             format,
             output_path,
-            config_path,
-            &checks,
-            severity.map(|s| s.to_severity()),
-            confidence.map(|c| c.to_confidence()),
-            gate_severity.map(|s| s.to_severity()),
-            gate_confidence.map(|c| c.to_confidence()),
-            if incremental {
-                flowspec::cache::AnalysisMode::Incremental
-            } else {
-                flowspec::cache::AnalysisMode::Full
+            &flowspec::ReportOptions {
+                checks,
+                severity: severity.map(|s| s.to_severity()),
+                confidence: confidence.map(|c| c.to_confidence()),
+                gate_severity: gate_severity
+                    .map(|s| s.to_severity())
+                    .unwrap_or(flowspec::Severity::Critical),
+                gate_confidence: gate_confidence
+                    .map(|c| c.to_confidence())
+                    .unwrap_or(flowspec::Confidence::Low),
             },
+            &flowspec::AnalysisOptions {
+                mode: if incremental {
+                    flowspec::cache::AnalysisMode::Incremental
+                } else {
+                    flowspec::cache::AnalysisMode::Full
+                },
+                ..Default::default()
+            },
+            cli.limit,
+            cli.offset,
         )?,
         Commands::Diagnose {
             path,
@@ -354,17 +371,26 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             language,
             gate_severity,
             gate_confidence,
-        } => commands::run_diagnose_with_gate(
+        } => commands::run_report_page(
             &path,
             &language,
-            &checks,
-            severity.map(|s| s.to_severity()),
-            confidence.map(|c| c.to_confidence()),
+            config_path,
             format,
             output_path,
-            config_path,
-            gate_severity.map(|s| s.to_severity()),
-            gate_confidence.map(|c| c.to_confidence()),
+            &flowspec::ReportOptions {
+                checks,
+                severity: severity.map(|s| s.to_severity()),
+                confidence: confidence.map(|c| c.to_confidence()),
+                gate_severity: gate_severity
+                    .map(|s| s.to_severity())
+                    .unwrap_or(flowspec::Severity::Info),
+                gate_confidence: gate_confidence
+                    .map(|c| c.to_confidence())
+                    .unwrap_or(flowspec::Confidence::Low),
+            },
+            &flowspec::AnalysisOptions::default(),
+            cli.limit,
+            cli.offset,
         )?,
         Commands::Mcp {
             command: McpCommand::Serve { root },

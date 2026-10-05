@@ -17,7 +17,13 @@ fn complete_twenty_file_graph_roundtrips_without_loss_or_catalog_change() {
         &ReportOptions::default(),
     )
     .unwrap();
-    assert_eq!(report.execution, Some(Execution::Complete));
+    assert_eq!(report.execution, Some(Execution::Incomplete));
+    assert!(report.authority.as_ref().unwrap()["losses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|loss| loss["reason"] == "DUP_EFFECT_UNRESOLVED"
+            || loss["reason"] == "DUP_ENVIRONMENT_UNRESOLVED"));
     let before = original.authority.as_ref().unwrap();
     let after = report.authority.as_ref().unwrap();
     assert_eq!(

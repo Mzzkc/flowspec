@@ -287,9 +287,8 @@ pub(crate) fn normalize_report(result: &mut crate::AnalysisResult) -> Result<(),
         })?;
     // Share one lossless graph representation across report consumers before
     // display filtering. Complete analysis never acquires serialization loss.
-    if result.manifest.execution == Some(crate::Execution::Complete)
-        && (full_json.len() as u64 > result.source_bytes.max(1024).saturating_mul(10)
-            || full_yaml.len() as u64 > result.source_bytes.max(1024).saturating_mul(10))
+    if full_json.len() as u64 > result.source_bytes.max(1024).saturating_mul(10)
+        || full_yaml.len() as u64 > result.source_bytes.max(1024).saturating_mul(10)
     {
         if let Some(authority) = result.manifest.authority.as_mut() {
             if let Some(packed) = graph_tables(&authority["analysis_graph"]) {
@@ -936,6 +935,22 @@ pub fn run_diff(
     let new_manifest = load_manifest(new_path)?;
 
     // Compute diff
+    if let Some(reason) = diff_noncomparability(&old_manifest, &new_manifest) {
+        let output = serde_json::json!({"execution":"incomplete","outcome":"incomplete","comparable":false,"reason":reason,"diagnostics_resolved":[],"entities_removed":[],"diagnostics_new":[],"entities_added":[],"entities_changed":[],"has_regressions":false,"summary":["reports are not comparable; absence cannot establish resolution"]});
+        let rendered = match format {
+            OutputFormat::Yaml => {
+                serde_yaml::to_string(&output).map_err(|e| FlowspecError::Manifest {
+                    reason: e.to_string(),
+                })?
+            }
+            OutputFormat::Summary => format!("Diff incomplete: {reason}\n"),
+            _ => serde_json::to_string(&output).map_err(|e| FlowspecError::Manifest {
+                reason: e.to_string(),
+            })?,
+        };
+        write_output(&rendered, output_path)?;
+        return Ok(3);
+    }
     let mut diff = compute_diff(&old_manifest, &new_manifest);
 
     // Apply section filter
@@ -955,6 +970,106 @@ pub fn run_diff(
     } else {
         Ok(0)
     }
+}
+
+fn diff_noncomparability(old: &Manifest, new: &Manifest) -> Option<&'static str> {
+    if old
+        .execution
+        .is_some_and(|e| e != crate::Execution::Complete)
+        || new
+            .execution
+            .is_some_and(|e| e != crate::Execution::Complete)
+    {
+        return Some("input_execution_incomplete");
+    }
+    match (&old.authority, &new.authority) {
+        (Some(a), Some(b)) => {
+            for field in ["schema_version", "producer_contract", "scope"] {
+                if a[field] != b[field] {
+                    return Some("report_contract_or_scope_changed");
+                }
+            }
+            for field in ["config", "adapters", "registry"] {
+                if a["provenance"][field] != b["provenance"][field] {
+                    return Some("configuration_or_adapter_changed");
+                }
+            }
+            if a["producer"] != b["producer"] {
+                return Some("producer_changed");
+            }
+            None
+        }
+        (None, None) => None,
+        _ => Some("report_authority_missing"),
+    }
+}
+
+/// Apply deterministic display pagination without changing identity, catalog or gate.
+pub fn paginate_report(report: &mut crate::AnalysisReport, limit: Option<usize>, offset: usize) {
+    if let Some(a) = report.authority.as_mut() {
+        let indices = a["display"]["indices"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let total = indices.len();
+        let begin = offset.min(total);
+        let end = begin.saturating_add(limit.unwrap_or(total)).min(total);
+        a["display"]["indices"] = serde_json::json!(&indices[begin..end]);
+        a["continuation"]["shown"] = serde_json::json!(end - begin);
+        a["continuation"]["matched_total"] = serde_json::json!(total);
+        a["continuation"]["full"] = a["findings"]["total"].clone();
+        a["continuation"]["truncated"] = serde_json::json!(end < total || begin > 0);
+        a["continuation"]["next_cursor"] = if end < total {
+            serde_json::json!(end)
+        } else {
+            serde_json::Value::Null
+        };
+    }
+    report.diagnostics = report
+        .diagnostics
+        .iter()
+        .skip(offset)
+        .take(limit.unwrap_or(usize::MAX))
+        .cloned()
+        .collect();
+    report.displayed_findings_total = report.diagnostics.len() as u64;
+    report.metadata.diagnostic_count = report.diagnostics.len() as u64;
+    recompute_diagnostic_summary(&report.diagnostics, &mut report.summary.diagnostic_summary);
+}
+
+/// Unified ordinary caller with report options and display paging.
+#[allow(clippy::too_many_arguments)]
+pub fn run_report_page(
+    path: &Path,
+    languages: &[String],
+    config_path: Option<&Path>,
+    format: OutputFormat,
+    output_path: Option<&Path>,
+    options: &crate::ReportOptions,
+    analysis: &crate::AnalysisOptions,
+    limit: Option<usize>,
+    offset: usize,
+) -> Result<u8, FlowspecError> {
+    if limit == Some(0) {
+        return Err(FlowspecError::Config {
+            reason: "limit must be positive".into(),
+            suggestion: "request at least one finding".into(),
+        });
+    }
+    let canonical = resolve_path(path)?;
+    let config = Config::load(&canonical, config_path)?;
+    let mut result = prepare_report_with_analysis_options(
+        &canonical,
+        &config,
+        &normalize_languages(languages),
+        options,
+        analysis,
+    )?;
+    paginate_report(&mut result.manifest, limit, offset);
+    let output = render_report(&result.manifest, format)?;
+    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
+    write_output(&output, output_path)?;
+    Ok(crate::report_exit_code(&result.manifest, None))
 }
 
 /// Load a manifest from a file, detecting format by extension with fallback parsing.
