@@ -714,7 +714,9 @@ pub(crate) fn build(
             let mut item = loss("semantic_proof_unavailable", String::new(), None, "finding");
             item["affected_patterns"] = json!([diagnostic.pattern]);
             item["id"] = json!(hash("unqualified-diagnostic-loss", &item));
-            losses.push(item);
+            if !losses.iter().any(|existing| existing["id"] == item["id"]) {
+                losses.push(item);
+            }
         }
     }
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
