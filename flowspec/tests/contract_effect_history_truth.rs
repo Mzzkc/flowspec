@@ -122,3 +122,28 @@ fn same_name_unrelated_file_is_not_contract_or_history_authority() {
     assert_eq!(count(&a,"contract_mismatch"),0,"wrong bound declaration: {a}");
     assert_eq!(count(&a,"stale_reference"),0,"wrong bound old name: {a}");
 }
+#[test]
+fn byte_literals_are_not_invented_string_operands() {
+    for (ext,source) in [
+        ("py","def accept(x: str):\n    return True\ndef caller():\n    return accept(b\"bytes\")\n"),
+        ("rs","fn accept(x: &str) -> bool { true } fn caller() -> bool { accept(b\"bytes\") }")
+    ] {
+        let p=format!("semantic_policy:\n  version: 1\n  contracts:\n    - target: source.{ext}::accept\n      parameter_types: [boolean]\n");
+        let a=run(source,ext,&p);
+        let uses=a["findings"]["all"].as_array().unwrap().iter().filter(|f|f["pattern_id"]=="contract_mismatch" && f["cause"]["parts"]["relation"]=="bound-literal-argument-type-contradiction").count();
+        assert_eq!(uses,0,"unsupported byte literal is not a string: {a}");
+        assert!(a["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="contract_operand_unresolved"));
+    }
+}
+#[test]
+fn python_shadowed_primitive_annotation_is_not_builtin_type_proof() {
+    let a=run("class bool:\n    pass\ndef api() -> bool:\n    return \"text\"\n","py","");
+    assert_eq!(count(&a,"contract_mismatch"),0,"bool denotes the local class: {a}");
+}
+#[test]
+fn all_exit_peer_unknown_callee_return_cannot_hide_exception_before_cleanup() {
+    let p="semantic_policy:\n  version: 1\n  peers:\n    - subjects: [source.js::left, source.js::right]\n      required_operations: [source.js::cleanup]\n";
+    let a=run("function cleanup() { return true; } function dangerous() { return missing; } function left() { dangerous(); cleanup(); return true; } function right() { cleanup(); return true; }","js",p);
+    assert_eq!(count(&a,"partial_wiring"),0);
+    assert!(a["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="policy_control_unresolved"),"unknown callee behavior must retain all-exit debt: {a}");
+}
