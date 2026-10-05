@@ -49,6 +49,8 @@ def validate_ci(text):
         elif in_run:
             if indent>run_indent:commands.append(line.strip())
             else:in_run=False
+    if any(re.search(r"^(?:exit|return|exec|source|eval|\.)\b|(?:^|[;&|])\s*(?:exit|return)\b",cmd) for cmd in commands):
+        raise ValueError('early termination or opaque control can hide required gates')
     command_set=set(commands)
     required={
       'rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy',

@@ -150,7 +150,7 @@ pub fn derive_type_flows<'a>(
             Some("py") => tree_sitter_python::LANGUAGE.into(),
             Some("rs") => tree_sitter_rust::LANGUAGE.into(),
             Some("js" | "jsx" | "mjs" | "cjs") => tree_sitter_javascript::LANGUAGE.into(),
-            // Native TypeScript is the structured adapter owner's seam. Never reparse as JavaScript.
+            Some("ts" | "tsx") => crate::parser::typescript::grammar_for_path(path),
             _ => continue,
         };
         let mut parser = tree_sitter::Parser::new();
@@ -365,4 +365,38 @@ pub fn derive_type_flows<'a>(
             .dedup_by(|a, b| a.target_type == b.target_type && a.via == b.via);
     }
     records.into_values().collect()
+}
+
+/// Located type-operation candidates whose binding evidence is not implemented.
+/// A Rust struct-expression is a real construction site, but an annotation is
+/// insufficient to prove its runtime type identity or field/resource effects.
+pub(crate) fn unresolved_type_operations(path: &Path, source: &str) -> Vec<(u64, u64)> {
+    if path.extension().is_none_or(|e| e != "rs") {
+        return vec![];
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return vec![];
+    };
+    let mut pending = vec![(tree.root_node(), 0usize)];
+    let mut ranges = vec![];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > crate::parser::MAX_AST_DEPTH {
+            continue;
+        }
+        if node.kind() == "struct_expression" {
+            ranges.push((node.start_byte() as u64, node.end_byte() as u64));
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor).map(|n| (n, depth + 1)));
+    }
+    ranges.sort();
+    ranges.dedup();
+    ranges
 }

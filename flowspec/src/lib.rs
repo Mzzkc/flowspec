@@ -1149,6 +1149,28 @@ pub fn analyze_with_registry_and_options(
     }
     #[cfg(feature = "fault_probe")]
     losses.extend(fault_probe::drain_losses());
+    for input in &input_records {
+        if let Some(source) = input.content.as_deref() {
+            for (start, end) in analyzer::type_flow::unresolved_type_operations(&input.path, source)
+            {
+                let key = report_authority::path_key(project_path, &input.path);
+                let mut item = report_authority::loss(
+                    "type_operation_unresolved",
+                    key.clone(),
+                    Some(report_authority::offset_range(&key, source, start, end)),
+                    "type_flow",
+                );
+                item["required_capabilities"] = serde_json::json!(["types"]);
+                item["affected_patterns"] = serde_json::json!(registry
+                    .patterns()
+                    .iter()
+                    .filter(|p| p.required_capabilities.contains(&"types"))
+                    .map(|p| p.id)
+                    .collect::<Vec<_>>());
+                losses.push(item);
+            }
+        }
+    }
     let mut authority = report_authority::build(
         report_authority::ReportContext {
             root: project_path,

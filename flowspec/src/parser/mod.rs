@@ -25,10 +25,10 @@ pub mod python;
 pub mod report;
 /// Rust language adapter (modules, traits, impls, use declarations).
 pub mod rust;
-/// Native original-byte TypeScript and TSX extraction.
-pub mod typescript;
 /// Binding-aware semantic prerequisites, separate from compatibility entities.
 pub mod semantic;
+/// Native original-byte TypeScript and TSX extraction.
+pub mod typescript;
 
 use std::path::Path;
 

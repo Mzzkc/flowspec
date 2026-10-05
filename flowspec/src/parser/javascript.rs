@@ -1159,9 +1159,28 @@ fn extract_all_calls(
         return;
     }
 
-    if node.kind() == "call_expression" {
-        if let Some(func_node) = node.child_by_field_name("function") {
+    if matches!(node.kind(), "call_expression" | "new_expression") {
+        if let Some(func_node) = node
+            .child_by_field_name("function")
+            .or_else(|| node.child_by_field_name("constructor"))
+        {
             if let Some(name) = extract_callee_name(content, func_node) {
+                if lexical_parameter_shadows(node, &name, content) {
+                    result.report.event(
+                        node,
+                        super::report::ParseEventCode::UnresolvedReference,
+                        &[
+                            super::report::Capability::Calls,
+                            super::report::Capability::Types,
+                        ],
+                        "callee resolves to an unmodeled parameter binding",
+                    );
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        extract_all_calls(result, content, path, child, depth + 1);
+                    }
+                    return;
+                }
                 // Intercept require() calls with string literal argument
                 if name == "require" {
                     if let Some(source) = extract_require_source(content, node) {
@@ -1473,6 +1492,24 @@ fn type_only_import(node: Node) -> bool {
     }
     false
 }
+fn lexical_parameter_shadows(mut node: Node<'_>, name: &str, content: &[u8]) -> bool {
+    while let Some(parent) = node.parent() {
+        if let Some(params) = parent.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            if params.named_children(&mut cursor).any(|parameter| {
+                let binder = parameter
+                    .child_by_field_name("pattern")
+                    .or_else(|| parameter.child_by_field_name("name"))
+                    .unwrap_or(parameter);
+                binder.kind() == "identifier" && node_text(content, binder) == name
+            }) {
+                return true;
+            }
+        }
+        node = parent;
+    }
+    false
+}
 /// Annotation origins and function binding values remain separate through graph resolution.
 fn extract_native_references(result: &mut ParseOutput, content: &[u8], path: &Path, root: Node) {
     let mut pending = vec![(root, 0)];
@@ -1575,7 +1612,12 @@ fn extract_native_references(result: &mut ParseOutput, content: &[u8], path: &Pa
                 .symbols
                 .iter()
                 .any(|s| s.name == name && s.annotations.iter().any(|a| a == "import"));
-            if !excluded && !annotation && !type_only_import(node) && imported {
+            if !excluded
+                && !annotation
+                && !type_only_import(node)
+                && imported
+                && !lexical_parameter_shadows(node, &name, content)
+            {
                 result.references.push(Reference {
                     id: ReferenceId::default(),
                     from: SymbolId::default(),
