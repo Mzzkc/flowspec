@@ -703,6 +703,7 @@ pub(crate) fn build(
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     // Legacy findings without an implemented cause proof are visible as debt,
     // never promoted into the authoritative finding catalog.
+    let mut unqualified_patterns = std::collections::BTreeSet::new();
     for diagnostic in diagnostics {
         if matches!(
             diagnostic.pattern.as_str(),
@@ -711,13 +712,14 @@ pub(crate) fn build(
             continue;
         }
         if build_finding(root, diagnostic, graph, inputs).is_none() {
-            let mut item = loss("semantic_proof_unavailable", String::new(), None, "finding");
-            item["affected_patterns"] = json!([diagnostic.pattern]);
-            item["id"] = json!(hash("unqualified-diagnostic-loss", &item));
-            if !losses.iter().any(|existing| existing["id"] == item["id"]) {
-                losses.push(item);
-            }
+            unqualified_patterns.insert(diagnostic.pattern.clone());
         }
+    }
+    if !unqualified_patterns.is_empty() {
+        let mut item = loss("semantic_proof_unavailable", String::new(), None, "finding");
+        item["affected_patterns"] = json!(unqualified_patterns);
+        item["id"] = json!(hash("unqualified-diagnostic-loss", &item));
+        losses.push(item);
     }
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
     append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);

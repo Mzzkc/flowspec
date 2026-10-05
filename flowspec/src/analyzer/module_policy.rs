@@ -515,16 +515,14 @@ fn shadowed(call: Node<'_>, source: &str, name: &str) -> bool {
                 | "arrow_function"
                 | "function_expression"
                 | "method_definition"
-        ) {
-            if node
-                .child_by_field_name("parameters")
-                .is_some_and(|n| parameter_has(n, source, name))
-                || node
-                    .child_by_field_name("body")
-                    .is_some_and(|n| local_has(n, source, name))
-            {
-                return true;
-            }
+        ) && (node
+            .child_by_field_name("parameters")
+            .is_some_and(|n| parameter_has(n, source, name))
+            || node
+                .child_by_field_name("body")
+                .is_some_and(|n| local_has(n, source, name)))
+        {
+            return true;
         }
         enclosing = node.parent();
     }
