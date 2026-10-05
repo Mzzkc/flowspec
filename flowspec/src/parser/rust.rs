@@ -968,7 +968,18 @@ fn extract_call(result: &mut ParseResult, content: &[u8], path: &Path, node: Nod
                         )),
                     });
                 }
-                last_identifier_segment(content, func_node)
+                let leaf = last_identifier_segment(content, func_node);
+                let associated = leaf.as_ref().is_some_and(|leaf| {
+                    result
+                        .symbols
+                        .iter()
+                        .any(|s| s.kind == SymbolKind::Method && s.name == *leaf)
+                });
+                if associated {
+                    Some(build_scoped_path(content, func_node))
+                } else {
+                    leaf
+                }
             }
             "field_expression" => {
                 // object.method() — extract field name, detect self.method() pattern
@@ -1073,6 +1084,34 @@ fn extract_all_type_references(
         // SymbolKind::Function in match arms, let bindings, etc.
         // The call_expression case is already handled by extract_all_calls.
         "scoped_identifier" => {
+            // Associated function values are consumers even inside a call's
+            // argument list (for example iter.map(Type::method)). A callee
+            // itself is handled by extract_call instead.
+            let is_callee = node.parent().is_some_and(|parent| {
+                parent.kind() == "call_expression"
+                    && parent.child_by_field_name("function") == Some(node)
+            });
+            let leaf = last_identifier_segment(content, node);
+            if !is_callee
+                && leaf.as_ref().is_some_and(|leaf| {
+                    result
+                        .symbols
+                        .iter()
+                        .any(|s| s.kind == SymbolKind::Method && s.name == *leaf)
+                })
+            {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!(
+                        "associated_value:{}",
+                        build_scoped_path(content, node)
+                    )),
+                });
+            }
             // Only emit if parent is NOT a call_expression (those are handled
             // by extract_call's scoped_identifier branch already).
             let dominated_by_call = {

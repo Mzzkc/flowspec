@@ -303,6 +303,30 @@ fn insert_references(
                 graph.record_dynamic_export(reference.location.file.clone());
                 continue;
             }
+            ResolutionStatus::Partial(info) if info.starts_with("associated_value:") => {
+                new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                    .unwrap_or_else(|| {
+                        *module_symbol_id
+                            .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
+                    });
+                new_ref.to = resolve_callee(
+                    &info["associated_value:".len()..],
+                    &new_ref.from,
+                    graph,
+                    symbol_id_map,
+                    symbols,
+                );
+                if new_ref.to == SymbolId::default() {
+                    graph.record_prerequisite_loss(Reference {
+                        resolution: ResolutionStatus::Partial(
+                            "prerequisite_loss:unresolved_associated_value".into(),
+                        ),
+                        ..new_ref
+                    });
+                    continue;
+                }
+                new_ref.resolution = ResolutionStatus::Resolved;
+            }
             ResolutionStatus::Partial(info) if info.starts_with("call:") => {
                 let callee_name = &info[5..]; // after "call:"
 
@@ -707,6 +731,30 @@ fn resolve_callee(
     symbol_id_map: &[(usize, SymbolId)],
     symbols: &[Symbol],
 ) -> SymbolId {
+    // A Rust associated consumer carries its explicit owner. Never replace
+    // an unknown owner with an unrelated same-name method in this file.
+    if let Some((owner, method)) = callee_name.rsplit_once("::") {
+        let owners: Vec<_> = symbols
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
+                ) && (s.name == owner || s.qualified_name.ends_with(&format!("::{owner}")))
+            })
+            .collect();
+        if owners.len() != 1 {
+            return SymbolId::default();
+        }
+        let qualified = format!("{}::{method}", owners[0].qualified_name);
+        let mut candidates = symbol_id_map.iter().filter(|(idx, _)| {
+            symbols[*idx].kind == SymbolKind::Method && symbols[*idx].qualified_name == qualified
+        });
+        return match (candidates.next(), candidates.next()) {
+            (Some((_, id)), None) => *id,
+            _ => SymbolId::default(),
+        };
+    }
     // Handle self.method (Python/Rust) and this.method (JavaScript) patterns
     let method_name = callee_name
         .strip_prefix("self.")
