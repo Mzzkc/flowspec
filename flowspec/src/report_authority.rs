@@ -532,16 +532,27 @@ pub(crate) fn set_gate(authority: &mut Value, severity: &str, confidence: &str) 
     refresh_identity(authority);
 }
 
+/// Effective source and registry scope shared by every report consumer.
+pub(crate) struct ReportContext<'a> {
+    pub root: &'a Path,
+    pub config: &'a Config,
+    pub languages: &'a [String],
+    pub registry: &'a crate::registry::Registry,
+}
+
 pub(crate) fn build(
-    root: &Path,
-    config: &Config,
-    languages: &[String],
+    context: ReportContext<'_>,
     inputs: &[InputRecord],
     diagnostics: &[DiagnosticEntry],
     graph: &Graph,
     mut losses: Vec<Value>,
-    registry: &crate::registry::Registry,
 ) -> Value {
+    let ReportContext {
+        root,
+        config,
+        languages,
+        registry,
+    } = context;
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {

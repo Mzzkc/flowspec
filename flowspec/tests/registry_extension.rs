@@ -98,11 +98,10 @@ fn isolated_opt_in_adapter_enters_actual_graph_dispatch_and_report_with_honest_l
         .unwrap()
         .iter()
         .any(|l| l["stage"] == "adapter_recovery"));
-    assert!(a["analysis_graph"]["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|e| e["subject"]["language"] == "synthetic"));
+    assert!(result.graph.all_symbols().all(|(_, symbol)| {
+        registry.language_for_path(&symbol.location.file)
+            .is_some_and(|language| language.id == "synthetic")
+    }));
     assert!(analyze(dir.path(), &Config::default(), &["synthetic".into()]).is_err());
 }
 #[test]

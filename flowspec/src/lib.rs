@@ -950,14 +950,16 @@ pub fn analyze_with_registry(
     #[cfg(feature = "fault_probe")]
     losses.extend(fault_probe::drain_losses());
     let authority = report_authority::build(
-        project_path,
-        config,
-        &active_languages,
+        report_authority::ReportContext {
+            root: project_path,
+            config,
+            languages: &active_languages,
+            registry,
+        },
         &input_records,
         &manifest.diagnostics,
         &graph,
         losses,
-        registry,
     );
     let mut manifest = manifest.with_report(completeness);
     manifest.execution = Some(if authority["execution"] == "incomplete" {
@@ -1417,8 +1419,6 @@ fn format_symbol_kind(kind: SymbolKind) -> String {
     }
     .to_string()
 }
-
-/// JS/TS file extensions recognized for module mapping.
 
 /// Builds a mapping from module names to file paths for both Python and JS/TS.
 ///

@@ -139,8 +139,6 @@ pub(crate) fn prepare_report(
     let checks = &options.checks;
     let severity = options.severity;
     let confidence = options.confidence;
-    let gate_severity = Some(options.gate_severity);
-    let gate_confidence = Some(options.gate_confidence);
     validate_check_patterns(checks)?;
     let mut result = crate::analyze(path, config, languages)?;
 
@@ -148,12 +146,8 @@ pub(crate) fn prepare_report(
     if let Some(authority) = result.manifest.authority.as_mut() {
         crate::report_authority::set_gate(
             authority,
-            &gate_severity
-                .unwrap_or(crate::Severity::Critical)
-                .to_string(),
-            &gate_confidence
-                .unwrap_or(crate::Confidence::Low)
-                .to_string(),
+            &options.gate_severity.to_string(),
+            &options.gate_confidence.to_string(),
         );
     }
 
