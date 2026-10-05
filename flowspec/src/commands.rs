@@ -261,8 +261,10 @@ pub(crate) fn prepare_report_with_analysis_options(
 pub(crate) fn normalize_report(result: &mut crate::AnalysisResult) -> Result<(), FlowspecError> {
     // Already-normalized reports retain identity and loss accounting on reuse.
     if result.manifest.authority.as_ref().is_some_and(|a| {
-        a["analysis_graph"]["encoding"] == "flowspec.graph.tables.v1"
-            || a["analysis_graph"]["projection"]["analysis_graph"] == "omitted"
+        matches!(
+            a["analysis_graph"]["encoding"].as_str(),
+            Some("flowspec.graph.tables.v1" | "flowspec.graph.tables.v2")
+        ) || a["analysis_graph"]["projection"]["analysis_graph"] == "omitted"
     }) {
         result.manifest.sync_pattern_state();
         return Ok(());
@@ -345,7 +347,10 @@ fn render_report(
 fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
     let projected = manifest.authority.as_ref().is_some_and(|authority| {
         authority["analysis_graph"]["projection"]["analysis_graph"] == "omitted"
-            || authority["analysis_graph"]["encoding"] == "flowspec.graph.tables.v1"
+            || matches!(
+                authority["analysis_graph"]["encoding"].as_str(),
+                Some("flowspec.graph.tables.v1" | "flowspec.graph.tables.v2")
+            )
     });
     if !projected {
         return serde_yaml::to_string(manifest).map_err(|e| FlowspecError::Manifest {
@@ -1764,12 +1769,136 @@ fn graph_tables(graph: &serde_json::Value) -> Option<serde_json::Value> {
         "compatibility_losses":"/authority/losses",
         "compatibility_pattern_state":"/authority/pattern_state"});
     // Never silently accept an encoding that fails to preserve every record.
-    (expand_graph_tables(&packed).as_ref() == Some(graph)).then_some(packed)
+    if expand_graph_tables(&packed).as_ref() != Some(graph) {
+        return None;
+    }
+    let compact = graph_tables_v2(&packed)?;
+    (expand_graph_tables(&compact).as_ref() == Some(graph)).then_some(compact)
+}
+
+/// Version 2 stores byte-exact UTF-8 paths, inline ranges, and single-edge
+/// call paths by edge index. Version 1 remains a supported public input.
+fn graph_tables_v2(v1: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::{json, Value};
+    let mut packed = v1.clone();
+    packed["encoding"] = json!("flowspec.graph.tables.v2");
+    let paths: Vec<Value> = v1["tables"]["paths"]
+        .as_array()?
+        .iter()
+        .map(|p| {
+            let hex = p.as_str()?;
+            if !hex.is_ascii() || hex.len() % 2 != 0 {
+                return None;
+            }
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+                .collect::<Option<_>>()?;
+            // A tagged hex alternative preserves arbitrary POSIX path bytes.
+            Some(match String::from_utf8(bytes) {
+                Ok(path) => json!(path),
+                Err(_) => json!(["hex", hex]),
+            })
+        })
+        .collect::<Option<_>>()?;
+    packed["tables"]["paths"] = json!(paths);
+    let rows: Vec<Value> = v1["entities"]
+        .as_array()?
+        .iter()
+        .map(|row| {
+            let mut fields = row.as_array()?.get(..4)?.to_vec();
+            fields.extend(
+                v1["tables"]["ranges"]
+                    .as_array()?
+                    .get(row[4].as_u64()? as usize)?
+                    .as_array()?
+                    .iter()
+                    .cloned(),
+            );
+            Some(json!(fields))
+        })
+        .collect::<Option<_>>()?;
+    packed["entities"] = json!(rows);
+    packed["tables"].as_object_mut()?.remove("ranges");
+    let flows: Vec<Value> = v1["flows"]
+        .as_array()?
+        .iter()
+        .map(|row| {
+            let edges = row[1].as_array()?;
+            if edges.len() == 1 {
+                let edge = v1["dependency_graph"]
+                    .as_array()?
+                    .get(edges[0].as_u64()? as usize)?;
+                if row[0] == json!([edge[1], edge[2]]) {
+                    return Some(edges[0].clone());
+                }
+            }
+            Some(row.clone())
+        })
+        .collect::<Option<_>>()?;
+    packed["flows"] = json!(flows);
+    Some(packed)
+}
+
+/// Restore the v1 row schema before applying its semantic decoder.
+fn graph_tables_v1(v2: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::{json, Value};
+    let mut packed = v2.clone();
+    packed["encoding"] = json!("flowspec.graph.tables.v1");
+    let paths: Vec<Value> = v2["tables"]["paths"]
+        .as_array()?
+        .iter()
+        .map(|p| {
+            if let Some(path) = p.as_str() {
+                Some(json!(path
+                    .as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()))
+            } else if p.as_array()?.len() == 2 && p[0] == "hex" {
+                Some(json!(p[1].as_str()?))
+            } else {
+                None
+            }
+        })
+        .collect::<Option<_>>()?;
+    packed["tables"]["paths"] = json!(paths);
+    let mut rows = Vec::new();
+    let mut ranges = Vec::new();
+    for row in v2["entities"].as_array()? {
+        let fields = row.as_array()?;
+        if fields.len() != 10 {
+            return None;
+        }
+        ranges.push(json!(fields[4..].to_vec()));
+        let mut original = fields[..4].to_vec();
+        original.push(json!(ranges.len() - 1));
+        rows.push(json!(original));
+    }
+    packed["entities"] = json!(rows);
+    packed["tables"]["ranges"] = json!(ranges);
+    let flows: Vec<Value> = v2["flows"]
+        .as_array()?
+        .iter()
+        .map(|row| {
+            if let Some(i) = row.as_u64() {
+                let edge = v2["dependency_graph"].as_array()?.get(i as usize)?;
+                Some(json!([[edge[1], edge[2]], [i]]))
+            } else {
+                Some(row.clone())
+            }
+        })
+        .collect::<Option<_>>()?;
+    packed["flows"] = json!(flows);
+    Some(packed)
 }
 
 /// Expand the lossless graph normal form used by bounded reports.
 pub fn expand_graph_tables(packed: &serde_json::Value) -> Option<serde_json::Value> {
     use serde_json::{json, Value};
+    if packed["encoding"] == "flowspec.graph.tables.v2" {
+        return expand_graph_tables(&graph_tables_v1(packed)?);
+    }
     if packed["encoding"] != "flowspec.graph.tables.v1" {
         return None;
     }

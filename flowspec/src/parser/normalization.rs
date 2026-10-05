@@ -661,25 +661,56 @@ fn syntax_weight(n: Node<'_>, depth: usize) -> Option<usize> {
         return None;
     }
     let own = match n.kind() {
-        "binary_expression" | "binary_operator" | "boolean_operator"
-        | "unary_expression" | "unary_operator" | "not_operator"
-        | "if_statement" | "while_statement" | "augmented_assignment" => 1,
+        "binary_expression"
+        | "binary_operator"
+        | "boolean_operator"
+        | "unary_expression"
+        | "unary_operator"
+        | "not_operator"
+        | "if_statement"
+        | "while_statement"
+        | "augmented_assignment" => 1,
         "comparison_operator" => {
             // Chains require the exact number of comparison links.
             children(n).len().checked_sub(1)?
         }
-        "block" | "statement_block" | "expression_statement" | "return_statement"
-        | "assignment" | "identifier" | "integer" | "float" | "number"
-        | "true" | "false" | "none" | "null" | "parenthesized_expression"
-        | "call" | "call_expression" | "argument_list" | "arguments"
-        | "pass_statement" | "empty_statement" | "comment" => 0,
+        "block"
+        | "statement_block"
+        | "expression_statement"
+        | "return_statement"
+        | "assignment"
+        | "identifier"
+        | "integer"
+        | "float"
+        | "number"
+        | "true"
+        | "false"
+        | "none"
+        | "null"
+        | "parenthesized_expression"
+        | "call"
+        | "call_expression"
+        | "argument_list"
+        | "arguments"
+        | "pass_statement"
+        | "empty_statement"
+        | "comment" => 0,
         // A scalar string cannot hide executable interpolation.
-        "string" if children(n).iter().all(|c| matches!(c.kind(), "string_start" | "string_content" | "string_end" | "escape_sequence")) => return Some(0),
+        "string"
+            if children(n).iter().all(|c| {
+                matches!(
+                    c.kind(),
+                    "string_start" | "string_content" | "string_end" | "escape_sequence"
+                )
+            }) =>
+        {
+            return Some(0)
+        }
         _ => return None,
     };
-    children(n).into_iter().try_fold(own, |sum, c| {
-        Some(sum + syntax_weight(c, depth + 1)?)
-    })
+    children(n)
+        .into_iter()
+        .try_fold(own, |sum, c| Some(sum + syntax_weight(c, depth + 1)?))
 }
 
 /// Enumerate all function subjects, including explicit unsupported obligations.
@@ -755,7 +786,9 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
             }
             let comparison_arity = n.child_by_field_name("parameters").and_then(|p| {
                 let named = children(p);
-                named.iter().all(|p| matches!(p.kind(), "identifier" | "positional_separator"))
+                named
+                    .iter()
+                    .all(|p| matches!(p.kind(), "identifier" | "positional_separator"))
                     .then(|| named.iter().filter(|p| p.kind() == "identifier").count())
             });
             let mut slots = Vec::new();
