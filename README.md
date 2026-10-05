@@ -1,365 +1,70 @@
-# Flowspec
+# FLOWSpec
 
-Static code analyzer that traces the flow of all data in a codebase, optimized for efficient use by AI agents during building, debugging, and within CI workflows.
+FLOWSpec supplies structural reports for coding agents. Python, JavaScript,
+TypeScript and Rust are registered, with exactly thirteen diagnostics enabled by
+default. Registration and a successful plumbing test do not certify detector
+correctness. This candidate is developmental; no launch qualification is claimed.
 
-Flowspec tells AI agents exactly how data moves through a system — what's connected to what, what's broken, and what's missing. Agents that consume Flowspec output get immediate structural understanding instead of guessing from raw source files.
+Read [reliability](docs/reliability.md) before interpreting absent findings. A
+complete result supports claims only within its declared scope. An incomplete
+result can retain useful positive findings, but cannot establish that code is clean.
 
-## Installation
+## Distribution and development
 
-### From source
+Launch distribution is GitHub Release only. No crates.io publication is authorized.
+Release installation instructions and filenames must be finalized against the
+qualified, downloaded artifact and its checksums. Until then, build locally:
 
-```bash
-git clone https://github.com/Mzzkc/flowspec.git
-cd flowspec
-cargo install --path flowspec-cli
+```sh
+cargo +1.91.0 build --locked --release -p flowspec-cli
+./target/release/flowspec --version
+./target/release/flowspec registry
 ```
 
-### Build and run directly
+The source URL is the repository's configured origin; this document does not
+invent a replacement installation URL or a published release asset.
+See [contributing](CONTRIBUTING.md) for validation and packaging.
 
-```bash
-cargo build --release
-./target/release/flowspec --help
+## Agent use
+
+```sh
+flowspec analyze PROJECT --format summary
+flowspec analyze PROJECT --gate-severity info --gate-confidence low --format json --output before.json
+flowspec diagnose PROJECT --gate-severity info --gate-confidence low --format json
+flowspec trace PROJECT --symbol 'main.py::main' --format json
+flowspec diff before.json after.json --format json
 ```
 
-## Quick Start
-
-Analyze any project directory:
-
-```bash
-flowspec analyze .
-```
-
-This produces a full structural manifest (YAML by default) covering entities, flows, diagnostics, and dependency relationships.
-
-For a human-readable overview:
-
-```bash
-flowspec analyze . --format summary
-```
-
-Example output:
-
-```
-Flowspec Analysis: project_with_issues
-Version: 0.1.0
-
---- Overview ---
-Files: 2  Entities: 4  Flows: 2  Diagnostics: 3
-Languages: python
-
---- Architecture ---
-python project with 2 module(s) and 4 entities.
-
---- Diagnostics ---
-Critical: 0  Warning: 2  Info: 1
-
-Top issues:
-  1. data_dead_end: Dead end: function 'dead_function' is defined but never called or referenced
-  2. data_dead_end: Dead end: function 'another_dead_function' is defined but never called or referenced
-  3. phantom_dependency: Phantom dependency: import 'os' is never used in this file
-
---- Modules ---
-  dead_code (3 entities) — Utility module
-  main (1 entities) — Entry point module
-
---- Entry Points ---
-  main.py::main
-
---- Findings ---
-  [WARNING] data_dead_end — Dead end: function 'dead_function' is defined but never called or referenced (dead_code.py:8)
-  [WARNING] data_dead_end — Dead end: function 'another_dead_function' is defined but never called or referenced (dead_code.py:12)
-  [INFO] phantom_dependency — Phantom dependency: import 'os' is never used in this file (dead_code.py:2)
-```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `flowspec analyze [path]` | Full analysis — parse, build graph, produce manifest |
-| `flowspec diagnose [path]` | Run diagnostics only — output structural issues found |
-| `flowspec trace [path] --symbol <id>` | Trace a single symbol's complete flow through the codebase |
-| `flowspec diff <old> <new>` | Compare two manifests — show structural changes |
-| `flowspec init [path]` | Create `.flowspec/config.yaml` for a project |
-
-### Output Formats
-
-All commands support `--format yaml|json|sarif|summary`:
-
-```bash
-flowspec analyze . --format json          # Machine-readable JSON
-flowspec diagnose . --format summary      # Human-readable summary
-flowspec analyze . --format sarif         # SARIF for IDE/CI integration
-```
-
-### Diagnose
-
-Run targeted diagnostics with filters:
-
-```bash
-flowspec diagnose . --severity warning              # Only warnings and above
-flowspec diagnose . --checks phantom_dependency      # Single pattern
-flowspec diagnose . --confidence high                # High-confidence only
-```
-
-Example summary projection (`--format summary`):
-
-```
-Diagnostics: 3 finding(s)
-
-Critical: 0  Warning: 2  Info: 1
-
-[WARNING] data_dead_end — Dead end: function 'dead_function' is defined but never called or referenced (dead_code.py:8)
-  Fix: Remove 'dead_function' if it is no longer needed, or add a caller. If this is intentional API surface, consider marking it as an entry point.
-[WARNING] data_dead_end — Dead end: function 'another_dead_function' is defined but never called or referenced (dead_code.py:12)
-  Fix: Remove 'another_dead_function' if it is no longer needed, or add a caller. If this is intentional API surface, consider marking it as an entry point.
-[INFO] phantom_dependency — Phantom dependency: import 'os' is never used in this file (dead_code.py:2)
-  Fix: Remove the unused import 'os' to reduce phantom dependencies and improve clarity.
-```
-
-Diagnose JSON/YAML now returns the full `AnalysisReport`, including authoritative
-findings, inventory, provenance, losses, pattern state and report identity.
-`--severity`, `--confidence`, and `--checks` change presentation only.
-The default diagnose gate is Info/Low (any qualified finding); use
-`--gate-severity` and `--gate-confidence` to choose the gate separately.
-Errors exit 1 before output, incomplete execution exits 3, a complete failing
-gate exits 2, and a complete passing gate exits 0. Analyze and MCP default to
-Critical/Low. Equal effective options retain equal authority identity and catalog.
-
-### Local MCP
-
-Run `flowspec mcp serve --root /absolute/workspace`. The normal packaged binary
-serves newline-delimited JSON-RPC on stdin/stdout, pinned to MCP 2025-06-18.
-`flowspec_analyze` accepts `path`, optional language/check arrays, display
-severity/confidence and separate gate thresholds. It returns the full report in
-`structuredContent` and the same JSON in a text block, without a top-five limit.
-Analysis/config/scope failures return `isError: true`; invalid arguments and
-unknown methods return JSON-RPC errors. Notifications emit no response.
-
-Relative tool paths and `--config` resolve from the canonical workspace root.
-Paths outside that root, parent traversal and every symlink in an analyzed tree
-are refused, including config links. Scoped discovery reads local ignore files
-only: parent/global ignore files and Git's ambient exclude policy are disabled.
-The local workspace must not be adversarially mutated during a call; concurrent
-symlink replacement is not an OS sandbox guarantee. This is a bounded local
-transport, with no remote server or qualification of newer protocol versions.
-
-Library callers should use `diagnose_report(path, config, languages, options)`
-and `report_exit_code`. `ReportOptions::default()` uses Critical/Low; set
-`gate_severity: Severity::Info` explicitly for diagnose's default intent.
-The old tuple `diagnose` is deprecated and unqualified: it discards report state.
-
-### Trace
-
-Follow a symbol's flow through the entire codebase:
-
-```bash
-flowspec trace . --symbol main --format summary
-```
-
-```
-Trace: main.py::main (2 flow(s) matched)
-
-  main.py::main -> dead_code.py::active_function
-    dead_code.py::active_function (call)
-```
-
-Options: `--depth <n>` to limit traversal depth, `--direction forward|backward|both` to control trace direction.
-
-### Init
-
-Initialize Flowspec configuration for a project:
-
-```bash
-flowspec init .
-```
-
-This creates `.flowspec/config.yaml` with auto-detected language settings. If a config already exists, it prints the existing config and exits without overwriting.
-
-The generated config is printed to stdout (pipe-safe):
-
-```bash
-flowspec init . > my-config.yaml   # Redirect if desired
-```
-
-### Diff
-
-Compare two analysis manifests to detect structural changes:
-
-```bash
-# Generate before and after manifests
-flowspec analyze . --format yaml > before.yaml
-# ... make code changes ...
-flowspec analyze . --format yaml > after.yaml
-
-# Compare them
-flowspec diff before.yaml after.yaml
-```
-
-Filter to specific sections:
-
-```bash
-flowspec diff before.yaml after.yaml --section diagnostics
-flowspec diff before.yaml after.yaml --section entities
-```
-
-Valid sections: `entities`, `diagnostics`.
-
-The diff reports: entities added/removed/changed, new diagnostics, resolved diagnostics, and whether regressions were introduced.
-
-| Exit Code | Meaning |
-|-----------|---------|
-| 0 | Diff completed (no structural regressions) |
-| 1 | Error (invalid manifests) |
-| 2 | Structural regressions found (new critical diagnostics) |
-
-Use exit code 2 as a CI gate to catch regressions:
-
-```bash
-flowspec diff baseline.yaml current.yaml || echo "Regressions detected"
-```
-
-## Diagnostic Patterns
-
-The language and diagnostic catalog is available through `flowspec registry`; see [registration and metadata](docs/registry.md).
-
-Flowspec detects 13 structural patterns:
-
-| Pattern | Severity | Description |
-|---------|----------|-------------|
-| `isolated_cluster` | warning | Group of symbols referencing each other but connected to nothing outside |
-| `data_dead_end` | warning | Function defined but never called, variable assigned but never read |
-| `partial_wiring` | warning | Code exists on some paths but missing where it should be |
-| `orphaned_impl` | warning | Implementation exists but nothing dispatches to it |
-| `contract_mismatch` | critical | Interface says one thing, implementation says another |
-| `circular_dependency` | warning | Modules depend on each other creating coupling cycles |
-| `layer_violation` | warning | Code bypasses architectural boundaries |
-| `incomplete_migration` | warning | Old and new patterns coexist — likely mid-refactor |
-| `stale_reference` | warning | Reference to something that has been moved or renamed |
-| `phantom_dependency` | info | Module imported but nothing from it is used |
-| `missing_reexport` | info | Public symbol in submodule not re-exported through parent |
-| `duplication` | warning | Overlapping logic in multiple places — structural similarity via callees-set comparison |
-| `asymmetric_handling` | warning | Parallel code paths with inconsistent treatment — sibling functions missing consensus callees |
-
-## Language Support
-
-- **Python** — full cross-file resolution including relative imports (`from .sibling import foo`), type annotation recognition (`def foo(x: Optional[str])` counts `Optional` as used), `__all__` re-export awareness, and `TYPE_CHECKING` block handling
-- **JavaScript/TypeScript** — ESM and CommonJS cross-file resolution. TypeScript files (`.ts`, `.tsx`) are preprocessed to strip type annotations before analysis — interfaces, enums, and type aliases are pre-extracted as entities
-- **Rust** — full cross-file resolution including `use` qualified paths
-
-## Known Limitations
-
-- **Complex generic type annotations** — inner types in generics like `Dict[str, List[int]]` are not extracted; only the root type name (`Dict`) is recognized as a usage reference
-- **Dynamic `__all__` construction** — `__all__` must be a static list literal; computed values (`__all__ = get_exports()`) are not resolved
-- **TypeScript preprocessing** — TS files are preprocessed to strip type annotations rather than using a native tree-sitter-typescript grammar; complex TS patterns (mapped types, conditional types) may not be fully handled
-- **Dynamic JS imports** — `import()` expressions are not tracked
-- **Split Rust impl blocks** — multiple `impl` blocks for the same type do not share scope
-- **Flow type information** — `in_type`/`out_type` fields in flow output are populated from function signatures when available, but may show "unknown" for functions without parsed signatures
-- **Cross-file flow tracing** — import resolution creates graph edges, but the flow tracing engine does not yet follow these edges across module boundaries; cross-module data flows are largely untracked
-- **Instance-method dispatch** — `self.method()` calls resolve to the method on the same class, but `self.attr.method()` requires instance-attribute type resolution to connect the call to the correct target class; partial support added in v1 for simple typed attributes in `__init__`
-- **`duplication` detection** — uses Jaccard similarity on callees sets (structural, not textual); functions sharing common utility calls may trigger false positives. Minimum union size of 3 callees required.
-- **`asymmetric_handling` detection** — groups functions by file, kind, and similar arity; consensus threshold is strict (N-1 of N), but groups of functions with legitimately different responsibilities may be incorrectly grouped
-
-## Diagnostic Accuracy
-
-Field-tested against a real-world Python codebase (228 files, 13K+ entities). These are honest numbers — patterns vary widely in reliability:
-
-| Pattern | Findings | TP Rate | Status |
-|---------|----------|---------|--------|
-| `isolated_cluster` | 35 | ~33% | **Most reliable.** Genuinely useful for finding disconnected code clusters. |
-| `data_dead_end` | 562 | ~13% | Improving. Method dedup (C20) helped. Instance-attribute resolution will help more. |
-| `missing_reexport` | 1,595 | ~13% | Python convention mismatch — methods on classes flagged as missing from `__init__.py`. Fix in progress. |
-| `orphaned_impl` | 1,070 | ~7% | Dominated by unresolved instance-method dispatch (`self.attr.method()`). |
-| `contract_mismatch` | 97 | ~7% | Name-based matching across namespaces produces false positives. |
-| `phantom_dependency` | 1,960 | ~0% | **Known broken.** Imports used as call targets (not just name references) are not tracked after resolution. Largest single source of false positives. |
-| `circular_dependency` | 0 | — | Fixed in C21. All previous false positives eliminated. |
-| `incomplete_migration` | 7 | ~0%→100% | Sequential version chains and sync/async wrappers now correctly excluded. |
-| `stale_reference` | 1 | ~0% | Too few findings to assess. Module-level import resolution gap. |
-
-**What this means for consumers:** Use `isolated_cluster` and `data_dead_end` findings with moderate confidence. Treat `phantom_dependency` findings as noise until the name-reference tracking gap is resolved. Filter by `--confidence high` to reduce false positives across all patterns.
-
-**Root causes of false positives (95% explained by three gaps):**
-1. No name-reference tracking after import resolution — imports resolve but downstream usage of imported names is not linked back
-2. No instance-method dispatch resolution — `self.x.method()` calls don't resolve through typed attributes
-3. Python convention mismatch — several patterns apply module-level expectations to class-internal structure
-
-## CI Integration
-
-### GitHub Actions
-
-```yaml
-name: Structural Analysis
-on: [push, pull_request]
-
-jobs:
-  flowspec:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Flowspec
-        run: cargo install --path flowspec-cli
-
-      - name: Structural diagnostics
-        run: flowspec diagnose . --gate-severity warning --format sarif > results.sarif
-
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-```
-
-### Generic CI
-
-Use the exit code to gate merges:
-
-```bash
-# Exit code 2 = diagnostics found at or above specified severity
-flowspec diagnose . --gate-severity critical --format json
-```
-
-| Exit Code | Meaning |
-|-----------|---------|
-| 0 | Complete analysis; selected gate passes |
-| 1 | Error (analysis failed) |
-| 2 | Complete analysis; qualified findings fail selected gate |
-| 3 | Incomplete analysis; gate not evaluated |
-
-## Documentation
-
-Detailed specification files are in [`.flowspec/spec/`](.flowspec/spec/):
-
-- `intent.yaml` — Why Flowspec exists, who it serves
-- `architecture.yaml` — System components and data flow
-- `manifest-schema.yaml` — Output format specification
-- `diagnostics.yaml` — All diagnostic patterns with detection logic
-- `cli.yaml` — Every command, flag, and default
-- `integration.yaml` — CI, Mozart, and MCP integration
-
-## License
-
-AGPL-3.0 + Commercial dual license. See [LICENSE](LICENSE) for details.
-
-Complete reports may use `authority.analysis_graph.encoding = flowspec.graph.tables.v1`
-to retain graph records as indexed tables. This lossless form derives stable binding
-and edge keys from their unchanged subjects; Rust consumers can call
-`flowspec::commands::expand_graph_tables` to recover the original graph exactly.
-Compatibility loss and pattern-state arrays refer to the full authoritative arrays
-at the paths recorded in the graph payload. This encoding adds no analysis loss;
-requested JSON/YAML bytes still pass the original prewrite size guard, and Summary
-retains its exemption. The separate incomplete graph projection remains explicit.
-
-Public `analyze` (including registry extensions) and `diagnose_report` now establish
-the same lossless graph normal form before gate or display options. At equal
-effective options their fourteen-field identities bind the same actual report;
-identity still includes every graph field. `AnalysisResult.graph` retains the
-original queryable graph. The in-memory `Manifest.pattern_state` mirror always
-contains every authoritative pattern/language cell. Compact wire reports retain
-the existing explicit `/authority/pattern_state` reference instead of repeating
-that array; deserializing a Manifest reconstructs its mirror from authority.
-This preserves the existing versioned table encoding and producer ABI v1.
-
-The versioned report representation requires the decoder and explicit authority references; consumers expecting the former raw graph object or duplicated wire arrays must migrate. Producer ABI v1 does not make those wire shapes interchangeable.
+Choose an exact symbol ID from analysis and preserve reports outside the analyzed
+source tree. Read execution, outcome, scope, losses and full counts before a claim.
+Analyze defaults to a critical finding gate; select an explicit gate threshold
+when requiring zero findings. Display filters do not change the gate or justify
+ignoring incompleteness.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Complete and passing the declared gate; check full finding counts |
+| 1 | Execution error |
+| 2 | Complete with findings meeting the declared gate |
+| 3 | Incomplete; valid findings retained; clean/regression claims blocked |
+
+The compact [skill](skills/flowspec/SKILL.md) teaches the analyze, completeness,
+evidence, smallest-change, diff and native-validation loop. See
+[agent workflow](docs/agent-workflow.md), [generated diagnostics](docs/diagnostics.md),
+[generated language support](docs/language-support.md), the
+[adapter seam](docs/registry.md), and [security](docs/security.md).
+
+## Current qualification limits
+
+The exact four-language acceptance corpus, production-source coverage at least
+90.00%, complete zero-skip test inventory, hostile security/dependency and cache
+and reproducibility gates are required. Missing implementations fail CI with
+named HOLDs; the older permissive oracle is not a replacement. Current CLI
+limit/offset pagination and a finding-ID diagnose selector are not exposed by
+the retained developmental binary. Trace and diff must be checked with actual
+packaged inputs; an unsupported operation remains held. No public CI success,
+fresh-install acceptance, full type-flow completeness or speed budget is claimed.
+
+Any joined source change invalidates affected documentation, archive, binary and
+review evidence. Run the live documentation checker against the final joined
+binary and rerun the packaged workflow before release qualification.
