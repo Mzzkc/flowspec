@@ -70,11 +70,29 @@ fn invocation_paths(
         .normal_control
         .iter()
         .find(|c| c.name == symbol.name && c.range.0 == start)?;
-    if !control.unresolved.is_empty() || (all_exits && active.len() > 1 && control.exceptional_paths > 0) {
+    if !control.unresolved.is_empty()
+        || (all_exits && active.len() > 1 && control.exceptional_paths > 0)
+    {
+        return None;
+    }
+    if all_exits
+        && active.len() > 1
+        && !file.signatures.iter().any(|s| {
+            s.range.0 == start
+                && s.name == symbol.name
+                && s.literal_leaf
+                && s.parameter_types.is_empty()
+                && !s.unsupported_parameters
+        })
+    {
         return None;
     }
     let mut result = Vec::new();
-    for path in if all_exits { &control.all_paths } else { &control.paths } {
+    for path in if all_exits {
+        &control.all_paths
+    } else {
+        &control.paths
+    } {
         let mut accumulated = vec![HashSet::new()];
         for &(a, b) in path {
             let mut targets = graph
@@ -143,8 +161,9 @@ pub(crate) fn append(
             let range = subject
                 .zip(input)
                 .and_then(|(s, i)| Some(location_range(&key, i.content.as_deref()?, &s.location)));
-            let paths =
-                id.and_then(|id| invocation_paths(id, graph, inputs, root, &mut HashSet::new(), all_exits));
+            let paths = id.and_then(|id| {
+                invocation_paths(id, graph, inputs, root, &mut HashSet::new(), all_exits)
+            });
             let (Some(required), Some(paths)) = (&required, paths) else {
                 let reason = if id.is_none() || required.is_none() {
                     "policy_binding_unresolved"

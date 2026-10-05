@@ -33,7 +33,8 @@ fn expression(n: Node<'_>, path: &mut Path, unknown: &mut Vec<(usize, usize)>, d
     }
     match n.kind() {
         "identifier" | "integer" | "float" | "integer_literal" | "float_literal" | "number"
-        | "true" | "false" | "boolean_literal" | "none" | "null" | "type_identifier" | "string" | "string_literal" => {}
+        | "true" | "false" | "boolean_literal" | "none" | "null" | "type_identifier" | "string"
+        | "string_literal" => {}
         "call" | "call_expression" => {
             let target = n.child_by_field_name("function");
             if !target.is_some_and(|t| matches!(t.kind(), "identifier" | "scoped_identifier")) {
@@ -149,12 +150,19 @@ fn statement(
                 paths
             }
         }
-        "throw_statement" | "raise_statement" => paths.into_iter().map(|mut p| {
-            if !p.returned {
-                for child in children(n) { expression(child, &mut p, unknown, depth + 1); }
-                p.returned = true; p.exceptional = true;
-            } p
-        }).collect(),
+        "throw_statement" | "raise_statement" => paths
+            .into_iter()
+            .map(|mut p| {
+                if !p.returned {
+                    for child in children(n) {
+                        expression(child, &mut p, unknown, depth + 1);
+                    }
+                    p.returned = true;
+                    p.exceptional = true;
+                }
+                p
+            })
+            .collect(),
         "return_statement" | "return_expression" => paths
             .into_iter()
             .map(|mut p| {
@@ -217,9 +225,13 @@ pub(crate) fn collect(source: &str, root: Node<'_>) -> Vec<NormalControl> {
                 result.push(NormalControl {
                     name: source[name.byte_range()].to_string(),
                     range: span(n),
-                    exceptional_paths: paths.iter().filter(|p|p.exceptional).count(),
-                    all_paths: paths.iter().map(|p|p.calls.clone()).collect(),
-                    paths: paths.into_iter().filter(|p| !p.exceptional).map(|p| p.calls).collect(),
+                    exceptional_paths: paths.iter().filter(|p| p.exceptional).count(),
+                    all_paths: paths.iter().map(|p| p.calls.clone()).collect(),
+                    paths: paths
+                        .into_iter()
+                        .filter(|p| !p.exceptional)
+                        .map(|p| p.calls)
+                        .collect(),
                     unresolved: unknown,
                 });
             }

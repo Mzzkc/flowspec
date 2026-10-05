@@ -668,23 +668,48 @@ impl SemanticPolicy {
         }
         for contract in &self.contracts {
             authority(&contract.target)?;
-            if contract.parameter_types.iter().any(|t| !matches!(t.as_str(), "boolean" | "string")) {
+            if contract
+                .parameter_types
+                .iter()
+                .any(|t| !matches!(t.as_str(), "boolean" | "string"))
+            {
                 return Err("contract parameter types must be boolean or string".into());
             }
         }
         for resource in &self.resources {
             if resource.subjects.len() < 2 || resource.acquire == resource.release {
-                return Err("resource policy requires distinct endpoints and at least two peers".into());
+                return Err(
+                    "resource policy requires distinct endpoints and at least two peers".into(),
+                );
             }
             let unique: std::collections::BTreeSet<_> = resource.subjects.iter().collect();
-            if unique.len() != resource.subjects.len() { return Err("resource subjects must differ".into()); }
-            for name in resource.subjects.iter().chain([&resource.acquire, &resource.release]) { authority(name)?; }
+            if unique.len() != resource.subjects.len() {
+                return Err("resource subjects must differ".into());
+            }
+            for name in resource
+                .subjects
+                .iter()
+                .chain([&resource.acquire, &resource.release])
+            {
+                authority(name)?;
+            }
         }
         for history in &self.history {
             authority(&history.old)?;
-            if let Some(new) = &history.new { authority(new)?; if new == &history.old { return Err("history authorities must differ".into()); } }
-            if history.event_id.is_empty() || !matches!(history.state.as_str(), "shim" | "moved" | "removed") || (history.state != "removed" && history.new.is_none()) {
-                return Err("history requires event_id, supported state, and replacement when applicable".into());
+            if let Some(new) = &history.new {
+                authority(new)?;
+                if new == &history.old {
+                    return Err("history authorities must differ".into());
+                }
+            }
+            if history.event_id.is_empty()
+                || !matches!(history.state.as_str(), "shim" | "moved" | "removed")
+                || (history.state != "removed" && history.new.is_none())
+            {
+                return Err(
+                    "history requires event_id, supported state, and replacement when applicable"
+                        .into(),
+                );
             }
         }
         for export in &self.exports {

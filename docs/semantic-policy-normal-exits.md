@@ -24,11 +24,13 @@ if/else and returns in Python, JavaScript, TypeScript and Rust.
 
 This is an invocation relation, not a resource cleanup or purity assertion.
 Exceptional exits and divergence are explicitly outside `exit_scope: normal`.
-Omitting `exit_scope` retains the existing all-exit obligation and its incomplete
-state. Unsupported values and unknown configuration keys are hard config errors.
+Omitting `exit_scope` selects the bounded all-exit extension documented in
+[contract-effect-history.md](contract-effect-history.md); unsupported exits retain
+explicit incomplete state. Unsupported values and unknown configuration keys are hard config errors.
 The effective policy participates in report identity. Unrelated `policy.json`
-files have no authority. Layer, migration, resource/effect and public-surface
-policies retain their explicit incomplete state until their consumers are built.
+files have no authority. Layer, migration and public-surface policies retain their explicit incomplete
+state here. Declared abstract resource protocols have a separate finite consumer
+documented in the extension.
 
 Rust private executable method proofs additionally support a complete selected
 single-file scope with a private top-level nominal struct, an explicit inherent
