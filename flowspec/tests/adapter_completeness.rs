@@ -253,7 +253,7 @@ fn native_tsx_runtime_accepts_abi_and_original_recovery_free_source() {
         let grammar: tree_sitter::Language = language.into();
         assert!(
             (tree_sitter::MIN_COMPATIBLE_LANGUAGE_VERSION..=tree_sitter::LANGUAGE_VERSION)
-                .contains(&(grammar.abi_version() as usize))
+                .contains(&{ grammar.abi_version() })
         );
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&grammar).unwrap();

@@ -339,7 +339,7 @@ mod ext_test;
 fn g1_mixed_rust_product_only_edit_passes() {
     let (temp, _head) = setup_g1_repo();
     let repo = temp.path();
-    let baseline_path = repo.join("tests/test-custody-baseline.json");
+    let _baseline_path = repo.join("tests/test-custody-baseline.json");
 
     let gen_out = run_checker(
         repo,

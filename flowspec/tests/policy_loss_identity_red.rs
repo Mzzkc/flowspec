@@ -12,8 +12,7 @@ fn every_loss_id_binds_its_entire_actual_semantic_record() {
     .unwrap();
     let mut policy_ids = std::collections::BTreeSet::new();
     for operation in ["source.js::stringReplaceAll", "source.rs::is_nonfinite"] {
-        let mut config = Config::default();
-        config.semantic_policy = Some(serde_json::from_value(json!({"version":1,"peers":[{"subjects":["index.js::left","index.js::right"],"required_operations":[operation]}]})).unwrap());
+        let config = Config { semantic_policy: Some(serde_json::from_value(json!({"version":1,"peers":[{"subjects":["index.js::left","index.js::right"],"required_operations":[operation]}]})).unwrap()), ..Default::default() };
         let result = analyze(d.path(), &config, &[]).unwrap();
         let authority = result.manifest.authority.unwrap();
         let losses = authority["losses"].as_array().unwrap();

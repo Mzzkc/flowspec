@@ -118,7 +118,8 @@ fn both_direction_error_uses_command_not_implemented() {
 #[test]
 fn command_not_implemented_includes_suggestion() {
     // diff implemented in C18 — only watch remains deferred
-    for (cmd_name, args) in &[("watch", vec!["watch"])] {
+    {
+        let (cmd_name, args) = &("watch", vec!["watch"]);
         let output = flowspec().args(args).output().unwrap();
 
         let stderr = String::from_utf8_lossy(&output.stderr);

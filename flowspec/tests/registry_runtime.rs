@@ -68,8 +68,10 @@ fn alias_selection_uses_canonical_report_language() {
 fn invalid_config_language_fails_before_analysis() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
-    let mut config = Config::default();
-    config.languages = vec!["unregistered".into()];
+    let config = Config {
+        languages: vec!["unregistered".into()],
+        ..Default::default()
+    };
     assert!(matches!(
         analyze(dir.path(), &config, &[]),
         Err(FlowspecError::UnsupportedLanguage { .. })

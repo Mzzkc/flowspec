@@ -207,7 +207,8 @@ fn sarif_format_is_accepted() {
 fn deferred_commands_give_not_implemented_error() {
     // trace now requires --symbol, so it's tested separately in trace_command.rs.
     // diff and init are implemented. Only watch remains deferred.
-    for cmd_name in &["watch"] {
+    {
+        let cmd_name = &"watch";
         let mut cmd = Command::cargo_bin("flowspec").unwrap();
         let assert = cmd.arg(cmd_name).assert();
         assert.stderr(predicate::str::contains("panic").not());

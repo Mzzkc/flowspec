@@ -32,7 +32,7 @@ fn trace_report_has_exact_hops_and_depth_continuation() {
     assert_eq!(report["execution"], "incomplete");
     assert_eq!(report["paths"][0]["hops"][0]["edge_kind"], "calls");
     assert_eq!(report["paths"][0]["hops"].as_array().unwrap().len(), 1);
-    assert!(report["continuation"].as_array().unwrap().len() > 0);
+    assert!(!report["continuation"].as_array().unwrap().is_empty());
 }
 #[test]
 fn packaged_mcp_trace_returns_the_same_exact_query_state() {

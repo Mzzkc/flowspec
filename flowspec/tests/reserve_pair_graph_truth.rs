@@ -50,7 +50,7 @@ fn nonempty_full_graph_source_symbols_edges_and_ranges_survive_bounded_wire() {
     let actual_edges: std::collections::BTreeSet<_> = graph
         .all_symbols()
         .flat_map(|(id, s)| {
-            graph.edges_from(id).into_iter().filter_map(move |e| {
+            graph.edges_from(id).iter().filter_map(move |e| {
                 graph.get_symbol(e.target).map(|target| {
                     (
                         s.qualified_name.clone(),

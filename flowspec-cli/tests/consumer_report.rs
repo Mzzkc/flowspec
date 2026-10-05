@@ -31,7 +31,7 @@ fn diagnose_keeps_full_report_and_selected_parse_loss() {
     );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["execution"], "incomplete");
-    assert!(report["authority"]["losses"].as_array().unwrap().len() > 0);
+    assert!(!report["authority"]["losses"].as_array().unwrap().is_empty());
 }
 #[test]
 fn diagnose_json_is_report_even_for_complete_clean() {

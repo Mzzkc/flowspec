@@ -105,8 +105,16 @@ fn incomplete_type_debt_keeps_real_private_catalog_under_filter() {
         );
         assert_eq!(a["gate"]["verdict"], "not_evaluated");
         assert_eq!(report["entities"], baseline["entities"]);
-        assert_eq!(flowspec::commands::expand_graph_tables(&a["analysis_graph"]), flowspec::commands::expand_graph_tables(&baseline["authority"]["analysis_graph"]));
-        assert!(!flowspec::commands::expand_graph_tables(&a["analysis_graph"]).unwrap()["entities"].as_array().unwrap().is_empty());
+        assert_eq!(
+            flowspec::commands::expand_graph_tables(&a["analysis_graph"]),
+            flowspec::commands::expand_graph_tables(&baseline["authority"]["analysis_graph"])
+        );
+        assert!(
+            !flowspec::commands::expand_graph_tables(&a["analysis_graph"]).unwrap()["entities"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         if let Some(id) = &identity {
             assert_eq!(&a["report_identity"], id);
         }

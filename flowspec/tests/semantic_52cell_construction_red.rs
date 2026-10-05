@@ -7,8 +7,8 @@
 //! 3. Inherent public methods on public types are not implementation obligations.
 //! 4. Pattern state exposes all 52 cells (13 canonical patterns x 4 languages).
 
-use std::fs;
 use flowspec::{analyze, Config};
+use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -87,17 +87,29 @@ fn all_fifty_two_pattern_state_cells_are_present() {
     )
     .unwrap();
     let authority = result.manifest.authority.as_ref().expect("authority");
-    let pattern_state = authority["pattern_state"].as_array().expect("pattern_state array");
-    assert_eq!(pattern_state.len(), 13, "Must have exactly 13 canonical patterns");
+    let pattern_state = authority["pattern_state"]
+        .as_array()
+        .expect("pattern_state array");
+    assert_eq!(
+        pattern_state.len(),
+        13,
+        "Must have exactly 13 canonical patterns"
+    );
     let mut total_cells = 0;
     for p in pattern_state {
         let cells = p["cells"].as_array().expect("cells array");
         total_cells += cells.len();
-        let languages: Vec<_> = cells.iter().map(|c| c["language"].as_str().unwrap()).collect();
+        let languages: Vec<_> = cells
+            .iter()
+            .map(|c| c["language"].as_str().unwrap())
+            .collect();
         assert!(languages.contains(&"python"));
         assert!(languages.contains(&"javascript"));
         assert!(languages.contains(&"typescript"));
         assert!(languages.contains(&"rust"));
     }
-    assert_eq!(total_cells, 52, "Must have exactly 52 cells (13 patterns x 4 languages)");
+    assert_eq!(
+        total_cells, 52,
+        "Must have exactly 52 cells (13 patterns x 4 languages)"
+    );
 }

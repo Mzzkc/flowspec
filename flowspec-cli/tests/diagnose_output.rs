@@ -45,7 +45,7 @@ fn diagnose_outputs_diagnostics_only_not_full_manifest() {
 
     if let Some(map) = parsed.as_mapping() {
         assert!(
-            map.contains_key(&serde_yaml::Value::String("metadata".to_string())),
+            map.contains_key(serde_yaml::Value::String("metadata".to_string())),
             "diagnose output must contain 'metadata' section"
         );
     }

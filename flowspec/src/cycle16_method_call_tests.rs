@@ -554,7 +554,6 @@ class Worker {
 #[test]
 fn int1_dogfood_data_dead_end_no_regression() {
     use crate::config::Config;
-    use crate::diagnose;
 
     let src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     if !src_path.exists() {
@@ -562,8 +561,18 @@ fn int1_dogfood_data_dead_end_no_regression() {
     }
 
     let config = Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let dead_end_count = diagnostics
         .iter()
@@ -581,7 +590,6 @@ fn int1_dogfood_data_dead_end_no_regression() {
 #[test]
 fn int2_self_called_method_not_dead_end() {
     use crate::config::Config;
-    use crate::diagnose;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -598,15 +606,18 @@ class Service:
     .unwrap();
 
     let config = Config::load(tmp.path(), None).unwrap();
-    let (diagnostics, _) = diagnose(
+    let report = crate::diagnose_report(
         tmp.path(),
         &config,
         &["python".to_string()],
-        None,
-        None,
-        None,
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
     )
     .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let dead_end_entities: Vec<&str> = diagnostics
         .iter()
@@ -629,7 +640,6 @@ class Service:
 #[test]
 fn int3_true_dead_end_method_still_detected() {
     use crate::config::Config;
-    use crate::diagnose;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -649,15 +659,18 @@ class Service:
     .unwrap();
 
     let config = Config::load(tmp.path(), None).unwrap();
-    let (diagnostics, _) = diagnose(
+    let report = crate::diagnose_report(
         tmp.path(),
         &config,
         &["python".to_string()],
-        None,
-        None,
-        None,
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
     )
     .unwrap();
+    let diagnostics = &report.diagnostics;
 
     // After C20 dedup: Methods are detected by orphaned_impl, not data_dead_end
     let orphaned_entities: Vec<&str> = diagnostics

@@ -1028,8 +1028,8 @@ fn test_compute_file_hashes_deterministic() {
     let file = tmp.path().join("test.py");
     fs::write(&file, "def hello(): pass\n").unwrap();
 
-    let hashes1 = compute_file_hashes(&[file.clone()]).unwrap();
-    let hashes2 = compute_file_hashes(&[file.clone()]).unwrap();
+    let hashes1 = compute_file_hashes(std::slice::from_ref(&file)).unwrap();
+    let hashes2 = compute_file_hashes(std::slice::from_ref(&file)).unwrap();
 
     assert_eq!(
         hashes1.get(&file),
@@ -1048,7 +1048,7 @@ fn test_compute_file_hashes_empty_file() {
     let file = tmp.path().join("empty.py");
     fs::write(&file, "").unwrap();
 
-    let hashes = compute_file_hashes(&[file.clone()]).unwrap();
+    let hashes = compute_file_hashes(std::slice::from_ref(&file)).unwrap();
     let hash = hashes.get(&file).expect("Empty file must produce a hash");
 
     assert_eq!(

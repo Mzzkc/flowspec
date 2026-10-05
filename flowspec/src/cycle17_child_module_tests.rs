@@ -634,8 +634,18 @@ fn test_c17_t16_aliased_import_child_module() {
 fn test_c17_t17_phantom_dependency_unchanged() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let phantom = diagnostics
         .iter()
@@ -657,8 +667,18 @@ fn test_c17_t17_phantom_dependency_unchanged() {
 fn test_c17_t18_missing_reexport_unchanged() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let missing = diagnostics
         .iter()
@@ -680,8 +700,18 @@ fn test_c17_t18_missing_reexport_unchanged() {
 fn test_c17_t19_data_dead_end_unchanged() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let dead_end = diagnostics
         .iter()
@@ -704,8 +734,18 @@ fn test_c17_t19_data_dead_end_unchanged() {
 fn test_c17_t20_orphaned_impl_unchanged() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let orphaned = diagnostics
         .iter()
@@ -726,8 +766,18 @@ fn test_c17_t20_orphaned_impl_unchanged() {
 fn test_c17_t21_stable_patterns_unchanged() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let circular = diagnostics
         .iter()
@@ -779,8 +829,18 @@ fn test_c17_t21_stable_patterns_unchanged() {
 fn test_c17_t22_total_dogfood_bounded_decrease() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let total = diagnostics.len();
     eprintln!("T22: total findings = {}", total);
@@ -807,8 +867,18 @@ fn test_c17_t22_total_dogfood_bounded_decrease() {
 fn test_c17_t23_stale_reference_mechanism_a_eliminated() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let stale = diagnostics
         .iter()
@@ -833,8 +903,18 @@ fn test_c17_t23_stale_reference_mechanism_a_eliminated() {
 fn test_c17_t24_known_mechanism_a_imports_resolved() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let stale_findings: Vec<_> = diagnostics
         .iter()
@@ -856,8 +936,18 @@ fn test_c17_t24_known_mechanism_a_imports_resolved() {
 fn test_c17_t25_mechanism_b_c_not_suppressed() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let stale_findings: Vec<_> = diagnostics
         .iter()
@@ -883,8 +973,18 @@ fn test_c17_t25_mechanism_b_c_not_suppressed() {
 fn test_c17_t26_fixture_stale_references_preserved() {
     let src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let stale_count = diagnostics
         .iter()

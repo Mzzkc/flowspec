@@ -267,8 +267,18 @@ fn test_c16_t11_dogfood_stale_reference_drops() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let stale_count = diagnostics
         .iter()
@@ -295,8 +305,18 @@ fn test_c16_t12_other_patterns_unchanged_after_fix() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let count = |pattern: &str| diagnostics.iter().filter(|d| d.pattern == pattern).count();
 
@@ -367,8 +387,18 @@ fn test_c16_t13_dogfood_total_findings_decrease() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let total = diagnostics.len();
 
@@ -397,8 +427,18 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let count = |pattern: &str| diagnostics.iter().filter(|d| d.pattern == pattern).count();
 
@@ -484,8 +524,18 @@ fn test_c16_t15_no_module_segment_stale_references() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     // These are the TRUE intermediate path segments that the fix eliminates.
     // Module-name LEAF imports like `patterns` or `circular_dependency` remain
@@ -887,8 +937,18 @@ fn test_c16_t32_fix_does_not_create_phantom() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let phantom = diagnostics
         .iter()
@@ -913,8 +973,18 @@ fn test_c16_t33_fix_does_not_affect_dead_end() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let dead_end = diagnostics
         .iter()
@@ -940,8 +1010,18 @@ fn test_c16_t34_stale_reference_confidence_stable() {
     }
 
     let config = crate::config::Config::load(&src_path, None).unwrap();
-    let (diagnostics, _) =
-        crate::diagnose(&src_path, &config, &["rust".to_string()], None, None, None).unwrap();
+    let report = crate::diagnose_report(
+        &src_path,
+        &config,
+        &["rust".to_string()],
+        &crate::ReportOptions {
+            gate_severity: crate::Severity::Info,
+            gate_confidence: crate::Confidence::Low,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = &report.diagnostics;
 
     let stale_findings: Vec<_> = diagnostics
         .iter()

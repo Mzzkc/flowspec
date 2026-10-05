@@ -386,7 +386,7 @@ fn sarif_many_diagnostics_valid() {
 
     let results = parsed["runs"][0]["results"].as_array().unwrap();
     assert!(
-        results.len() >= 1,
+        !results.is_empty(),
         "Many dead functions should produce at least 1 diagnostic"
     );
 }

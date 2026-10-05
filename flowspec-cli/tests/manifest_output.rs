@@ -95,7 +95,7 @@ fn manifest_has_all_eight_required_sections() {
 
     for section in &required_sections {
         assert!(
-            map.contains_key(&serde_yaml::Value::String(section.to_string())),
+            map.contains_key(serde_yaml::Value::String(section.to_string())),
             "Missing required manifest section: '{}'.",
             section
         );

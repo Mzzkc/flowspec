@@ -106,7 +106,7 @@ fn test_untyped_instance_attr_dispatch() {
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::{analyze, diagnose, Severity};
+use crate::{analyze, Severity};
 
 // =========================================================================
 // 1. End-to-End Pipeline Tests (P0)
@@ -1564,6 +1564,7 @@ fn test_pipeline_full_integration_all_patterns() {
 // =========================================================================
 
 #[test]
+#[allow(deprecated)]
 fn test_diagnose_uses_real_pipeline() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -1573,7 +1574,7 @@ fn test_diagnose_uses_real_pipeline() {
     .unwrap();
 
     let config = Config::load(tmp.path(), None).unwrap();
-    let (diagnostics, has_findings) = diagnose(
+    let (diagnostics, has_findings) = crate::diagnose(
         tmp.path(),
         &config,
         &["python".to_string()],
@@ -1586,13 +1587,13 @@ fn test_diagnose_uses_real_pipeline() {
     assert!(has_findings, "dead_code.py should produce findings");
     assert!(
         !diagnostics.is_empty(),
-        "diagnose() must return diagnostics from real pipeline"
+        "crate::diagnose() must return diagnostics from real pipeline"
     );
 
     for d in &diagnostics {
         assert!(
             !d.evidence.is_empty(),
-            "diagnose() diagnostic '{}' has empty evidence",
+            "crate::diagnose() diagnostic '{}' has empty evidence",
             d.id
         );
     }
@@ -1780,6 +1781,7 @@ fn test_no_scanner_call_sites_in_lib() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_diagnose_severity_filter() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -1790,7 +1792,7 @@ fn test_diagnose_severity_filter() {
 
     let config = Config::load(tmp.path(), None).unwrap();
 
-    let (critical_only, _) = diagnose(
+    let (critical_only, _) = crate::diagnose(
         tmp.path(),
         &config,
         &["python".to_string()],
@@ -3024,6 +3026,7 @@ fn test_pipeline_graph_has_edges_after_move() {
 
 // T12: diagnose() compatibility with new fields
 #[test]
+#[allow(deprecated)]
 fn test_pipeline_diagnose_works_with_graph_exposure() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -3034,7 +3037,7 @@ fn test_pipeline_diagnose_works_with_graph_exposure() {
 
     let config = Config::load(tmp.path(), None).unwrap();
 
-    let result = diagnose(
+    let result = crate::diagnose(
         tmp.path(),
         &config,
         &["python".to_string()],
@@ -3045,14 +3048,14 @@ fn test_pipeline_diagnose_works_with_graph_exposure() {
 
     assert!(
         result.is_ok(),
-        "diagnose() must continue working after graph exposure. Got: {:?}",
+        "crate::diagnose() must continue working after graph exposure. Got: {:?}",
         result.err()
     );
 
     let (diagnostics, _has_critical) = result.unwrap();
     assert!(
         !diagnostics.is_empty(),
-        "diagnose() on dead_code.py should find diagnostics."
+        "crate::diagnose() on dead_code.py should find diagnostics."
     );
 }
 

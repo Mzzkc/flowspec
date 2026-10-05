@@ -619,8 +619,12 @@ fn decisions_log_deferral_area() {
     for (i, line) in lines.iter().enumerate() {
         if line.contains("2026-03-27") {
             // Look forward for area: diagnostics
-            for j in i..std::cmp::min(i + 10, lines.len()) {
-                if lines[j].contains("area:") && lines[j].contains("diagnostics") {
+            for following in lines
+                .iter()
+                .take(std::cmp::min(i + 10, lines.len()))
+                .skip(i)
+            {
+                if following.contains("area:") && following.contains("diagnostics") {
                     found_new_entry = true;
                     break;
                 }

@@ -663,7 +663,7 @@ fn manifest_8_sections_preserved() {
     ];
     for section in &required {
         assert!(
-            mapping.contains_key(&serde_yaml::Value::String(section.to_string())),
+            mapping.contains_key(serde_yaml::Value::String(section.to_string())),
             "Manifest missing required section '{}'. Present keys: {:?}",
             section,
             mapping
