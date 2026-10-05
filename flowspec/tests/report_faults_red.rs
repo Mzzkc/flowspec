@@ -53,11 +53,14 @@ fn fault_red_local_import_uncertainty_marks_dependent_pattern() {
         value["authority"]["pattern_state"]
             .as_array()
             .is_some_and(|states| states.iter().any(|pattern| {
-                pattern["cells"].as_array().is_some_and(|cells| cells.iter().any(|state| {
-                    state["state"] == "incomplete"
-                        && state["reason_codes"].as_array().is_some_and(|codes|
-                            codes.iter().any(|code| code == "unresolved_import"))
-                }))
+                pattern["cells"].as_array().is_some_and(|cells| {
+                    cells.iter().any(|state| {
+                        state["state"] == "incomplete"
+                            && state["reason_codes"].as_array().is_some_and(|codes| {
+                                codes.iter().any(|code| code == "unresolved_import")
+                            })
+                    })
+                })
             })),
         "dependent pattern must carry the unresolved import reason: {value}"
     );
