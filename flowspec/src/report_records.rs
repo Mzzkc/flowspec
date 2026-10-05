@@ -2,8 +2,10 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-const ENCODING: &str = "flowspec.report.records.v1";
-const AUTHORITY_FIELDS: &[&str] = &["losses", "pattern_state", "provenance"];
+const ENCODING_V1: &str = "flowspec.report.records.v1";
+const ENCODING: &str = "flowspec.report.records.v2";
+const AUTHORITY_FIELDS_V1: &[&str] = &["losses", "pattern_state", "provenance"];
+const AUTHORITY_FIELDS: &[&str] = AUTHORITY_FIELDS_V1;
 
 const ROOT_FIELDS: &[&str] = &[
     "diagnostics",
@@ -39,14 +41,25 @@ impl Records {
                     self.shape_ids.insert(shape.clone(), id);
                     id
                 };
-                let mut node = vec![json!("o"), json!(shape_id)];
+                let mut node = vec![json!(shape_id)];
                 node.extend(shape.iter().map(|key| json!(self.intern(&fields[key]))));
                 Value::Array(node)
             }
             Value::Array(items) => {
-                let mut node = vec![json!("a")];
+                let mut node = vec![json!(-1)];
                 node.extend(items.iter().map(|item| json!(self.intern(item))));
                 Value::Array(node)
+            }
+            Value::String(text) if text.starts_with('~') => json!(format!("~{text}")),
+            Value::String(text)
+                if text.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }) =>
+            {
+                json!(format!("~{}", &text[7..]))
             }
             scalar => scalar.clone(),
         };
@@ -111,14 +124,19 @@ fn report_slot<'a>(report: &'a mut Value, path: &[&str]) -> Result<&'a mut Value
     Ok(slot)
 }
 
-/// Expand `flowspec.report.records.v1` to the complete ordinary report value.
+/// Expand `flowspec.report.records.v1` or `flowspec.report.records.v2` to the complete ordinary report value.
 /// Unencoded reports pass through unchanged. Malformed tables fail closed;
 /// no partial report, missing finding, or apparently clean result is returned.
 pub fn expand_report_records(report: &Value) -> Result<Value, String> {
     let Some(table) = report.get("report_records") else {
         return Ok(report.clone());
     };
-    if table["encoding"] != ENCODING || table.as_object().is_none_or(|m| m.len() != 3) {
+    let authority_fields = match table["encoding"].as_str() {
+        Some(ENCODING_V1) => AUTHORITY_FIELDS_V1,
+        Some(ENCODING) => AUTHORITY_FIELDS,
+        _ => return Err("unsupported report record encoding".into()),
+    };
+    if table.as_object().is_none_or(|m| m.len() != 3) {
         return Err("unsupported report record encoding".into());
     }
     let shapes = table["shapes"].as_array().ok_or("missing record shapes")?;
@@ -142,7 +160,17 @@ pub fn expand_report_records(report: &Value) -> Result<Value, String> {
                     *sizes.get(id).ok_or("missing record size")?,
                 ))
             };
-            match row.first().and_then(Value::as_str) {
+            let v2 = table["encoding"] == ENCODING;
+            let tag = if v2 {
+                match row.first() {
+                    Some(value) if value.as_i64() == Some(-1) => Some("a"),
+                    Some(value) if value.as_u64().is_some() => Some("o"),
+                    _ => None,
+                }
+            } else {
+                row.first().and_then(Value::as_str)
+            };
+            match tag {
                 Some("a") => {
                     let mut values = Vec::new();
                     for reference in &row[1..] {
@@ -157,16 +185,17 @@ pub fn expand_report_records(report: &Value) -> Result<Value, String> {
                     }
                     Value::Array(values)
                 }
-                Some("o") if row.len() >= 2 => {
+                Some("o") if row.len() >= if v2 { 1 } else { 2 } => {
+                    let offset = if v2 { 0 } else { 1 };
                     let shape = shapes
-                        .get(index(&row[1])?)
+                        .get(index(&row[offset])?)
                         .and_then(Value::as_array)
                         .ok_or("invalid record shape")?;
-                    if shape.len() != row.len() - 2 {
+                    if shape.len() != row.len() - offset - 1 {
                         return Err("record shape arity mismatch".into());
                     }
                     let mut fields = serde_json::Map::new();
-                    for (key, reference) in shape.iter().zip(&row[2..]) {
+                    for (key, reference) in shape.iter().zip(&row[offset + 1..]) {
                         let key = key.as_str().ok_or("invalid record key")?;
                         let (value, bytes) = get(reference)?;
                         size = size
@@ -187,7 +216,26 @@ pub fn expand_report_records(report: &Value) -> Result<Value, String> {
             return Err("invalid scalar record node".into());
         } else {
             size = serde_json::to_vec(node).map_err(|e| e.to_string())?.len();
-            node.clone()
+            if table["encoding"] == ENCODING {
+                if let Some(text) = node.as_str().and_then(|text| text.strip_prefix('~')) {
+                    if text.starts_with('~') {
+                        json!(text)
+                    } else if text.len() == 64
+                        && text
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        size += 6;
+                        json!(format!("sha256:{text}"))
+                    } else {
+                        return Err("invalid compact record string".into());
+                    }
+                } else {
+                    node.clone()
+                }
+            } else {
+                node.clone()
+            }
         };
         total_expansion = total_expansion
             .checked_add(size + 2)
@@ -203,7 +251,7 @@ pub fn expand_report_records(report: &Value) -> Result<Value, String> {
         .as_object_mut()
         .ok_or("report must be object")?
         .remove("report_records");
-    for (parent, fields) in [("authority", AUTHORITY_FIELDS), ("", ROOT_FIELDS)] {
+    for (parent, fields) in [("authority", authority_fields), ("", ROOT_FIELDS)] {
         for field in fields {
             let slot = if parent.is_empty() {
                 report_slot(&mut result, &[*field])?

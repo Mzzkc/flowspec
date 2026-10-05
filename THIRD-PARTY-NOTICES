@@ -22,3 +22,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+Locked normal Linux CLI dependency notices
+==========================================
+Original license/notice bytes and the exact resolved package index are supplied in THIRD-PARTY-LICENSES/index.json. Selection follows normal/build edges from flowspec-cli, with flowspec/mcp, for x86_64-unknown-linux-gnu; dev-only dependencies are excluded. This inventory does not decide project relicensing authority or qualify a release. Missing source notices, if any, are explicit holds in the index.
