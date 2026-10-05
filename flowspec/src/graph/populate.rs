@@ -430,6 +430,30 @@ fn insert_references(
                     }
                 }
 
+                // Intra-file receiver method call resolution:
+                // When an expression calls obj.method() within the same file and method is unambiguous,
+                // bind the call edge to that method.
+                if new_ref.to == SymbolId::default() {
+                    if let Some((_root, suffix)) = callee_name.split_once('.') {
+                        let method_candidates: Vec<_> = symbol_id_map
+                            .iter()
+                            .filter(|(idx, _)| {
+                                symbols[*idx].kind == SymbolKind::Method
+                                    && symbols[*idx].name == suffix
+                            })
+                            .collect();
+                        if method_candidates.len() == 1 {
+                            new_ref.from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                                .unwrap_or_else(|| {
+                                    *module_symbol_id
+                                        .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
+                                });
+                            new_ref.to = method_candidates[0].1;
+                            new_ref.resolution = ResolutionStatus::Resolved;
+                        }
+                    }
+                }
+
                 #[cfg(feature = "fault_probe")]
                 let injected_call = crate::fault_probe::call_edge(
                     &reference.location,
@@ -510,7 +534,9 @@ fn insert_references(
                 let candidates: Vec<_> = symbol_id_map
                     .iter()
                     .filter(|(idx, _)| {
-                        symbols[*idx].name == name && symbols[*idx].kind == SymbolKind::Function
+                        symbols[*idx].name == name
+                            && (symbols[*idx].kind == SymbolKind::Function
+                                || symbols[*idx].kind == SymbolKind::Constant)
                     })
                     .collect();
                 if candidates.len() != 1 {

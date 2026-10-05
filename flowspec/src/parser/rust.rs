@@ -1178,7 +1178,10 @@ fn extract_function_values(result: &mut ParseOutput, content: &[u8], path: &Path
                 && result
                     .symbols
                     .iter()
-                    .any(|s| s.name == name && s.kind == SymbolKind::Function)
+                    .any(|s| {
+                        s.name == name
+                            && (s.kind == SymbolKind::Function || s.kind == SymbolKind::Constant)
+                    })
             {
                 result.references.push(Reference {
                     id: ReferenceId::default(),
