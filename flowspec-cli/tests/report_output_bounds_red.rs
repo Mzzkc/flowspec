@@ -37,12 +37,16 @@ fn ordinary_rust_fixture_emits_bounded_real_yaml_and_json() {
             } else {
                 serde_yaml::from_slice(&output.stdout).unwrap()
             };
+            let report = flowspec::commands::expand_report_records(&report).unwrap();
             assert_eq!(report["authority"]["execution"], "incomplete");
-            assert!(report["authority"]["losses"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|loss| loss["reason"] == "output_truncation"));
+            let original = flowspec::analyze(&root, &flowspec::Config::default(), &[]).unwrap();
+            let authority = original.manifest.authority.as_ref().unwrap();
+            assert_eq!(report["authority"]["losses"], authority["losses"]);
+            assert_eq!(report["authority"]["pattern_state"], authority["pattern_state"]);
+            let graph = flowspec::commands::expand_graph_tables(&report["authority"]["analysis_graph"]).unwrap();
+            assert_eq!(graph["entities"].as_array().unwrap().len(), original.graph.all_symbols().count());
+            assert!(!graph["entities"].as_array().unwrap().is_empty());
+            assert_eq!(graph, flowspec::commands::expand_graph_tables(&authority["analysis_graph"]).unwrap());
         }
     }
 }
@@ -68,13 +72,17 @@ fn twenty_selected_files_emit_bounded_yaml() {
         output.stdout.len()
     );
     let report: serde_yaml::Value = serde_yaml::from_slice(&output.stdout).unwrap();
+    let report = flowspec::commands::expand_report_records(&report).unwrap();
     assert_eq!(report["authority"]["inventory"]["selected"], 20);
     if output.status.code() == Some(3) {
         assert_eq!(report["authority"]["execution"], "incomplete");
-        assert!(report["authority"]["losses"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|loss| loss["reason"] == "output_truncation"));
+        let original = flowspec::analyze(root.path(), &flowspec::Config::default(), &[]).unwrap();
+        let authority = original.manifest.authority.as_ref().unwrap();
+        assert_eq!(report["authority"]["losses"], authority["losses"]);
+        assert_eq!(report["authority"]["pattern_state"], authority["pattern_state"]);
+        let graph = flowspec::commands::expand_graph_tables(&report["authority"]["analysis_graph"]).unwrap();
+        assert_eq!(graph["entities"].as_array().unwrap().len(), original.graph.all_symbols().count());
+        assert!(!graph["entities"].as_array().unwrap().is_empty());
+        assert_eq!(graph, flowspec::commands::expand_graph_tables(&authority["analysis_graph"]).unwrap());
     }
 }

@@ -11,38 +11,27 @@ use serde::{Deserialize, Serialize};
 ///
 /// Contains all 8 required sections. Sections are always present even when
 /// empty (empty lists, not omitted) so consumers can rely on a stable schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(into = "ManifestWire", from = "ManifestWire")]
+#[derive(Debug, Clone)]
 pub struct Manifest {
     /// Full analyzer-produced JSON contract. Legacy sections are display projections.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub authority: Option<serde_json::Value>,
     /// Compatibility mirror of source loss records in the authoritative report.
-    #[serde(default)]
     pub losses: Vec<serde_json::Value>,
     /// Compatibility mirror of pattern state in the authoritative report.
-    #[serde(default)]
     pub pattern_state: Vec<serde_json::Value>,
     /// Count of the unfiltered authoritative catalog.
-    #[serde(default)]
     pub full_findings_total: u64,
     /// Count of the current display projection.
-    #[serde(default)]
     pub displayed_findings_total: u64,
     /// Schema version for analyzed reports; absent on legacy empty payloads.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub schema_version: Option<u32>,
     /// Whether the declared scope was completely analyzed.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub execution: Option<Execution>,
     /// Full finding presence before display filters.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub findings_present: Option<bool>,
     /// Derived report state before display filters.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub outcome: Option<Outcome>,
     /// Input accounting before display filters.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub completeness: Option<Completeness>,
     /// Project identity, analysis timestamp, version, counts.
     pub metadata: Metadata,
@@ -827,5 +816,56 @@ impl From<ManifestWire> for Manifest {
         };
         result.sync_pattern_state();
         result
+    }
+}
+
+impl Serialize for Manifest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = ManifestWire::from(self.clone());
+        if self.authority.is_none() {
+            return wire.serialize(serializer);
+        }
+        let value = serde_json::to_value(wire).map_err(serde::ser::Error::custom)?;
+        let value = crate::report_records::pack_report_records(value);
+        // Keep the public section order even though canonical JSON maps are
+        // sorted internally for record sharing and identity construction.
+        use serde::ser::SerializeMap;
+        let mut output = serializer.serialize_map(value.as_object().map(|m| m.len()))?;
+        for key in [
+            "authority",
+            "losses",
+            "pattern_state",
+            "full_findings_total",
+            "displayed_findings_total",
+            "schema_version",
+            "execution",
+            "findings_present",
+            "outcome",
+            "completeness",
+            "report_records",
+            "metadata",
+            "summary",
+            "diagnostics",
+            "entities",
+            "flows",
+            "boundaries",
+            "dependency_graph",
+            "type_flows",
+        ] {
+            if let Some(field) = value.get(key) {
+                output.serialize_entry(key, field)?;
+            }
+        }
+        output.end()
+    }
+}
+impl<'de> Deserialize<'de> for Manifest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let expanded = crate::report_records::expand_report_records(&value)
+            .map_err(serde::de::Error::custom)?;
+        let wire: ManifestWire =
+            serde_json::from_value(expanded).map_err(serde::de::Error::custom)?;
+        Ok(wire.into())
     }
 }

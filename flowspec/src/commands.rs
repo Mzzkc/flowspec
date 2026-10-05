@@ -4,6 +4,7 @@
 //! `main.rs`. By living in the library crate, they can be unit-tested directly,
 //! improving coverage and catching regressions without integration test overhead.
 
+pub use crate::report_records::expand_report_records;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -344,7 +345,7 @@ fn render_report(
     Ok(output)
 }
 
-fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
+pub(crate) fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
     let projected = manifest.authority.as_ref().is_some_and(|authority| {
         authority["analysis_graph"]["projection"]["analysis_graph"] == "omitted"
             || matches!(

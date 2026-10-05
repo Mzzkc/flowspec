@@ -27,6 +27,7 @@ fn incomplete_rust_report_preserves_entities_within_requested_output_bounds() {
         } else {
             serde_json::from_slice(&bytes).unwrap()
         };
+        let report = flowspec::commands::expand_report_records(&report).unwrap();
         assert_eq!(report["entities"].as_array().unwrap().len(), expected);
         assert_eq!(report["authority"]["execution"], "incomplete");
     }

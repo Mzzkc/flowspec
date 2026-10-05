@@ -32,10 +32,14 @@ fn small_incomplete_projection_preserves_catalog_and_legacy() {
     ] {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("dead_code.py"), source).unwrap();
-        let baseline = serde_json::to_value(analyze(root.path(), &Config::default(), &[]).unwrap().manifest).unwrap();
+        let native = analyze(root.path(), &Config::default(), &[]).unwrap();
+        let original_graph = flowspec::commands::expand_graph_tables(&native.manifest.authority.as_ref().unwrap()["analysis_graph"]).unwrap();
+        assert_eq!(original_graph["entities"].as_array().unwrap().len(), native.graph.all_symbols().count());
+        let baseline = flowspec::commands::expand_report_records(&serde_json::to_value(native.manifest).unwrap()).unwrap();
         let mut identity = None;
         for format in ["json", "yaml"] {
-            let (code, report, bytes) = run(root.path(), format, &[]);
+            let (code, wire, bytes) = run(root.path(), format, &[]);
+            let report = flowspec::commands::expand_report_records(&wire).unwrap();
             assert!(bytes <= 10240, "actual {format} output {bytes} exceeds binding 10240");
             assert_eq!(code, 3);
             for field in ["entities", "flows", "boundaries", "dependency_graph", "type_flows", "diagnostics", "summary", "completeness"] {
@@ -45,16 +49,9 @@ fn small_incomplete_projection_preserves_catalog_and_legacy() {
                 assert_eq!(report["authority"][field], baseline["authority"][field], "authority {field} changed");
             }
             let a = &report["authority"];
-            assert_eq!(a["analysis_graph"]["projection"]["analysis_graph"], "omitted");
-            assert_eq!(a["analysis_graph"]["projection"]["compatibility_losses"], "/authority/losses");
-            assert_eq!(a["analysis_graph"]["projection"]["compatibility_pattern_state"], "/authority/pattern_state");
-            assert!(a["losses"].as_array().unwrap().iter().any(|l| l["reason"] == "output_truncation"));
-            for pattern in a["pattern_state"].as_array().unwrap() {
-                for cell in pattern["cells"].as_array().unwrap() {
-                    assert_eq!(cell["state"], "incomplete");
-                    assert!(cell["reason_codes"].as_array().unwrap().iter().any(|r| r == "output_truncation"));
-                }
-            }
+            assert_eq!(flowspec::commands::expand_graph_tables(&a["analysis_graph"]).unwrap(), original_graph);
+            assert_eq!(a["losses"], baseline["authority"]["losses"]);
+            assert_eq!(a["pattern_state"], baseline["authority"]["pattern_state"]);
             if let Some(id) = &identity { assert_eq!(&a["report_identity"], id); }
             identity = Some(a["report_identity"].clone());
         }
@@ -89,6 +86,7 @@ fn incomplete_type_debt_keeps_real_private_catalog_under_filter() {
             .manifest,
     )
     .unwrap();
+    let baseline = flowspec::commands::expand_report_records(&baseline).unwrap();
     assert_eq!(baseline["authority"]["findings"]["total"], 1);
     let mut identity = None;
     for (format, extra) in [
@@ -96,7 +94,8 @@ fn incomplete_type_debt_keeps_real_private_catalog_under_filter() {
         ("yaml", vec![]),
         ("json", vec!["--severity", "critical"]),
     ] {
-        let (code, report, _) = run(root.path(), format, &extra);
+        let (code, wire, _) = run(root.path(), format, &extra);
+        let report = flowspec::commands::expand_report_records(&wire).unwrap();
         assert_eq!(code, 3);
         let a = &report["authority"];
         assert_eq!(a["findings"], baseline["authority"]["findings"]);
@@ -106,10 +105,8 @@ fn incomplete_type_debt_keeps_real_private_catalog_under_filter() {
         );
         assert_eq!(a["gate"]["verdict"], "not_evaluated");
         assert_eq!(report["entities"], baseline["entities"]);
-        assert_eq!(
-            a["analysis_graph"]["projection"]["analysis_graph"],
-            "omitted"
-        );
+        assert_eq!(flowspec::commands::expand_graph_tables(&a["analysis_graph"]), flowspec::commands::expand_graph_tables(&baseline["authority"]["analysis_graph"]));
+        assert!(!flowspec::commands::expand_graph_tables(&a["analysis_graph"]).unwrap()["entities"].as_array().unwrap().is_empty());
         if let Some(id) = &identity {
             assert_eq!(&a["report_identity"], id);
         }

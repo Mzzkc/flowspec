@@ -692,6 +692,8 @@ pub(crate) fn build(
                 item["affected_patterns"] = json!([pattern]);
                 item["required_capabilities"] = json!([operation]);
                 item["policy"] = json!(policy);
+                item["policy_origin"] =
+                    json!({"origin":config.origin,"source_sha256":config.source_sha256});
                 losses.push(item);
             }
         }
@@ -837,6 +839,14 @@ pub(crate) fn build(
     }
     if binding_counts.values().any(|count| *count > 1) {
         losses.push(loss("identity_uncertain", String::new(), None, "binding"));
+    }
+    // Identity binds the final semantic payload after every producer branch
+    // has added its actual pattern/capability/origin/dependency evidence.
+    // Never use the provisional loss() ID as authority for modified records.
+    for item in &mut losses {
+        let mut meaning = item.clone();
+        meaning.as_object_mut().expect("loss record").remove("id");
+        item["id"] = json!(hash("loss", &meaning));
     }
     let mut pattern_state = Vec::new();
     for pattern in PATTERNS {

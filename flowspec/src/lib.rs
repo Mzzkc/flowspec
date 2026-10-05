@@ -39,6 +39,7 @@ pub mod parser;
 /// Validated language and diagnostic registration.
 pub mod registry;
 mod report_authority;
+mod report_records;
 
 #[cfg(feature = "fault_probe")]
 pub mod fault_probe;
