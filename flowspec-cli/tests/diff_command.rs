@@ -20,7 +20,7 @@ fn minimal_manifest_yaml(entities: &[&str], diagnostics: &[(&str, &str, &str, &s
     yaml.push_str("  analyzed_at: '2026-03-26T00:00:00Z'\n");
     yaml.push_str("  flowspec_version: '0.1.0'\n");
     yaml.push_str("  languages:\n    - python\n");
-    yaml.push_str(&"  file_count: 1\n".to_string());
+    yaml.push_str("  file_count: 1\n");
     yaml.push_str(&format!("  entity_count: {}\n", entities.len()));
     yaml.push_str("  flow_count: 0\n");
     yaml.push_str(&format!("  diagnostic_count: {}\n", diagnostics.len()));
@@ -63,7 +63,7 @@ fn minimal_manifest_yaml(entities: &[&str], diagnostics: &[(&str, &str, &str, &s
             yaml.push_str("    kind: fn\n");
             yaml.push_str("    vis: pub\n");
             yaml.push_str("    sig: '() -> None'\n");
-            yaml.push_str(&"    loc: test.py:1\n".to_string());
+            yaml.push_str("    loc: test.py:1\n");
             yaml.push_str("    calls: []\n");
             yaml.push_str("    called_by: []\n");
             yaml.push_str("    annotations: []\n");

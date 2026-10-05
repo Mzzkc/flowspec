@@ -1185,6 +1185,29 @@ pub fn analyze_with_registry_and_options(
         &graph,
         losses,
     );
+    // Record the operation actually performed, including warm reuse and cold
+    // or failed-cache rebuilds. This precedes the final identity calculation.
+    let requested_mode = if options.mode == cache::AnalysisMode::Incremental {
+        "incremental"
+    } else {
+        "full"
+    };
+    let executed_mode = if cache_stats.hits > 0 {
+        "incremental"
+    } else {
+        "full"
+    };
+    let rebuild_reason = if !cache_stats.fallbacks.is_empty() {
+        Some(cache_stats.fallbacks.join(";"))
+    } else if options.mode == cache::AnalysisMode::Incremental && cache_stats.parsed > 0 {
+        Some("cache_miss".to_string())
+    } else {
+        None
+    };
+    authority["provenance"]["cache"] = serde_json::json!({
+        "requested_mode":requested_mode,"executed_mode":executed_mode,
+        "rebuild_reason":rebuild_reason
+    });
     authority["analysis_graph"]["type_flows"] =
         serde_json::to_value(&manifest.type_flows).expect("serializable type flows");
     report_authority::refresh_identity(&mut authority);

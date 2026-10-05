@@ -713,6 +713,45 @@ pub(crate) fn build(
         item["id"] = json!(hash("unqualified-diagnostic-loss", &item));
         losses.push(item);
     }
+    // A closed private executable with no executable neighbours is a singleton
+    // component. Lexical Contains edges do not connect executable components.
+    // Reuse the source-bound private/consumer-closure proof, preserving DDE as
+    // a distinct relation and retaining its exact original source range.
+    let singleton_findings: Vec<Value> = findings
+        .iter()
+        .filter(|finding| {
+            finding["pattern_id"] == "data_dead_end"
+                && finding["subject"]["construct_kind"] == "function"
+                && matches!(finding["subject"]["language"].as_str(), Some("python" | "rust"))
+        })
+        .filter(|finding| {
+            graph.all_symbols().any(|(id, symbol)| {
+                symbol.qualified_name == finding["subject"]["qualified_name"]
+                    && path_key(root, &symbol.location.file) == finding["subject"]["path_key"]
+                    && [graph.edges_from(id), graph.edges_to(id)]
+                        .into_iter()
+                        .flatten()
+                        .all(|edge| {
+                            !matches!(edge.kind, crate::parser::ir::EdgeKind::Calls | crate::parser::ir::EdgeKind::References)
+                                || graph.get_symbol(edge.target).is_none_or(|target| {
+                                    !matches!(target.kind, SymbolKind::Function | SymbolKind::Method)
+                                })
+                        })
+            })
+        })
+        .map(|finding| {
+            let mut singleton = finding.clone();
+            singleton["pattern_id"] = json!("isolated_cluster");
+            singleton["cause"]["parts"]["unconsumed_relation"] = json!("closed_private_executable_component");
+            singleton["cause"]["parts"]["component_members"] = json!([finding["subject"]["binding_id"]]);
+            singleton["evidence"] = json!([{"kind":"executable_component_closure","consumer_closure":"complete","member_binding_ids":[finding["subject"]["binding_id"]],"external_inbound":0,"internal_executable_edges":0,"lexical_containment_is_consumption":false}]);
+            singleton["semantic_id"] = json!(hash("finding.semantic", &json!({"pattern_id":singleton["pattern_id"],"subject":singleton["subject"],"cause":singleton["cause"]})));
+            singleton["observation_id"] = json!(hash("finding.observation", &json!({"semantic_id":singleton["semantic_id"],"source_observation":finding["observation_id"],"range":singleton["range"],"evidence":singleton["evidence"]})));
+            singleton["suggestion"] = json!("Connect this closed private executable component to its intended consumer or remove it.");
+            singleton
+        })
+        .collect();
+    findings.extend(singleton_findings);
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
     append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);
     crate::analyzer::semantic_policy::append(
