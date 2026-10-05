@@ -22,7 +22,7 @@ fn complete_twenty_file_graph_roundtrips_without_loss_or_catalog_change() {
     let after = report.authority.as_ref().unwrap();
     assert_eq!(
         expand_graph_tables(&after["analysis_graph"]).unwrap(),
-        before["analysis_graph"]
+        expand_graph_tables(&before["analysis_graph"]).unwrap()
     );
     for field in [
         "findings",

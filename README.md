@@ -361,3 +361,5 @@ contains every authoritative pattern/language cell. Compact wire reports retain
 the existing explicit `/authority/pattern_state` reference instead of repeating
 that array; deserializing a Manifest reconstructs its mirror from authority.
 This preserves the existing versioned table encoding and producer ABI v1.
+
+The versioned report representation requires the decoder and explicit authority references; consumers expecting the former raw graph object or duplicated wire arrays must migrate. Producer ABI v1 does not make those wire shapes interchangeable.

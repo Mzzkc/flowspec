@@ -20,13 +20,13 @@ fn report(files: &[(&str, &[u8])]) -> Value {
 fn fault_red_natural_parse_loss_has_ranged_loss_ledger() {
     let value = report(&[("broken.py", b"def broken(\n")]);
     assert!(
-        value["losses"]
+        value["authority"]["losses"]
             .as_array()
             .is_some_and(|losses| losses.iter().any(|loss| {
                 loss["reason"] == "parse_recovery"
-                    && loss["scope"]["paths"]
+                    && loss["scope_paths"]
                         .as_array()
-                        .is_some_and(|paths| paths.iter().any(|p| p == "broken.py"))
+                        .is_some_and(|paths| paths.iter().any(|p| p == "62726f6b656e2e7079"))
             })),
         "real parse recovery must produce an analyzer-origin ranged loss: {value}"
     );
@@ -39,24 +39,25 @@ fn fault_red_local_import_uncertainty_marks_dependent_pattern() {
         ("pkg/use.py", b"from .missing import item\n"),
     ]);
     assert!(
-        value["losses"]
+        value["authority"]["losses"]
             .as_array()
             .is_some_and(|losses| losses.iter().any(|loss| {
                 loss["reason"] == "unresolved_import"
-                    && loss["scope"]["paths"]
+                    && loss["scope_paths"]
                         .as_array()
-                        .is_some_and(|paths| paths.iter().any(|p| p == "pkg/use.py"))
+                        .is_some_and(|paths| paths.iter().any(|p| p == "706b672f7573652e7079"))
             })),
         "a required local import cannot silently become complete: {value}"
     );
     assert!(
-        value["pattern_state"]
+        value["authority"]["pattern_state"]
             .as_array()
-            .is_some_and(|states| states.iter().any(|state| {
-                state["state"] == "incomplete"
-                    && state["reason_codes"]
-                        .as_array()
-                        .is_some_and(|codes| codes.iter().any(|code| code == "unresolved_import"))
+            .is_some_and(|states| states.iter().any(|pattern| {
+                pattern["cells"].as_array().is_some_and(|cells| cells.iter().any(|state| {
+                    state["state"] == "incomplete"
+                        && state["reason_codes"].as_array().is_some_and(|codes|
+                            codes.iter().any(|code| code == "unresolved_import"))
+                }))
             })),
         "dependent pattern must carry the unresolved import reason: {value}"
     );
