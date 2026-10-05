@@ -72,7 +72,15 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         let inbound_count = graph
             .edges_to(id)
             .iter()
-            .filter(|edge| matches!(edge.kind, EdgeKind::Calls | EdgeKind::References))
+            .filter(|edge| {
+                matches!(edge.kind, EdgeKind::Calls | EdgeKind::References)
+                    && edge
+                        .reference_id
+                        .and_then(|id| graph.get_reference(id))
+                        .is_none_or(|reference| {
+                            reference.kind != crate::parser::ir::ReferenceKind::Annotation
+                        })
+            })
             .count();
 
         if inbound_count > 0 {

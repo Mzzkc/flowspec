@@ -17,6 +17,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser};
 
 use super::ir::*;
+use super::report::{observe_tree, ParseOutput};
 use super::LanguageAdapter;
 use crate::error::FlowspecError;
 
@@ -49,6 +50,10 @@ impl LanguageAdapter for PythonAdapter {
     }
 
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError> {
+        Ok(self.parse_output(path, content)?.ir)
+    }
+
+    fn parse_output(&self, path: &Path, content: &str) -> Result<ParseOutput, FlowspecError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -70,7 +75,8 @@ impl LanguageAdapter for PythonAdapter {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let mut result = ParseResult::default();
+        let mut result = ParseOutput::new(path, content, "python", "tree-sitter-python/0.25.0");
+        observe_tree(&mut result.report, tree.root_node(), content.as_bytes());
 
         // Create file-level scope
         let root = tree.root_node();
@@ -112,6 +118,7 @@ impl LanguageAdapter for PythonAdapter {
         // Post-processing: annotate imports inside TYPE_CHECKING blocks
         mark_type_checking_imports(&mut result, content_bytes, path, root);
 
+        result.report.finish();
         Ok(result)
     }
 }
@@ -156,7 +163,7 @@ fn is_python_constant(name: &str) -> bool {
 
 /// Builds a qualified name from scope stack.
 fn build_qualified_name(
-    result: &ParseResult,
+    result: &ParseOutput,
     scope_stack: &[usize],
     file_stem: &str,
     name: &str,
@@ -173,7 +180,7 @@ fn build_qualified_name(
 
 /// Visit top-level children of a node.
 fn visit_children_top(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -193,7 +200,7 @@ fn visit_children_top(
 /// recursing further, preserving partial results for shallower nodes.
 #[allow(clippy::too_many_arguments)]
 fn visit_node(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -226,18 +233,12 @@ fn visit_node(
 
     match node.kind() {
         "match_statement" => {
-            // The adapter visits this actual node but has no pattern/guard CFG
-            // or match-bound-name resolver. Keep the missing prerequisite in IR.
-            result.references.push(Reference {
-                id: ReferenceId::default(),
-                from: SymbolId::default(),
-                to: SymbolId::default(),
-                kind: ReferenceKind::Read,
-                location: node_location(path, node),
-                resolution: ResolutionStatus::Partial(
-                    "prerequisite_loss:unsupported_construct:control_flow".to_string(),
-                ),
-            });
+            result.report.event(
+                node,
+                super::report::ParseEventCode::UnsupportedSyntax,
+                &[super::report::Capability::ControlFlow],
+                "match pattern/guard control flow is not modeled",
+            );
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 visit_node(
@@ -354,7 +355,7 @@ fn visit_node(
 /// Extract a function/method definition.
 #[allow(clippy::too_many_arguments)]
 fn extract_function(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -444,7 +445,7 @@ fn extract_function(
 /// Extract a class definition.
 #[allow(clippy::too_many_arguments)]
 fn extract_class(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -515,7 +516,7 @@ fn extract_class(
 /// as a `"from:<module>"` annotation for cross-file resolution. Aliased imports
 /// additionally store `"original_name:<name>"` so the resolution pass can look up
 /// the original name in the target module.
-fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_import(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -586,7 +587,7 @@ fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: N
 /// module name for cross-file resolution. Aliased imports additionally store
 /// `"original_name:<name>"` so the resolution pass can look up the original
 /// name in the target module.
-fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_import_from(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -763,7 +764,7 @@ fn extract_import_from(result: &mut ParseResult, content: &[u8], path: &Path, no
 
 /// Extract decorated definitions (collects decorators, visits inner def/class).
 fn extract_decorated(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -834,7 +835,7 @@ fn extract_decorated(
 
 /// Extract module-level assignments as variables/constants.
 fn extract_assignment(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &[usize],
     content: &[u8],
     path: &Path,
@@ -894,7 +895,7 @@ fn extract_assignment(
 ///
 /// The `depth` parameter prevents stack overflow on deeply nested ASTs.
 fn extract_type_annotation_refs(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -959,7 +960,7 @@ fn extract_type_annotation_refs(
 ///
 /// These references are consumed by `resolve_through_instance_attr()` in
 /// `populate.rs` to resolve `self.attr.method()` call chains.
-fn extract_instance_attr_types(result: &mut ParseResult, content: &[u8], path: &Path, root: Node) {
+fn extract_instance_attr_types(result: &mut ParseOutput, content: &[u8], path: &Path, root: Node) {
     // Walk looking for class_definition nodes
     let mut class_cursor = root.walk();
     for top_child in root.children(&mut class_cursor) {
@@ -970,7 +971,7 @@ fn extract_instance_attr_types(result: &mut ParseResult, content: &[u8], path: &
 /// Recursive walker that finds `class_definition` nodes and extracts
 /// instance attribute type annotations from their `__init__` methods.
 fn walk_for_classes(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -1030,7 +1031,7 @@ fn walk_for_classes(
 ///
 /// Creates an `instance_attr_type:ClassName.attr=TypeName` reference.
 fn extract_init_attr_types(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     class_name: &str,
@@ -1049,7 +1050,7 @@ fn extract_init_attr_types(
 ///
 /// Handles assignments inside `if`/`else`/`try`/`except` blocks within `__init__`.
 fn walk_init_body_for_attrs(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     class_name: &str,
@@ -1099,7 +1100,7 @@ fn walk_init_body_for_attrs(
 /// Both emit `instance_attr_type:<Class>.<attr>=<TypeName>`. Generic, dotted,
 /// and method-call forms are skipped on both paths.
 fn try_extract_self_attr_type(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     class_name: &str,
@@ -1221,28 +1222,13 @@ fn extract_constructor_type_name(content: &[u8], assignment: Node) -> Option<Str
 /// - `None` → `None` (identifier, won't match any import)
 ///
 /// Creates an `attribute_access:<name>` reference for each extracted type name.
-fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
-    let location = node_location(path, node);
-    if result.references.iter().any(|reference| {
-        reference.kind == ReferenceKind::Annotation
-            && reference.location == location
-            && matches!(&reference.resolution, ResolutionStatus::Partial(info)
-                if info == "prerequisite_loss:capability_unavailable:type_flows")
-    }) {
-        return; // This exact AST node was already visited by the declaration pass.
-    }
-    // The adapter captures the annotation syntax, but does not yet construct
-    // the type-flow evidence required for an authoritative contract judgment.
-    result.references.push(Reference {
-        id: ReferenceId::default(),
-        from: SymbolId::default(),
-        to: SymbolId::default(),
-        kind: ReferenceKind::Annotation,
-        location: node_location(path, node),
-        resolution: ResolutionStatus::Partial(
-            "prerequisite_loss:capability_unavailable:type_flows".to_string(),
-        ),
-    });
+fn emit_type_annotation_ref(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
+    result.report.event(
+        node,
+        super::report::ParseEventCode::CapabilityUnavailable,
+        &[super::report::Capability::Types],
+        "annotation captured; type-flow evidence remains unavailable",
+    );
     if let Some(name) = extract_annotation_root_type(content, node) {
         let kind = ReferenceKind::Annotation;
         let reference = Reference {
@@ -1253,7 +1239,13 @@ fn emit_type_annotation_ref(result: &mut ParseResult, content: &[u8], path: &Pat
             location: node_location(path, node),
             resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
         };
-        result.references.push(reference);
+        if !result.references.iter().any(|existing| {
+            existing.kind == reference.kind
+                && existing.location == reference.location
+                && existing.resolution == reference.resolution
+        }) {
+            result.references.push(reference);
+        }
     }
 }
 
@@ -1312,7 +1304,7 @@ fn extract_annotation_root_type(content: &[u8], node: Node) -> Option<String> {
 ///
 /// Only processes module-level assignments (scope_stack depth <= 1).
 /// Class-level `__all__` attributes are ignored.
-fn extract_dunder_all(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_dunder_all(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     // `node` is an `assignment` or `augmented_assignment` with left = `__all__`
     let right = match node.child_by_field_name("right") {
         Some(n) => n,
@@ -1390,7 +1382,7 @@ fn extract_dunder_all(result: &mut ParseResult, content: &[u8], path: &Path, nod
 /// Also creates `attribute_access:` usage references for:
 /// - `TYPE_CHECKING` itself (so the `from typing import TYPE_CHECKING` isn't phantom)
 /// - Each import inside the TYPE_CHECKING block (so they aren't flagged phantom)
-fn mark_type_checking_imports(result: &mut ParseResult, content: &[u8], path: &Path, root: Node) {
+fn mark_type_checking_imports(result: &mut ParseOutput, content: &[u8], path: &Path, root: Node) {
     // Phase 1: Find all TYPE_CHECKING guard block byte ranges
     let tc_ranges = find_type_checking_ranges(root, content);
 
@@ -1505,7 +1497,7 @@ fn collect_type_checking_ranges(node: Node, content: &[u8], ranges: &mut Vec<(u3
 /// The `depth` parameter prevents stack overflow on deeply nested expressions.
 /// When depth exceeds [`super::MAX_AST_DEPTH`], the subtree is skipped with a warning.
 fn extract_all_calls(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -1562,18 +1554,16 @@ fn extract_all_calls(
                         && !shadowed_by_local_binding(func_node, content, name)
                 })
             {
-                // The actual operation consults a runtime namespace or a
-                // computed callable. This resolver cannot close its consumers.
-                result.references.push(Reference {
-                    id: ReferenceId::default(),
-                    from: SymbolId::default(),
-                    to: SymbolId::default(),
-                    kind: ReferenceKind::Read,
-                    location: node_location(path, node),
-                    resolution: ResolutionStatus::Partial(
-                        "prerequisite_loss:unresolved_reference:consumer_closure".to_string(),
-                    ),
-                });
+                result.report.event(
+                    node,
+                    super::report::ParseEventCode::UnresolvedReference,
+                    &[
+                        super::report::Capability::ValueReferences,
+                        super::report::Capability::ConsumerClosure,
+                        super::report::Capability::Resolution,
+                    ],
+                    "runtime namespace/computed callable consumers cannot be resolved",
+                );
             }
             if let Some(name) = extract_callee_name(content, func_node) {
                 result.references.push(Reference {
@@ -1638,7 +1628,7 @@ fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
 ///
 /// The `depth` parameter prevents stack overflow on deeply nested attribute chains.
 fn extract_attribute_accesses(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -1733,7 +1723,7 @@ fn extract_attribute_accesses(
 /// same-file function bindings; declarations, call targets, and spellings in
 /// strings are never treated as value reads.
 fn extract_argument_value_refs(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,

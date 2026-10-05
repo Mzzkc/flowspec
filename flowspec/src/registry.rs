@@ -113,7 +113,7 @@ diagnostic_catalog!(
         "orphaned_impl",
         orphaned_implementation,
         4,
-        ["symbols", "calls", "resolution"],
+        ["symbols", "calls", "resolution", "types", "implementations"],
         "selected_language"
     ),
     (
@@ -129,7 +129,7 @@ diagnostic_catalog!(
         "contract_mismatch",
         contract_mismatch,
         8,
-        ["symbols", "calls", "control_flow"],
+        ["symbols", "calls", "control_flow", "types"],
         "selected_language"
     ),
     (
@@ -377,6 +377,9 @@ fn python_factory() -> Box<dyn LanguageAdapter> {
 fn js_factory() -> Box<dyn LanguageAdapter> {
     Box::new(crate::parser::javascript::JsAdapter::new())
 }
+fn ts_factory() -> Box<dyn LanguageAdapter> {
+    Box::new(crate::parser::typescript::TsAdapter::new())
+}
 fn rust_factory() -> Box<dyn LanguageAdapter> {
     Box::new(crate::parser::rust::RustAdapter::new())
 }
@@ -388,9 +391,12 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["py".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.python".into(),
-            adapter_version: env!("CARGO_PKG_VERSION").into(),
+            adapter_version: "structured-v1".into(),
             grammar_version: "tree-sitter-python/0.25.0".into(),
-            capabilities: vec!["symbols".into(), "calls".into(), "imports".into()],
+            capabilities: crate::parser::report::implemented_capabilities("python")
+                .iter()
+                .map(|c| c.as_str().into())
+                .collect(),
             limitations: vec![],
             factory: Some(python_factory),
             recovery_id: "flowspec.recovery.python".into(),
@@ -403,9 +409,12 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["js".into(), "jsx".into(), "mjs".into(), "cjs".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.js".into(),
-            adapter_version: env!("CARGO_PKG_VERSION").into(),
+            adapter_version: "structured-v1".into(),
             grammar_version: "tree-sitter-javascript/0.25.0".into(),
-            capabilities: vec!["symbols".into(), "calls".into(), "imports".into()],
+            capabilities: crate::parser::report::implemented_capabilities("javascript")
+                .iter()
+                .map(|c| c.as_str().into())
+                .collect(),
             limitations: vec![],
             factory: Some(js_factory),
             recovery_id: "flowspec.recovery.javascript".into(),
@@ -417,15 +426,15 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             aliases: vec!["ts".into()],
             extensions: vec!["ts".into(), "tsx".into()],
             default_enabled: true,
-            implementation_id: "flowspec.adapter.js".into(),
-            adapter_version: env!("CARGO_PKG_VERSION").into(),
-            grammar_version: "tree-sitter-javascript/0.25.0".into(),
-            capabilities: vec!["symbols".into(), "calls".into(), "imports".into()],
-            limitations: vec![
-                "typescript_preprocessing".into(),
-                "native_typescript_unavailable".into(),
-            ],
-            factory: Some(js_factory),
+            implementation_id: "flowspec.adapter.typescript".into(),
+            adapter_version: "structured-v1".into(),
+            grammar_version: "tree-sitter-typescript/0.23.2+tsx".into(),
+            capabilities: crate::parser::report::implemented_capabilities("typescript")
+                .iter()
+                .map(|c| c.as_str().into())
+                .collect(),
+            limitations: vec!["advanced_type_evaluation_unavailable".into()],
+            factory: Some(ts_factory),
             recovery_id: "flowspec.recovery.typescript".into(),
             recovery: Some(crate::parser::source_has_parse_loss),
             recovery_range: Some(crate::parser::source_parse_loss_range),
@@ -436,9 +445,12 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["rs".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.rust".into(),
-            adapter_version: env!("CARGO_PKG_VERSION").into(),
+            adapter_version: "structured-v1".into(),
             grammar_version: "tree-sitter-rust/0.24.0".into(),
-            capabilities: vec!["symbols".into(), "calls".into(), "imports".into()],
+            capabilities: crate::parser::report::implemented_capabilities("rust")
+                .iter()
+                .map(|c| c.as_str().into())
+                .collect(),
             limitations: vec![],
             factory: Some(rust_factory),
             recovery_id: "flowspec.recovery.rust".into(),

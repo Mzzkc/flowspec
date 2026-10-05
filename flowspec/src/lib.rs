@@ -409,62 +409,27 @@ pub fn analyze_with_registry(
             }
             record.content = Some(content.clone());
             source_bytes += content.len() as u64;
-            let parse_loss = descriptor
-                .recovery
-                .map(|probe| probe(file, &content))
-                .unwrap_or(false);
-            if descriptor.recovery.is_none() {
-                losses.push(report_authority::loss(
-                    "semantic_proof_unavailable",
-                    report_authority::path_key(project_path, file),
-                    None,
-                    "adapter_recovery",
-                ));
-            }
-            // Built-in capability declarations describe implemented evidence,
-            // not a claim of semantic completeness. Opt-in adapters must declare
-            // each missing diagnostic prerequisite explicitly in the report.
-            if !descriptor.default_enabled {
-                for pattern in registry.patterns() {
-                    let missing: Vec<_> = pattern
-                        .required_capabilities
-                        .iter()
-                        .filter(|cap| !descriptor.capabilities.iter().any(|have| have == **cap))
-                        .copied()
-                        .collect();
-                    if !missing.is_empty() {
-                        let mut loss = report_authority::loss(
-                            "semantic_proof_unavailable",
-                            report_authority::path_key(project_path, file),
-                            None,
-                            "adapter_capability",
-                        );
-                        loss["affected_patterns"] = serde_json::json!([pattern.id]);
-                        loss["required_capabilities"] = serde_json::json!(missing);
-                        losses.push(loss);
-                    }
-                }
-            }
-            match adapter.parse_file(file, &content) {
-                Ok(result) => {
-                    populate_graph(&mut graph, &result);
+            match adapter.parse_output(file, &content) {
+                Ok(output) => {
+                    populate_graph(&mut graph, &output.ir);
+                    losses.extend(report_authority::parser_losses(
+                        project_path,
+                        file,
+                        &content,
+                        descriptor,
+                        registry,
+                        &output.report,
+                    ));
+                    let parse_loss = output.report.events.iter().any(|event| {
+                        matches!(
+                            event.code,
+                            parser::report::ParseEventCode::ParserRecovery
+                                | parser::report::ParseEventCode::MissingNode
+                        )
+                    });
                     if parse_loss {
-                        tracing::warn!("Parse recovery in {}", file.display());
                         completeness.reject(file.display().to_string(), "parse_error");
                         record.rejected_reason = Some("parse_error".to_string());
-                        let key = report_authority::path_key(project_path, file);
-                        let range = descriptor
-                            .recovery_range
-                            .and_then(|probe| probe(file, &content))
-                            .map(|(start, end, _, _)| {
-                                report_authority::offset_range(&key, &content, start, end)
-                            });
-                        losses.push(report_authority::loss(
-                            "parse_recovery",
-                            key,
-                            range,
-                            "parse",
-                        ));
                     } else {
                         parsed_file_count += 1;
                         completeness.parsed += 1;
@@ -528,7 +493,17 @@ pub fn analyze_with_registry(
             } else {
                 "Value"
             });
-        loss["affected_patterns"] = if capability == "type_flows" {
+        loss["affected_patterns"] = if reference.kind == parser::ir::ReferenceKind::Annotation {
+            serde_json::json!(registry
+                .patterns()
+                .iter()
+                .filter(|pattern| pattern
+                    .required_capabilities
+                    .iter()
+                    .any(|c| matches!(*c, "types" | "annotations")))
+                .map(|p| p.id)
+                .collect::<Vec<_>>())
+        } else if capability == "type_flows" {
             serde_json::json!(["contract_mismatch", "orphaned_impl"])
         } else {
             serde_json::json!([
@@ -579,12 +554,35 @@ pub fn analyze_with_registry(
                 .find(|input| input.path == symbol.location.file)
                 .and_then(|input| input.content.as_deref())
                 .map(|content| report_authority::location_range(&key, content, &symbol.location));
-            losses.push(report_authority::loss(
-                "unresolved_import",
+            let type_only = symbol
+                .annotations
+                .iter()
+                .any(|a| a == "type_only" || a == "type_checking");
+            let mut debt = report_authority::loss(
+                if type_only {
+                    "unresolved_type"
+                } else {
+                    "unresolved_import"
+                },
                 key,
                 range,
                 "resolve",
-            ));
+            );
+            if type_only {
+                let capabilities = ["types", "imports", "resolution"];
+                debt["origin"] = serde_json::json!("Annotation");
+                debt["required_capabilities"] = serde_json::json!(capabilities);
+                debt["affected_patterns"] = serde_json::json!(registry
+                    .patterns()
+                    .iter()
+                    .filter(|p| p
+                        .required_capabilities
+                        .iter()
+                        .any(|c| capabilities.contains(c)))
+                    .map(|p| p.id)
+                    .collect::<Vec<_>>());
+            }
+            losses.push(debt);
         }
     }
 

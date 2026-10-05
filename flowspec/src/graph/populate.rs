@@ -592,13 +592,22 @@ fn insert_references(
                             | "type"
                             | "complex"
                             | "None"
+                            | "number"
+                            | "string"
+                            | "boolean"
+                            | "void"
+                            | "any"
+                            | "unknown"
+                            | "never"
+                            | "null"
+                            | "undefined"
                     )
                 {
                     // The real annotation lookup has no binding. Preserve its
                     // syntax origin rather than silently dropping the obligation.
                     let mut missing = reference.clone();
                     missing.resolution = ResolutionStatus::Partial(
-                        "prerequisite_loss:unresolved_type:type_resolution".to_string(),
+                        "prerequisite_loss:unresolved_type:types".to_string(),
                     );
                     graph.record_prerequisite_loss(missing);
                 }
@@ -737,7 +746,12 @@ fn resolve_callee(
     let mut candidates: Vec<(usize, SymbolId)> = Vec::new();
     for &(idx, real_id) in symbol_id_map {
         let sym = &symbols[idx];
-        if sym.name == callee_name {
+        if sym.name == callee_name
+            && !sym
+                .annotations
+                .iter()
+                .any(|a| a == "type_only" || a == "type_checking")
+        {
             candidates.push((idx, real_id));
         }
     }
@@ -1466,11 +1480,20 @@ fn resolve_imports_impl(
     }
 
     for (from_id, to_id, location) in new_references {
+        let type_only = graph.get_symbol(from_id).is_some_and(|s| {
+            s.annotations
+                .iter()
+                .any(|a| a == "type_only" || a == "type_checking")
+        });
         graph.add_reference(Reference {
             id: ReferenceId::default(),
             from: from_id,
             to: to_id,
-            kind: ReferenceKind::Import,
+            kind: if type_only {
+                ReferenceKind::Annotation
+            } else {
+                ReferenceKind::Import
+            },
             location,
             resolution: ResolutionStatus::Resolved,
         });
@@ -1496,7 +1519,12 @@ fn resolve_imports_impl(
         if !symbol.annotations.contains(&"import".to_string()) {
             continue;
         }
-        if symbol.resolution != ResolutionStatus::Resolved {
+        if symbol.resolution != ResolutionStatus::Resolved
+            || symbol
+                .annotations
+                .iter()
+                .any(|a| a == "type_only" || a == "type_checking")
+        {
             continue;
         }
         // Find the resolved definition target from import edges

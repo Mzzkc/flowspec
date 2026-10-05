@@ -21,6 +21,7 @@ use std::path::Path;
 use tree_sitter::{Node, Parser};
 
 use super::ir::*;
+use super::report::{observe_tree, ParseOutput};
 use super::LanguageAdapter;
 use crate::error::FlowspecError;
 
@@ -54,6 +55,10 @@ impl LanguageAdapter for RustAdapter {
     }
 
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError> {
+        Ok(self.parse_output(path, content)?.ir)
+    }
+
+    fn parse_output(&self, path: &Path, content: &str) -> Result<ParseOutput, FlowspecError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -75,7 +80,8 @@ impl LanguageAdapter for RustAdapter {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let mut result = ParseResult::default();
+        let mut result = ParseOutput::new(path, content, "rust", "tree-sitter-rust/0.24.0");
+        observe_tree(&mut result.report, tree.root_node(), content.as_bytes());
 
         // Create file-level scope
         let root = tree.root_node();
@@ -107,6 +113,8 @@ impl LanguageAdapter for RustAdapter {
         // so that imports used only in type positions don't appear as phantom dependencies.
         extract_all_type_references(&mut result, content_bytes, path, root, 0);
 
+        extract_function_values(&mut result, content_bytes, path, root);
+        result.report.finish();
         Ok(result)
     }
 }
@@ -133,7 +141,7 @@ fn node_location(path: &Path, node: Node) -> Location {
 
 /// Builds a qualified name from scope stack.
 fn build_qualified_name(
-    result: &ParseResult,
+    result: &ParseOutput,
     scope_stack: &[usize],
     file_stem: &str,
     name: &str,
@@ -222,7 +230,7 @@ fn extract_signature(content: &[u8], node: Node) -> Option<String> {
 /// Visit all children of a node and extract IR.
 #[allow(clippy::too_many_arguments)]
 fn visit_children(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -258,7 +266,7 @@ fn visit_children(
 /// Visit a single AST node and extract IR.
 #[allow(clippy::too_many_arguments)]
 fn visit_node(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -344,7 +352,7 @@ fn visit_node(
 /// Extract a function/method definition.
 #[allow(clippy::too_many_arguments)]
 fn extract_function(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -427,7 +435,7 @@ fn extract_function(
 
 /// Extract a struct, enum, or trait definition.
 fn extract_type_definition(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &[usize],
     content: &[u8],
     path: &Path,
@@ -459,7 +467,7 @@ fn extract_type_definition(
 
 /// Extract an impl block — methods inside become `SymbolKind::Method`.
 fn extract_impl_block(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -500,7 +508,7 @@ fn extract_impl_block(
 
 /// Extract a const or static definition.
 fn extract_constant(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &[usize],
     content: &[u8],
     path: &Path,
@@ -531,7 +539,7 @@ fn extract_constant(
 
 /// Extract a `mod` item (inline module).
 fn extract_mod_item(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -581,7 +589,7 @@ fn extract_mod_item(
 /// - `use X as Y;` → import "Y" (aliased)
 /// - `use crate::prelude::*;` → star import
 /// - `use std::io::{self, Read};` → imports "io", "Read"
-fn extract_use_declaration(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_use_declaration(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     let visibility = extract_visibility(content, node);
 
     // Walk all descendant nodes to find import targets
@@ -594,7 +602,7 @@ fn extract_use_declaration(result: &mut ParseResult, content: &[u8], path: &Path
 /// into scoped use lists. For `use crate::parser::{rust, python}`, the
 /// recursive call for the `use_list` receives `Some("crate::parser")`.
 fn extract_use_tree(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -873,7 +881,7 @@ fn extract_module_path(content: &[u8], node: Node) -> Option<String> {
 /// its definition file via the module map. Matches the pattern used by
 /// the Python and JavaScript adapters.
 fn add_import_symbol(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     name: &str,
     visibility: Visibility,
     path: &Path,
@@ -922,7 +930,7 @@ fn add_import_symbol(
 /// extracts the callee name and creates a `ReferenceKind::Call` reference.
 /// Protected by depth limit to prevent stack overflow on deeply nested expressions.
 fn extract_all_calls(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -949,7 +957,7 @@ fn extract_all_calls(
 }
 
 /// Extract a single call expression.
-fn extract_call(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_call(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     let callee_name = if let Some(func_node) = node.child_by_field_name("function") {
         match func_node.kind() {
             "identifier" => Some(node_text(content, func_node).to_string()),
@@ -1031,7 +1039,7 @@ const RUST_PRIMITIVES: &[&str] = &[
 /// generic parameters, where clauses, match patterns with enum variants, and
 /// impl trait names to create graph edges — preventing phantom_dependency FPs.
 fn extract_all_type_references(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -1052,7 +1060,7 @@ fn extract_all_type_references(
                     id: ReferenceId::default(),
                     from: SymbolId::default(),
                     to: SymbolId::default(),
-                    kind: ReferenceKind::Read,
+                    kind: ReferenceKind::Annotation,
                     location: node_location(path, node),
                     resolution: ResolutionStatus::Partial(format!("attribute_access:{}", name)),
                 });
@@ -1066,7 +1074,7 @@ fn extract_all_type_references(
                     id: ReferenceId::default(),
                     from: SymbolId::default(),
                     to: SymbolId::default(),
-                    kind: ReferenceKind::Read,
+                    kind: ReferenceKind::Annotation,
                     location: node_location(path, node),
                     resolution: ResolutionStatus::Partial(format!("attribute_access:{}", prefix)),
                 });
@@ -1112,6 +1120,42 @@ fn extract_all_type_references(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         extract_all_type_references(result, content, path, child, depth + 1);
+    }
+}
+
+/// Non-call uses of a function binding are runtime consumers.
+fn extract_function_values(result: &mut ParseOutput, content: &[u8], path: &Path, root: Node) {
+    let mut pending = vec![(root, 0)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > super::MAX_AST_DEPTH {
+            super::record_depth_loss(result, path, node);
+            continue;
+        }
+        if node.kind() == "identifier" {
+            let name = node_text(content, node);
+            let definition = node.parent().is_some_and(|p| {
+                p.child_by_field_name("name") == Some(node)
+                    || p.child_by_field_name("pattern") == Some(node)
+                    || p.child_by_field_name("function") == Some(node)
+            });
+            if !definition
+                && result
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == name && s.kind == SymbolKind::Function)
+            {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("value_use:{name}")),
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor).map(|n| (n, depth + 1)));
     }
 }
 
