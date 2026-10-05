@@ -45,7 +45,7 @@ impl LanguageAdapter for PythonAdapter {
     }
 
     fn can_handle(&self, path: &Path) -> bool {
-        path.extension().map(|e| e == "py").unwrap_or(false)
+        crate::registry::language_id_for_path(path) == Some("python")
     }
 
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError> {

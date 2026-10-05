@@ -161,21 +161,11 @@ impl Confidence {
 impl DiagnosticPattern {
     /// Returns the snake_case name of this pattern (for --checks filtering).
     pub fn name(&self) -> &'static str {
-        match self {
-            Self::IsolatedCluster => "isolated_cluster",
-            Self::DataDeadEnd => "data_dead_end",
-            Self::PartialWiring => "partial_wiring",
-            Self::OrphanedImplementation => "orphaned_impl",
-            Self::Duplication => "duplication",
-            Self::ContractMismatch => "contract_mismatch",
-            Self::CircularDependency => "circular_dependency",
-            Self::LayerViolation => "layer_violation",
-            Self::IncompleteMigration => "incomplete_migration",
-            Self::AsymmetricHandling => "asymmetric_handling",
-            Self::StaleReference => "stale_reference",
-            Self::PhantomDependency => "phantom_dependency",
-            Self::MissingReexport => "missing_reexport",
-        }
+        crate::registry::pattern_descriptors()
+            .iter()
+            .find(|d| d.pattern == *self)
+            .expect("canonical diagnostic")
+            .id
     }
 }
 

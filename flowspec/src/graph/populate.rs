@@ -940,23 +940,40 @@ fn resolve_js_relative_import(
     // Normalize the path (resolve ../ components)
     let normalized = normalize_path(&resolved);
 
-    // Try to find in module map by checking each entry's absolute path
-    // The module map values are absolute paths; we compare against our resolved path
-    for file_path in module_map.values() {
-        let file_without_ext = file_path.with_extension("");
-        if file_without_ext == normalized {
-            return Some(file_path.clone());
-        }
-        // Also check index file: ./utils → utils/index.js
-        if let Some(file_stem) = file_path.file_stem().and_then(|s| s.to_str()) {
-            if file_stem == "index" {
-                if let Some(parent) = file_path.parent() {
-                    if parent == normalized {
-                        return Some(file_path.clone());
-                    }
-                }
-            }
-        }
+    let mut paths: Vec<_> = module_map
+        .values()
+        .filter(|path| {
+            matches!(
+                crate::registry::language_id_for_path(path),
+                Some("javascript" | "typescript")
+            )
+        })
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+    if normalized.extension().is_some() {
+        return paths.into_iter().find(|path| path == &normalized);
+    }
+    let exact: Vec<_> = paths
+        .iter()
+        .filter(|path| path.with_extension("") == normalized)
+        .collect();
+    if exact.len() == 1 {
+        return Some(exact[0].clone());
+    }
+    if exact.len() > 1 {
+        return None;
+    } // ambiguous binding remains unresolved
+    let indexes: Vec<_> = paths
+        .iter()
+        .filter(|path| {
+            path.file_stem().is_some_and(|stem| stem == "index")
+                && path.parent() == Some(normalized.as_path())
+        })
+        .collect();
+    if indexes.len() == 1 {
+        return Some(indexes[0].clone());
     }
 
     None
@@ -1153,9 +1170,22 @@ pub fn resolve_cross_file_imports(
     graph: &mut Graph,
     module_map: &std::collections::HashMap<String, std::path::PathBuf>,
 ) {
+    resolve_imports_impl(graph, module_map, None);
+}
+
+/// Resolve imports using language/package-qualified source identities.
+pub fn resolve_qualified_imports(graph: &mut Graph, index: &super::ModuleIndex) {
+    resolve_imports_impl(graph, &std::collections::HashMap::new(), Some(index));
+}
+
+fn resolve_imports_impl(
+    graph: &mut Graph,
+    module_map: &std::collections::HashMap<String, std::path::PathBuf>,
+    index: Option<&super::ModuleIndex>,
+) {
     use std::collections::HashMap;
 
-    if module_map.is_empty() {
+    if module_map.is_empty() && index.is_none() {
         return;
     }
 
@@ -1221,12 +1251,18 @@ pub fn resolve_cross_file_imports(
     let mut resolution_updates: Vec<(SymbolId, ResolutionStatus)> = Vec::new();
 
     for (import_id, module_name, lookup_name, importing_file) in &imports_to_resolve {
+        let binding_view = index.map(|index| index.binding_view(importing_file));
+        let module_map = binding_view.as_ref().unwrap_or(module_map);
+        let language = crate::registry::language_id_for_path(importing_file);
         // Route to language-specific resolution based on module path format
-        let target_file = if module_name.starts_with("./") || module_name.starts_with("../") {
+        let target_file = if matches!(language, Some("javascript" | "typescript"))
+            && (module_name.starts_with("./") || module_name.starts_with("../"))
+        {
             resolve_js_relative_import(module_name, importing_file, module_map)
-        } else if module_name.starts_with("crate::")
-            || module_name.starts_with("super::")
-            || module_name.starts_with("self::")
+        } else if language == Some("rust")
+            && (module_name.starts_with("crate::")
+                || module_name.starts_with("super::")
+                || module_name.starts_with("self::"))
         {
             resolve_rust_module_path(module_name, importing_file, module_map)
         } else if module_name.starts_with('.')

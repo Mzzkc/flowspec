@@ -188,6 +188,8 @@ flowspec diff baseline.yaml current.yaml || echo "Regressions detected"
 
 ## Diagnostic Patterns
 
+The language and diagnostic catalog is available through `flowspec registry`; see [registration and metadata](docs/registry.md).
+
 Flowspec detects 13 structural patterns:
 
 | Pattern | Severity | Description |
@@ -209,7 +211,7 @@ Flowspec detects 13 structural patterns:
 ## Language Support
 
 - **Python** — full cross-file resolution including relative imports (`from .sibling import foo`), type annotation recognition (`def foo(x: Optional[str])` counts `Optional` as used), `__all__` re-export awareness, and `TYPE_CHECKING` block handling
-- **JavaScript/TypeScript** — ESM and CommonJS cross-file resolution. TypeScript files (`.ts`, `.tsx`, `.mts`, `.cts`) are preprocessed to strip type annotations before analysis — interfaces, enums, and type aliases are pre-extracted as entities
+- **JavaScript/TypeScript** — ESM and CommonJS cross-file resolution. TypeScript files (`.ts`, `.tsx`) are preprocessed to strip type annotations before analysis — interfaces, enums, and type aliases are pre-extracted as entities
 - **Rust** — full cross-file resolution including `use` qualified paths
 
 ## Known Limitations

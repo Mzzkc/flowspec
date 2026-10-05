@@ -34,6 +34,8 @@ pub mod graph;
 pub mod manifest;
 /// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
+/// Validated language and diagnostic registration.
+pub mod registry;
 mod report_authority;
 
 #[cfg(feature = "fault_probe")]
@@ -147,12 +149,7 @@ use analyzer::extraction::{
     extract_visibility, infer_module_role,
 };
 use graph::populate_graph;
-use graph::resolve_cross_file_imports;
 use parser::ir::SymbolKind;
-use parser::javascript::JsAdapter;
-use parser::python::PythonAdapter;
-use parser::rust::RustAdapter;
-use parser::LanguageAdapter;
 
 /// Supported output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,26 +163,6 @@ pub enum OutputFormat {
     /// Human-readable summary — compact plain-text output (~2K tokens).
     Summary,
 }
-
-/// Supported v1 languages.
-const SUPPORTED_LANGUAGES: &[&str] = &["python", "javascript", "typescript", "rust"];
-
-/// Valid diagnostic pattern names.
-const VALID_PATTERNS: &[&str] = &[
-    "isolated_cluster",
-    "data_dead_end",
-    "phantom_dependency",
-    "orphaned_impl",
-    "circular_dependency",
-    "missing_reexport",
-    "contract_mismatch",
-    "stale_reference",
-    "layer_violation",
-    "duplication",
-    "partial_wiring",
-    "asymmetric_handling",
-    "incomplete_migration",
-];
 
 /// Result of running [`analyze()`] on a project.
 ///
@@ -260,7 +237,7 @@ pub fn report_exit_code(manifest: &AnalysisReport, _gate_override: Option<Severi
 /// 1. **Discover** source files, skipping generated directories
 ///    (`target/`, `node_modules/`, `__pycache__/`, etc.), config `exclude`
 ///    patterns, and `.gitignore`-matched paths.
-/// 2. **Parse** each file with the appropriate [`LanguageAdapter`] (Python, JS,
+/// 2. **Parse** each file with the appropriate [`parser::LanguageAdapter`] (Python, JS,
 ///    Rust) via tree-sitter, producing IR and populating the [`Graph`].
 /// 3. **Resolve** cross-file imports by building a module map and linking
 ///    import symbols to definitions in other files.
@@ -272,14 +249,23 @@ pub fn analyze(
     config: &Config,
     languages: &[String],
 ) -> Result<AnalysisResult, FlowspecError> {
-    analyze_core(project_path, config, languages)
+    analyze_with_registry(
+        project_path,
+        config,
+        languages,
+        &registry::Registry::default(),
+    )
 }
 
-fn analyze_core(
+/// Analyze through the same production pipeline with an isolated registry.
+/// Custom adapters are selected explicitly and never become a fifth default.
+pub fn analyze_with_registry(
     project_path: &Path,
     config: &Config,
     languages: &[String],
+    registry: &registry::Registry,
 ) -> Result<AnalysisResult, FlowspecError> {
+    registry.validate()?;
     // Validate path
     if project_path.as_os_str().is_empty() {
         return Err(FlowspecError::EmptyPath);
@@ -290,30 +276,32 @@ fn analyze_core(
         });
     }
 
-    // Validate requested languages
-    for lang in languages {
-        if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
-            return Err(FlowspecError::UnsupportedLanguage {
-                language: lang.clone(),
-            });
-        }
-    }
-
-    // Discover source files (respects .gitignore, config exclude, hardcoded skip_dirs)
+    // Explicit and config IDs are validated before discovery, including aliases.
+    let canonicalize = |ids: &[String]| -> Result<Vec<String>, FlowspecError> {
+        ids.iter()
+            .map(|id| {
+                registry.language(id).map(|d| d.id.clone()).ok_or_else(|| {
+                    FlowspecError::UnsupportedLanguage {
+                        language: id.clone(),
+                    }
+                })
+            })
+            .collect()
+    };
+    let requested = canonicalize(languages)?;
+    let configured = canonicalize(&config.languages)?;
     let (mut files, detected_langs, mut input_records, mut losses) =
-        discover_source_files(project_path, &config.exclude);
-
-    // Language priority: CLI flags > config languages > auto-detect
-    let active_languages = if !languages.is_empty() {
-        languages.to_vec()
-    } else if !config.languages.is_empty() {
-        config.languages.clone()
+        discover_source_files_with_registry(project_path, &config.exclude, registry);
+    let active_languages = if !requested.is_empty() {
+        requested
+    } else if !configured.is_empty() {
+        configured
     } else {
         detected_langs
     };
     // Discovery inventories every candidate, but only languages in the
     // effective scope may enter selected/read/parsed analysis.
-    if !active_languages.is_empty() {
+    {
         for record in &mut input_records {
             if record.disposition == "selected"
                 && record
@@ -339,27 +327,12 @@ fn analyze_core(
         .unwrap_or_else(|| "unknown".to_string());
 
     // Stage 1: Parse source files and populate the analysis graph
-    let all_adapters: Vec<Box<dyn LanguageAdapter>> = vec![
-        Box::new(PythonAdapter::new()),
-        Box::new(JsAdapter::new()),
-        Box::new(RustAdapter::new()),
-    ];
-
-    // Filter adapters when languages are specified (CLI flags or config).
-    // "typescript" maps to the JS adapter (language_name: "javascript").
-    let adapters: Vec<&Box<dyn LanguageAdapter>> = if active_languages.is_empty() {
-        all_adapters.iter().collect()
-    } else {
-        let requested: HashSet<&str> = active_languages.iter().map(|s| s.as_str()).collect();
-        all_adapters
-            .iter()
-            .filter(|a| {
-                let name = a.language_name();
-                requested.contains(name)
-                    || (name == "javascript" && requested.contains("typescript"))
-            })
-            .collect()
-    };
+    let adapters: Vec<_> = registry
+        .languages()
+        .iter()
+        .filter(|d| active_languages.contains(&d.id))
+        .map(|d| (d, (d.factory.expect("validated adapter factory"))()))
+        .collect();
 
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
@@ -367,7 +340,11 @@ fn analyze_core(
     let mut completeness = Completeness::default();
 
     for file in &files {
-        if let Some(adapter) = adapters.iter().find(|a| a.can_handle(file)) {
+        if let Some((descriptor, adapter)) = adapters.iter().find(|(d, _)| {
+            registry
+                .language_for_path(file)
+                .is_some_and(|selected| selected.id == d.id)
+        }) {
             let record = input_records
                 .iter_mut()
                 .find(|record| record.path == *file)
@@ -427,7 +404,42 @@ fn analyze_core(
             }
             record.content = Some(content.clone());
             source_bytes += content.len() as u64;
-            let parse_loss = parser::source_has_parse_loss(file, &content);
+            let parse_loss = descriptor
+                .recovery
+                .map(|probe| probe(file, &content))
+                .unwrap_or(false);
+            if descriptor.recovery.is_none() {
+                losses.push(report_authority::loss(
+                    "semantic_proof_unavailable",
+                    report_authority::path_key(project_path, file),
+                    None,
+                    "adapter_recovery",
+                ));
+            }
+            // Built-in capability declarations describe implemented evidence,
+            // not a claim of semantic completeness. Opt-in adapters must declare
+            // each missing diagnostic prerequisite explicitly in the report.
+            if !descriptor.default_enabled {
+                for pattern in registry.patterns() {
+                    let missing: Vec<_> = pattern
+                        .required_capabilities
+                        .iter()
+                        .filter(|cap| !descriptor.capabilities.iter().any(|have| have == **cap))
+                        .copied()
+                        .collect();
+                    if !missing.is_empty() {
+                        let mut loss = report_authority::loss(
+                            "semantic_proof_unavailable",
+                            report_authority::path_key(project_path, file),
+                            None,
+                            "adapter_capability",
+                        );
+                        loss["affected_patterns"] = serde_json::json!([pattern.id]);
+                        loss["required_capabilities"] = serde_json::json!(missing);
+                        losses.push(loss);
+                    }
+                }
+            }
             match adapter.parse_file(file, &content) {
                 Ok(result) => {
                     populate_graph(&mut graph, &result);
@@ -436,11 +448,12 @@ fn analyze_core(
                         completeness.reject(file.display().to_string(), "parse_error");
                         record.rejected_reason = Some("parse_error".to_string());
                         let key = report_authority::path_key(project_path, file);
-                        let range = parser::source_parse_loss_range(file, &content).map(
-                            |(start, end, _, _)| {
+                        let range = descriptor
+                            .recovery_range
+                            .and_then(|probe| probe(file, &content))
+                            .map(|(start, end, _, _)| {
                                 report_authority::offset_range(&key, &content, start, end)
-                            },
-                        );
+                            });
                         losses.push(report_authority::loss(
                             "parse_recovery",
                             key,
@@ -475,10 +488,8 @@ fn analyze_core(
     // After all files are parsed, resolve import symbols that reference definitions
     // in other files. This creates real edges with actual SymbolIds instead of
     // SymbolId::default() placeholders.
-    let module_map = build_module_map(&files);
-    if !module_map.is_empty() {
-        resolve_cross_file_imports(&mut graph, &module_map);
-    }
+    let module_index = graph::ModuleIndex::new(project_path, &files, registry);
+    graph::resolve_qualified_imports(&mut graph, &module_index);
     for reference in graph.prerequisite_losses() {
         let parser::ir::ResolutionStatus::Partial(info) = &reference.resolution else {
             continue;
@@ -584,7 +595,12 @@ fn analyze_core(
     }
 
     // Stage 2: Run diagnostic patterns on the populated graph
-    let raw_diagnostics = run_all_patterns(&graph, project_path);
+    let raw_diagnostics = analyzer::patterns::run_patterns_with_registry(
+        &graph,
+        &PatternFilter::default(),
+        project_path,
+        registry,
+    );
     let diagnostics = to_manifest_entries(&raw_diagnostics);
 
     // Stage 3: Build entity list from graph symbols
@@ -938,6 +954,7 @@ fn analyze_core(
         &manifest.diagnostics,
         &graph,
         losses,
+        registry,
     );
     let mut manifest = manifest.with_report(completeness);
     manifest.execution = Some(if authority["execution"] == "incomplete" {
@@ -1108,7 +1125,7 @@ pub fn diagnose(
     // Validate check patterns if provided
     if let Some(checks) = checks_filter {
         for pattern in checks {
-            if !pattern.is_empty() && !VALID_PATTERNS.contains(&pattern.as_str()) {
+            if !pattern.is_empty() && !registry::PATTERN_IDS.contains(&pattern.as_str()) {
                 return Err(FlowspecError::UnknownPattern {
                     pattern: pattern.clone(),
                 });
@@ -1166,9 +1183,10 @@ fn file_identity(meta: &std::fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64
 /// 1. **Hardcoded skip_dirs** — safety net for generated/tool directories
 /// 2. **Config exclude patterns** — user-specified in `.flowspec/config.yaml`
 /// 3. **`.gitignore`** — automatically respected via the `ignore` crate
-fn discover_source_files(
+fn discover_source_files_with_registry(
     project_path: &Path,
     exclude_patterns: &[String],
+    registry: &registry::Registry,
 ) -> (
     Vec<PathBuf>,
     Vec<String>,
@@ -1281,58 +1299,27 @@ fn discover_source_files(
             let mut record = report_authority::InputRecord::new(
                 path.to_path_buf(),
                 "policy_excluded",
-                report_authority::language_for(path),
+                registry.language_for_path(path).map(|d| d.id.clone()),
             );
             record.reason = Some("config_exclude".to_string());
             records.push(record);
             continue;
         }
 
-        // Filter by supported source file extensions
-        if let Some(ext) = path.extension() {
-            match ext.to_str() {
-                Some("py") => {
-                    files.push(path.to_path_buf());
-                    records.push(report_authority::InputRecord::new(
-                        path.to_path_buf(),
-                        "selected",
-                        Some("python".to_string()),
-                    ));
-                    languages.insert("python".to_string());
-                }
-                Some("js" | "jsx" | "mjs" | "cjs") => {
-                    files.push(path.to_path_buf());
-                    records.push(report_authority::InputRecord::new(
-                        path.to_path_buf(),
-                        "selected",
-                        Some("javascript".to_string()),
-                    ));
-                    languages.insert("javascript".to_string());
-                }
-                Some("ts" | "tsx") => {
-                    files.push(path.to_path_buf());
-                    records.push(report_authority::InputRecord::new(
-                        path.to_path_buf(),
-                        "selected",
-                        Some("typescript".to_string()),
-                    ));
-                    languages.insert("typescript".to_string());
-                }
-                Some("rs") => {
-                    files.push(path.to_path_buf());
-                    records.push(report_authority::InputRecord::new(
-                        path.to_path_buf(),
-                        "selected",
-                        Some("rust".to_string()),
-                    ));
-                    languages.insert("rust".to_string());
-                }
-                _ => records.push(report_authority::InputRecord::new(
-                    path.to_path_buf(),
-                    "unsupported",
-                    None,
-                )),
+        if let Some(descriptor) = registry.language_for_path(path) {
+            if descriptor.default_enabled
+                || registry
+                    .language(&descriptor.id)
+                    .is_some_and(|d| d.default_enabled)
+            {
+                languages.insert(descriptor.id.clone());
             }
+            files.push(path.to_path_buf());
+            records.push(report_authority::InputRecord::new(
+                path.to_path_buf(),
+                "selected",
+                Some(descriptor.id.clone()),
+            ));
         } else {
             records.push(report_authority::InputRecord::new(
                 path.to_path_buf(),
@@ -1342,7 +1329,12 @@ fn discover_source_files(
         }
     }
 
-    let detected: Vec<String> = languages.into_iter().collect();
+    let detected: Vec<String> = registry
+        .languages()
+        .iter()
+        .filter(|d| languages.contains(&d.id))
+        .map(|d| d.id.clone())
+        .collect();
     (files, detected, records, losses)
 }
 
@@ -1365,7 +1357,6 @@ fn format_symbol_kind(kind: SymbolKind) -> String {
 }
 
 /// JS/TS file extensions recognized for module mapping.
-const JS_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "cjs", "ts", "tsx"];
 
 /// Builds a mapping from module names to file paths for both Python and JS/TS.
 ///
@@ -1384,6 +1375,7 @@ const JS_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "cjs", "ts", "tsx"];
 /// uses the `"from:<module>"` annotation to determine the key format.
 pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
+    let mut ambiguous = HashSet::new();
 
     // Phase 1: Python files (dotted module names)
     let py_files: Vec<&PathBuf> = files
@@ -1397,7 +1389,9 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
             let rel = file.strip_prefix(&common_prefix).unwrap_or(file);
             let module_name = path_to_module_name(rel);
             if !module_name.is_empty() {
-                map.insert(module_name, (*file).clone());
+                if map.insert(module_name.clone(), (*file).clone()).is_some() {
+                    ambiguous.insert(module_name);
+                }
             }
         }
     }
@@ -1408,7 +1402,12 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
         .filter(|f| {
             f.extension()
                 .and_then(|e| e.to_str())
-                .map(|e| JS_EXTENSIONS.contains(&e))
+                .map(|_| {
+                    matches!(
+                        registry::language_id_for_path(f),
+                        Some("javascript" | "typescript")
+                    )
+                })
                 .unwrap_or(false)
         })
         .collect();
@@ -1419,7 +1418,9 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
             let rel = file.strip_prefix(&js_prefix).unwrap_or(file);
             let key = js_path_to_module_key(rel);
             if !key.is_empty() {
-                map.insert(key, (*file).clone());
+                if map.insert(key.clone(), (*file).clone()).is_some() {
+                    ambiguous.insert(key);
+                }
             }
         }
     }
@@ -1439,7 +1440,9 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
                 if let Ok(rel) = file.strip_prefix(&common) {
                     let key = rust_path_to_module_key(rel);
                     if !key.is_empty() {
-                        map.insert(key, (*file).clone());
+                        if map.insert(key.clone(), (*file).clone()).is_some() {
+                            ambiguous.insert(key);
+                        }
                     }
                 }
             }
@@ -1449,7 +1452,9 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
                     if let Ok(rel) = file.strip_prefix(root_dir) {
                         let key = rust_path_to_module_key(rel);
                         if !key.is_empty() {
-                            map.insert(key, (*file).clone());
+                            if map.insert(key.clone(), (*file).clone()).is_some() {
+                                ambiguous.insert(key);
+                            }
                         }
                     }
                 }
@@ -1457,6 +1462,13 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
         }
     }
 
+    if !ambiguous.is_empty() {
+        for file in files {
+            let language = registry::language_id_for_path(file).unwrap_or("unknown");
+            map.insert(format!("{language}:{}", file.display()), file.clone());
+        }
+    }
+    map.retain(|key, _| !ambiguous.contains(key));
     map
 }
 
@@ -1659,4 +1671,18 @@ fn components_to_module(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join(".")
+}
+
+#[cfg(feature = "fault_probe")]
+fn analyze_core(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+) -> Result<AnalysisResult, FlowspecError> {
+    analyze_with_registry(
+        project_path,
+        config,
+        languages,
+        &registry::Registry::default(),
+    )
 }

@@ -264,7 +264,53 @@ impl Default for SarifFormatter {
 impl OutputFormatter for SarifFormatter {
     fn format_manifest(&self, manifest: &Manifest) -> Result<String, ManifestError> {
         let sarif = build_sarif_log(&manifest.diagnostics);
-        serde_json::to_string_pretty(&sarif).map_err(|e| ManifestError::Serialization {
+        let mut value = serde_json::to_value(sarif).map_err(|e| ManifestError::Serialization {
+            reason: e.to_string(),
+        })?;
+        if let Some(authority) = manifest.authority.as_ref() {
+            let rules: Vec<_> = authority["scope"]["pattern_ids"]
+                .as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
+                .map(|id| serde_json::json!({"id":id,"shortDescription":{"text":id.replace('_', " ")}}))
+                .collect();
+            value["runs"][0]["tool"]["driver"]["rules"] = serde_json::json!(rules);
+            value["runs"][0]["invocations"] = serde_json::json!([{"executionSuccessful":authority["execution"]=="complete",
+                "toolExecutionNotifications":authority["losses"].as_array().into_iter().flatten().map(|l|serde_json::json!({"level":"warning","message":{"text":l["reason"]}})).collect::<Vec<_>>()}]);
+            // Display filtering cannot remove independently valid findings.
+            // Preserve legacy rows, attach stable identity when matched, and
+            // append any authoritative finding omitted by the display list.
+            for finding in authority["findings"]["all"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let matching = manifest.diagnostics.iter().position(|d| {
+                    finding["pattern_id"] == d.pattern
+                        && finding["subject"]["qualified_name"] == d.entity
+                });
+                let fingerprints =
+                    serde_json::json!({"flowspec.semantic_id":finding["semantic_id"]});
+                if let Some(index) = matching {
+                    value["runs"][0]["results"][index]["partialFingerprints"] = fingerprints;
+                } else {
+                    let path_key = finding["range"]["path_key"].as_str().unwrap_or("");
+                    let uri = path_key_uri(path_key);
+                    let row = serde_json::json!({"ruleId":finding["pattern_id"],
+                        "level":severity_to_level(finding["severity"].as_str().unwrap_or("warning")),
+                        "message":{"text":format!("{}: {}",finding["pattern_id"].as_str().unwrap_or("finding"),finding["subject"]["qualified_name"].as_str().unwrap_or("unknown"))},
+                        "partialFingerprints":fingerprints,
+                        "locations":[{"physicalLocation":{"artifactLocation":{"uri":uri},"region":{
+                        "startLine":finding["range"]["start_line"],"startColumn":finding["range"]["start_column"],
+                        "endLine":finding["range"]["end_line"],"endColumn":finding["range"]["end_column"]}}}],
+                        "properties":{"flowspec":finding}});
+                    value["runs"][0]["results"]
+                        .as_array_mut()
+                        .expect("SARIF results")
+                        .push(row);
+                }
+            }
+            value["runs"][0]["properties"] = serde_json::json!({"flowspec":authority});
+        }
+        serde_json::to_string_pretty(&value).map_err(|e| ManifestError::Serialization {
             reason: e.to_string(),
         })
     }
@@ -561,4 +607,24 @@ mod tests {
             .unwrap();
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
+}
+
+// Report path keys are exact Unix filename bytes encoded as hexadecimal.
+// URI percent encoding retains non-UTF8 paths without lossy replacement.
+fn path_key_uri(key: &str) -> String {
+    let mut uri = String::new();
+    for pair in key.as_bytes().chunks_exact(2) {
+        let Some(byte) = std::str::from_utf8(pair)
+            .ok()
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        else {
+            continue;
+        };
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(byte as char)
+        } else {
+            uri.push_str(&format!("%{byte:02X}"))
+        }
+    }
+    uri
 }

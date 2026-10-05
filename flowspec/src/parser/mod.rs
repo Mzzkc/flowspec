@@ -52,20 +52,8 @@ pub(crate) fn has_parse_loss(root: tree_sitter::Node<'_>) -> bool {
 /// Check recovery in the grammar consumed by the current adapter.
 /// This preserves the adapter IR API while report construction records loss.
 pub(crate) fn source_has_parse_loss(path: &Path, content: &str) -> bool {
-    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+    let Some((language, source)) = registry_grammar_source(path, content) else {
         return true;
-    };
-    let (language, source) = match extension {
-        "py" => (tree_sitter_python::LANGUAGE.into(), content.to_string()),
-        "rs" => (tree_sitter_rust::LANGUAGE.into(), content.to_string()),
-        "ts" | "tsx" => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            javascript::preprocess_typescript(content),
-        ),
-        "js" | "jsx" | "mjs" | "cjs" => {
-            (tree_sitter_javascript::LANGUAGE.into(), content.to_string())
-        }
-        _ => return true,
     };
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&language).is_err() {
@@ -79,19 +67,7 @@ pub(crate) fn source_has_parse_loss(path: &Path, content: &str) -> bool {
 
 /// First concrete tree-sitter recovery site in the bytes consumed by an adapter.
 pub(crate) fn source_parse_loss_range(path: &Path, content: &str) -> Option<(u64, u64, u64, u64)> {
-    let extension = path.extension()?.to_str()?;
-    let (language, source) = match extension {
-        "py" => (tree_sitter_python::LANGUAGE.into(), content.to_string()),
-        "rs" => (tree_sitter_rust::LANGUAGE.into(), content.to_string()),
-        "ts" | "tsx" => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            javascript::preprocess_typescript(content),
-        ),
-        "js" | "jsx" | "mjs" | "cjs" => {
-            (tree_sitter_javascript::LANGUAGE.into(), content.to_string())
-        }
-        _ => return None,
-    };
+    let (language, source) = registry_grammar_source(path, content)?;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).ok()?;
     let tree = parser.parse(&source, None)?;
@@ -159,4 +135,25 @@ pub trait LanguageAdapter: Send + Sync {
     /// The `content` parameter is the file's text. The adapter creates a
     /// tree-sitter parser internally (parsers are not `Send`).
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError>;
+}
+
+fn registry_grammar_source(path: &Path, content: &str) -> Option<(tree_sitter::Language, String)> {
+    let registry = crate::registry::Registry::default();
+    let descriptor = registry.language_for_path(path)?;
+    let language = match descriptor.grammar_version.as_str() {
+        "tree-sitter-python/0.25.0" => tree_sitter_python::LANGUAGE.into(),
+        "tree-sitter-rust/0.24.0" => tree_sitter_rust::LANGUAGE.into(),
+        "tree-sitter-javascript/0.25.0" => tree_sitter_javascript::LANGUAGE.into(),
+        _ => return None,
+    };
+    let source = if descriptor
+        .limitations
+        .iter()
+        .any(|l| l == "typescript_preprocessing")
+    {
+        javascript::preprocess_typescript(content)
+    } else {
+        content.to_string()
+    };
+    Some((language, source))
 }

@@ -21,21 +21,7 @@ use crate::{
 };
 
 /// Valid diagnostic pattern names for `--checks` validation.
-const VALID_PATTERNS: &[&str] = &[
-    "isolated_cluster",
-    "data_dead_end",
-    "phantom_dependency",
-    "orphaned_impl",
-    "circular_dependency",
-    "missing_reexport",
-    "contract_mismatch",
-    "stale_reference",
-    "layer_violation",
-    "duplication",
-    "partial_wiring",
-    "asymmetric_handling",
-    "incomplete_migration",
-];
+const VALID_PATTERNS: &[&str] = &crate::registry::PATTERN_IDS;
 
 /// Trace direction for flow tracing commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1192,22 +1178,8 @@ fn scan_dir_for_languages(
                 scan_dir_for_languages(_root, sub_entries, languages, depth + 1);
             }
         } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                match ext {
-                    "py" => {
-                        languages.insert("python".to_string());
-                    }
-                    "js" | "jsx" | "mjs" | "cjs" => {
-                        languages.insert("javascript".to_string());
-                    }
-                    "ts" | "tsx" => {
-                        languages.insert("typescript".to_string());
-                    }
-                    "rs" => {
-                        languages.insert("rust".to_string());
-                    }
-                    _ => {}
-                }
+            if let Some(language) = crate::registry::language_id_for_path(&path) {
+                languages.insert(language.to_string());
             }
         }
     }
@@ -1496,24 +1468,25 @@ pub fn format_name(format: OutputFormat) -> &'static str {
 /// Accepts common abbreviations: "ts" → "typescript", "js" → "javascript",
 /// "py" → "python". Canonical names pass through unchanged.
 pub fn normalize_language(lang: &str) -> String {
-    match lang {
-        "ts" => "typescript".to_string(),
-        "js" => "javascript".to_string(),
-        "py" => "python".to_string(),
-        other => other.to_string(),
-    }
+    crate::registry::Registry::default()
+        .language(lang)
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| lang.to_string())
 }
 
 /// Validate a language name against v1 supported languages.
 ///
 /// Accepts both canonical names and common abbreviations (e.g., "ts" for "typescript").
 pub fn validate_language(lang: &str) -> Result<(), FlowspecError> {
-    let normalized = normalize_language(lang);
-    match normalized.as_str() {
-        "python" | "javascript" | "typescript" | "rust" => Ok(()),
-        _ => Err(FlowspecError::UnsupportedLanguage {
+    if crate::registry::Registry::default()
+        .language(lang)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(FlowspecError::UnsupportedLanguage {
             language: lang.to_string(),
-        }),
+        })
     }
 }
 

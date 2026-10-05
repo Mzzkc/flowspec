@@ -48,6 +48,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print the actual language and diagnostic registry, including its digest.
+    Registry,
     /// Full analysis — parse, build graph, produce manifest.
     Analyze {
         /// Project root to analyze.
@@ -63,7 +65,7 @@ enum Commands {
         incremental: bool,
 
         /// Restrict analysis to specific language(s).
-        #[arg(short, long)]
+        #[arg(short, long, help = format!("Restrict analysis to registered languages: {}", flowspec::registry::language_names()))]
         language: Vec<String>,
 
         /// Filter to specific diagnostic patterns (comma-separated).
@@ -71,7 +73,7 @@ enum Commands {
         /// orphaned_impl, circular_dependency, missing_reexport, contract_mismatch,
         /// stale_reference, layer_violation, duplication, partial_wiring,
         /// asymmetric_handling, incomplete_migration.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', help = format!("Filter diagnostic patterns: {}", flowspec::registry::pattern_names()))]
         checks: Vec<String>,
 
         /// Minimum severity to report (critical, warning, info).
@@ -96,7 +98,7 @@ enum Commands {
         path: PathBuf,
 
         /// Filter to specific diagnostic patterns (comma-separated).
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', help = format!("Filter diagnostic patterns: {}", flowspec::registry::pattern_names()))]
         checks: Vec<String>,
 
         /// Minimum severity to report.
@@ -108,7 +110,7 @@ enum Commands {
         confidence: Option<ConfidenceArg>,
 
         /// Restrict analysis to specific language(s).
-        #[arg(short, long)]
+        #[arg(short, long, help = format!("Restrict analysis to registered languages: {}", flowspec::registry::language_names()))]
         language: Vec<String>,
     },
 
@@ -123,7 +125,7 @@ enum Commands {
         symbol: String,
 
         /// Restrict analysis to specific language(s).
-        #[arg(short, long)]
+        #[arg(short, long, help = format!("Restrict analysis to registered languages: {}", flowspec::registry::language_names()))]
         language: Vec<String>,
 
         /// Maximum traversal depth for flow tracing.
@@ -345,6 +347,19 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
         )?,
         Commands::Diff { old, new, section } => {
             commands::run_diff(&old, &new, &section, format, output_path)?
+        }
+        Commands::Registry => {
+            let registry = flowspec::registry::Registry::default();
+            registry.validate()?;
+            let mut catalog = registry.metadata();
+            catalog["digest"] = serde_json::json!(registry.digest());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&catalog).map_err(|e| FlowspecError::Manifest {
+                    reason: e.to_string()
+                })?
+            );
+            0
         }
         Commands::Init { path } => commands::run_init(&path)?,
         Commands::Watch { .. } => return Err(FlowspecError::CommandNotImplemented {

@@ -69,66 +69,30 @@ pub fn run_all_patterns(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
 /// Filters are applied AFTER detection but BEFORE ID assignment, so IDs
 /// are sequential in the returned list (no gaps from filtering).
 pub fn run_patterns(graph: &Graph, filter: &PatternFilter, project_root: &Path) -> Vec<Diagnostic> {
+    run_patterns_with_registry(
+        graph,
+        filter,
+        project_root,
+        &crate::registry::Registry::default(),
+    )
+}
+
+/// Run actual callbacks from the supplied validated registry.
+pub fn run_patterns_with_registry(
+    graph: &Graph,
+    filter: &PatternFilter,
+    project_root: &Path,
+    registry: &crate::registry::Registry,
+) -> Vec<Diagnostic> {
     let mut all_diagnostics = Vec::new();
 
-    // Collect from all implemented patterns.
-    let pattern_results: Vec<(DiagnosticPattern, Vec<Diagnostic>)> = vec![
-        (
-            DiagnosticPattern::IsolatedCluster,
-            isolated_cluster::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::DataDeadEnd,
-            data_dead_end::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::PhantomDependency,
-            phantom_dependency::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::CircularDependency,
-            circular_dependency::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::OrphanedImplementation,
-            orphaned_implementation::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::MissingReexport,
-            missing_reexport::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::LayerViolation,
-            layer_violation::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::StaleReference,
-            stale_reference::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::ContractMismatch,
-            contract_mismatch::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::IncompleteMigration,
-            incomplete_migration::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::PartialWiring,
-            partial_wiring::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::Duplication,
-            duplication::detect(graph, project_root),
-        ),
-        (
-            DiagnosticPattern::AsymmetricHandling,
-            asymmetric_handling::detect(graph, project_root),
-        ),
-    ];
-
-    for (_pattern, diagnostics) in pattern_results {
-        all_diagnostics.extend(diagnostics);
+    let mut descriptors = registry.patterns().to_vec();
+    descriptors.sort_by_key(|d| d.dispatch_order);
+    for descriptor in descriptors {
+        all_diagnostics.extend((descriptor.detector.expect("canonical detector"))(
+            graph,
+            project_root,
+        ));
     }
 
     // Apply filters

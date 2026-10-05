@@ -1166,6 +1166,26 @@ def run_self_test(repo_root: str) -> int:
     return 0
 
 
+def registry_product_parity(binary: str) -> int:
+    """Compare product names with independent expected labels; no gold verdict."""
+    try:
+        completed = subprocess.run([binary, "registry"], capture_output=True, text=True, timeout=30, check=True)
+        catalog = json.loads(completed.stdout)
+        names = [pattern["id"] for pattern in catalog["patterns"]]
+        languages = [language["id"] for language in catalog["languages"] if language["default_enabled"]]
+        if names != CANONICAL_PATTERNS:
+            raise ValueError("canonical diagnostic names/order differ from the product registry")
+        if languages != ["python", "javascript", "typescript", "rust"]:
+            raise ValueError("four default language IDs/order differ from the product registry")
+        if not isinstance(catalog.get("digest"), str) or not catalog["digest"].startswith("sha256:"):
+            raise ValueError("registry digest absent")
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+        print(f"REGISTRY_PRODUCT_PARITY_FAIL: {error}", file=sys.stderr)
+        return 1
+    print(f"REGISTRY_PRODUCT_PARITY_PASS: {catalog['digest']} (product names only; no semantic gold qualification)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="validate-oracle-artifacts",
@@ -1179,9 +1199,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Run implemented fixture positives/adversarials through flowspec.",
     )
     parser.add_argument("--flowspec-bin", default=None, help="Override flowspec binary path.")
+    parser.add_argument("--registry-only", action="store_true", help="Check actual product registry name parity only; does not qualify semantic gold.")
     args = parser.parse_args(argv)
 
     repo_root = os.path.abspath(args.root) if args.root else repo_root_from_script()
+    if args.registry_only:
+        return registry_product_parity(resolve_binary(args.flowspec_bin or os.path.join(repo_root, "target", "release", "flowspec")))
     if args.self_test:
         return run_self_test(repo_root)
 

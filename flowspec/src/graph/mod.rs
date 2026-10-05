@@ -17,7 +17,10 @@
 //! data alongside, and the graph is a passive data store that analyzers query.
 
 mod cache;
+mod module_index;
 mod populate;
+pub use module_index::{ModuleIndex, ModuleKey};
+pub use populate::resolve_qualified_imports;
 
 pub use cache::{compute_file_hashes, load_file_hashes, save_file_hashes, CacheMetadata};
 pub use populate::populate_graph;

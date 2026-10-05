@@ -10,21 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-pub(crate) const PATTERNS: [&str; 13] = [
-    "isolated_cluster",
-    "data_dead_end",
-    "partial_wiring",
-    "orphaned_impl",
-    "duplication",
-    "contract_mismatch",
-    "circular_dependency",
-    "layer_violation",
-    "incomplete_migration",
-    "asymmetric_handling",
-    "stale_reference",
-    "phantom_dependency",
-    "missing_reexport",
-];
+pub(crate) use crate::registry::PATTERN_IDS as PATTERNS;
 
 #[derive(Clone)]
 pub(crate) struct InputRecord {
@@ -68,7 +54,7 @@ pub(crate) fn path_key(root: &Path, path: &Path) -> String {
         .collect()
 }
 
-fn hash(domain: &str, value: &Value) -> String {
+pub(crate) fn hash(domain: &str, value: &Value) -> String {
     // serde_json::Map uses key ordering without preserve_order; all generated
     // object keys are ASCII and values are integral, boolean, string, or null.
     let bytes = serde_json::to_vec(value).expect("canonical report value");
@@ -166,16 +152,6 @@ pub(crate) fn point_range(
         "start_line":line,"start_column":column,"end_line":line,"end_column":column.saturating_add(end_byte.saturating_sub(start_byte))})
 }
 
-fn language(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("py") => Some("python"),
-        Some("js" | "jsx" | "mjs" | "cjs") => Some("javascript"),
-        Some("ts" | "tsx") => Some("typescript"),
-        Some("rs") => Some("rust"),
-        _ => None,
-    }
-}
-
 fn byte_at(content: &str, line: u32, column: u32) -> u64 {
     let offset: usize = content
         .split_inclusive('\n')
@@ -229,7 +205,7 @@ fn graph_state(root: &Path, graph: &Graph, inputs: &[InputRecord]) -> Value {
     let mut binding_counts = HashMap::new();
     for (_, symbol) in graph.all_symbols() {
         let base = json!({"path_key":path_key(root, &symbol.location.file),
-            "language":language(&symbol.location.file).unwrap_or("python"),
+            "language":input_language(inputs, &symbol.location.file),
             "qualified_name":symbol.qualified_name,
             "construct_kind":format!("{:?}", symbol.kind).to_lowercase()});
         *binding_counts
@@ -239,7 +215,7 @@ fn graph_state(root: &Path, graph: &Graph, inputs: &[InputRecord]) -> Value {
     for (id, symbol) in graph.all_symbols() {
         let key = path_key(root, &symbol.location.file);
         let kind = format!("{:?}", symbol.kind).to_lowercase();
-        let base = json!({"path_key":key,"language":language(&symbol.location.file).unwrap_or("python"),
+        let base = json!({"path_key":key,"language":input_language(inputs, &symbol.location.file),
             "qualified_name":symbol.qualified_name,"construct_kind":kind});
         let binding_id = hash("binding", &base);
         if binding_counts.get(&binding_id).copied().unwrap_or(0) != 1 {
@@ -443,6 +419,7 @@ pub(crate) fn build(
     diagnostics: &[DiagnosticEntry],
     graph: &Graph,
     mut losses: Vec<Value>,
+    registry: &crate::registry::Registry,
 ) -> Value {
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
@@ -548,18 +525,14 @@ pub(crate) fn build(
         "pattern_ids":PATTERNS,"gate_threshold":{"min_severity":"critical","min_confidence":"low"},
         "policy_origin":origin});
     scope["digest"] = json!(hash("scope", &scope));
-    let adapters:Vec<Value>=scope["effective_languages"].as_array().unwrap().iter().filter_map(|v|v.as_str()).map(|lang|{
-        let grammar=match lang {"python"=>"tree-sitter-python/0.25","rust"=>"tree-sitter-rust/0.24",_=>"tree-sitter-javascript/0.25"};
-        json!({"language":lang,"adapter_version":env!("CARGO_PKG_VERSION"),"grammar_version":grammar,
-            "capabilities_digest":hash("capabilities",&json!({"language":lang,"implemented":["symbols","calls","imports"]}))})
-    }).collect();
-    let registry =
-        json!({"patterns":PATTERNS,"languages":["python","javascript","typescript","rust"]});
+    let adapters: Vec<Value> = registry.languages().iter().filter(|d|languages.contains(&d.id)).map(|d|json!({"language":d.id,"adapter_version":d.adapter_version,"grammar_version":d.grammar_version,"capabilities_digest":hash("capabilities",&json!({"language":d.id,"implemented":d.capabilities}))})).collect();
+    let mut registry_metadata = registry.report_metadata();
+    registry_metadata["digest"] = json!(registry.digest());
     let build_sha = option_env!("FLOWSPEC_BUILD_SHA").unwrap_or("unbound");
     let tree_sha = option_env!("FLOWSPEC_SOURCE_TREE_SHA").unwrap_or("unbound");
     let producer = json!({"tool_version":env!("CARGO_PKG_VERSION"),"build_sha":build_sha,
         "source_tree_sha":tree_sha,"report_abi":"v1","generated_by":"analyzer"});
-    let provenance = json!({"config":config_provenance,"registry":{"digest":hash("registry",&registry)},
+    let provenance = json!({"config":config_provenance,"registry":registry_metadata,
         "adapters":adapters,"controls":controls,"inputs":provenance_inputs,
         "cache":{"requested_mode":"full","executed_mode":"full","rebuild_reason":Value::Null},
         "build_receipt":hash("build",&producer)});
@@ -568,7 +541,7 @@ pub(crate) fn build(
     let mut binding_counts = HashMap::new();
     for (_, symbol) in graph.all_symbols() {
         let base = json!({"path_key":path_key(root, &symbol.location.file),
-            "language":language(&symbol.location.file).unwrap_or("python"),
+            "language":input_language(inputs, &symbol.location.file),
             "qualified_name":symbol.qualified_name,
             "construct_kind":format!("{:?}", symbol.kind).to_lowercase()});
         *binding_counts
@@ -583,15 +556,7 @@ pub(crate) fn build(
         let cells:Vec<Value>=scope["effective_languages"].as_array().unwrap().iter().map(|lang|{
             let mut reasons:Vec<String>=losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
             reasons.sort(); reasons.dedup();
-            let capabilities: &[&str] = match pattern {
-                "data_dead_end" => &["symbols", "calls", "value_references", "exports", "registration", "consumer_closure"],
-                "phantom_dependency" | "missing_reexport" => &["imports", "exports", "value_references"],
-                "circular_dependency" | "layer_violation" => &["imports", "dependency_edges"],
-                "duplication" => &["symbols", "binding_structure"],
-                "contract_mismatch" | "partial_wiring" | "asymmetric_handling" => &["symbols", "calls", "control_flow"],
-                "stale_reference" | "incomplete_migration" => &["imports", "resolution"],
-                _ => &["symbols", "calls", "resolution"],
-            };
+            let capabilities = registry.patterns().iter().find(|d|d.id==pattern).expect("canonical pattern").required_capabilities;
             let relevant_losses: Vec<_> = losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).collect();
             let mut capabilities: std::collections::BTreeSet<String> = capabilities.iter().map(|name| name.to_string()).collect();
             let mut affected_paths = std::collections::BTreeSet::new();
@@ -636,6 +601,10 @@ pub(crate) fn build(
     authority
 }
 
-pub(crate) fn language_for(path: &Path) -> Option<String> {
-    language(path).map(str::to_string)
+fn input_language<'a>(inputs: &'a [InputRecord], path: &Path) -> &'a str {
+    inputs
+        .iter()
+        .find(|input| input.path == path)
+        .and_then(|input| input.language.as_deref())
+        .unwrap_or("unknown")
 }

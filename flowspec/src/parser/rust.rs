@@ -50,10 +50,7 @@ impl LanguageAdapter for RustAdapter {
     }
 
     fn can_handle(&self, path: &Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e == "rs")
-            .unwrap_or(false)
+        crate::registry::language_id_for_path(path) == Some("rust")
     }
 
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError> {
