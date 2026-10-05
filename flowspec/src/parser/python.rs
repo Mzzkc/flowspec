@@ -3444,7 +3444,7 @@ class Service:
     #[test]
     fn test_type_annotation_regression_syntax_errors() {
         let result = parse_fixture("syntax_errors.py");
-        assert!(result.scopes.len() >= 1, "Must have at least file scope");
+        assert!(!result.scopes.is_empty(), "Must have at least file scope");
     }
 
     #[test]

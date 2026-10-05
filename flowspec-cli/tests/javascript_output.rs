@@ -622,7 +622,7 @@ function main() { console.log(used()); }
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(
-        parsed["diagnostics"].as_array().unwrap().len() > 0,
+        !parsed["diagnostics"].as_array().unwrap().is_empty(),
         "diagnose should produce >= 1 diagnostic for JS dead code"
     );
 }

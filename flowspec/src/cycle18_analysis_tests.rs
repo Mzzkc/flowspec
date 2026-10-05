@@ -429,7 +429,7 @@ fn test_c18_t14_stale_reference_baseline_range() {
     let stale = count_pattern(&results, "stale_reference");
     eprintln!("T14: stale_reference = {}", stale);
     assert!(
-        stale >= 10 && stale <= 30,
+        (10..=30).contains(&stale),
         "T14: stale_reference={}, expected 10-30",
         stale
     );
@@ -457,7 +457,7 @@ fn test_c18_t16_phantom_dependency_stable() {
     let phantom = count_pattern(&results, "phantom_dependency");
     eprintln!("T16: phantom_dependency = {}", phantom);
     assert!(
-        phantom >= 100 && phantom <= 200,
+        (100..=200).contains(&phantom),
         "T16: phantom_dependency={}, expected 100-200",
         phantom
     );
@@ -529,7 +529,7 @@ fn test_c18_t19_dedup_fix_orthogonal_to_stale_reference() {
         stale
     );
     assert!(
-        stale >= 10 && stale <= 30,
+        (10..=30).contains(&stale),
         "T19: stale_reference={} outside expected range — possible interaction with dedup fix",
         stale
     );
@@ -542,7 +542,7 @@ fn test_c18_t20_child_module_fix_orthogonal_to_orphaned_impl() {
     let orphaned = count_pattern(&results, "orphaned_impl");
     eprintln!("T20: orphaned_impl = {}", orphaned);
     assert!(
-        orphaned >= 40 && orphaned <= 80,
+        (40..=80).contains(&orphaned),
         "T20: orphaned_impl={}, expected ~53 (unaffected by child-module fix)",
         orphaned
     );
@@ -634,7 +634,7 @@ fn test_c18_t24_file_symbols_cache_excludes_modules() {
     // We verify the graph still has both symbols (no data loss).
     let all_syms: Vec<_> = graph
         .all_symbols()
-        .filter(|(_, s)| s.location.file == PathBuf::from("src/test_file.rs"))
+        .filter(|(_, s)| s.location.file == "src/test_file.rs")
         .collect();
     assert!(
         all_syms.len() >= 2,

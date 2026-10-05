@@ -1364,7 +1364,7 @@ fn test_regression_not_all_entities_pub() {
         vis_values
     );
 
-    let has_priv = vis_values.iter().any(|&v| v == "priv");
+    let has_priv = vis_values.contains(&"priv");
     assert!(
         has_priv,
         "Must have at least one 'priv' entity. Got: {:?}",
@@ -3002,7 +3002,7 @@ fn test_pipeline_graph_has_edges_after_move() {
 
     for entry in std::fs::read_dir(&fixture_dir).unwrap() {
         let entry = entry.unwrap();
-        if entry.path().extension().map_or(false, |e| e == "py") {
+        if entry.path().extension().is_some_and(|e| e == "py") {
             std::fs::copy(entry.path(), tmp.path().join(entry.file_name())).unwrap();
         }
     }

@@ -382,7 +382,7 @@ fn i1_duplicate_imports_no_phantom_dependency() {
         symbols: vec![
             // First test function's import at line 5
             {
-                let s = Symbol {
+                Symbol {
                     id: SymbolId::default(),
                     kind: SymbolKind::Variable,
                     name: "Path".to_string(),
@@ -399,8 +399,7 @@ fn i1_duplicate_imports_no_phantom_dependency() {
                     resolution: ResolutionStatus::Resolved,
                     scope: ScopeId::default(),
                     annotations: vec!["import".to_string()],
-                };
-                s
+                }
             },
             // First test function at lines 4-20
             Symbol {
@@ -423,7 +422,7 @@ fn i1_duplicate_imports_no_phantom_dependency() {
             },
             // Second test function's import at line 25
             {
-                let s = Symbol {
+                Symbol {
                     id: SymbolId::default(),
                     kind: SymbolKind::Variable,
                     name: "Path".to_string(),
@@ -440,8 +439,7 @@ fn i1_duplicate_imports_no_phantom_dependency() {
                     resolution: ResolutionStatus::Resolved,
                     scope: ScopeId::default(),
                     annotations: vec!["import".to_string()],
-                };
-                s
+                }
             },
             // Second test function at lines 24-40
             Symbol {
@@ -540,7 +538,7 @@ fn i2_single_import_no_phantom_regression() {
         }],
         symbols: vec![
             {
-                let s = Symbol {
+                Symbol {
                     id: SymbolId::default(),
                     kind: SymbolKind::Variable,
                     name: "Path".to_string(),
@@ -557,8 +555,7 @@ fn i2_single_import_no_phantom_regression() {
                     resolution: ResolutionStatus::Resolved,
                     scope: ScopeId::default(),
                     annotations: vec!["import".to_string()],
-                };
-                s
+                }
             },
             Symbol {
                 id: SymbolId::default(),
@@ -637,7 +634,7 @@ fn i3_unused_import_still_detected_as_phantom() {
         }],
         symbols: vec![
             {
-                let s = Symbol {
+                Symbol {
                     id: SymbolId::default(),
                     kind: SymbolKind::Variable,
                     name: "Path".to_string(),
@@ -654,8 +651,7 @@ fn i3_unused_import_still_detected_as_phantom() {
                     resolution: ResolutionStatus::Resolved,
                     scope: ScopeId::default(),
                     annotations: vec!["import".to_string()],
-                };
-                s
+                }
             },
             Symbol {
                 id: SymbolId::default(),
@@ -806,7 +802,7 @@ fn reg2_type_reference_emission_still_works() {
         }],
         symbols: vec![
             {
-                let s = Symbol {
+                Symbol {
                     id: SymbolId::default(),
                     kind: SymbolKind::Variable,
                     name: "Path".to_string(),
@@ -823,8 +819,7 @@ fn reg2_type_reference_emission_still_works() {
                     resolution: ResolutionStatus::Resolved,
                     scope: ScopeId::default(),
                     annotations: vec!["import".to_string()],
-                };
-                s
+                }
             },
             Symbol {
                 id: SymbolId::default(),
@@ -870,7 +865,7 @@ fn reg2_type_reference_emission_still_works() {
         .find(|(_, s)| {
             s.name == "Path"
                 && s.annotations.contains(&"import".to_string())
-                && s.location.file == PathBuf::from("types.rs")
+                && s.location.file == "types.rs"
         })
         .map(|(id, _)| id);
 

@@ -984,7 +984,7 @@ fn test_remove_file_cleans_cross_file_edges() {
     );
     assert!(remaining_callees.contains(&b), "a -> b edge must survive");
     assert!(
-        !remaining_callees.iter().any(|&id| id == c),
+        !remaining_callees.contains(&c),
         "a -> c edge must be removed"
     );
 }

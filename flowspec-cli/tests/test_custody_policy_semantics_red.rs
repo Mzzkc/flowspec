@@ -356,7 +356,6 @@ fn regular_baseline_bytes(repo: &Path) -> Vec<u8> {
         )
     })
 }
-
 fn assert_baseline_bytes_bound_from(source: &Path, scratch: &Path) {
     assert_eq!(
         git_text(scratch, &["status", "--porcelain"]),
@@ -415,7 +414,8 @@ fn assert_baseline_bytes_bound_from(source: &Path, scratch: &Path) {
                 "BASELINE_BINDING_FAILURE v2 required string key missing: {key}"
             );
         }
-        for key in ["whole_files"] {
+        {
+            let key = "whole_files";
             assert!(
                 object.get(key).is_some_and(Value::is_object),
                 "BASELINE_BINDING_FAILURE v2 required object key missing: {key}"

@@ -2927,16 +2927,12 @@ result = setup()
             import_refs
         );
     }
-
     // =========================================================================
     // QA-Foundation Cycle 3: Module-level call attribution + import symbols
     // =========================================================================
 
     /// Find all symbols matching a predicate.
-    fn find_symbols<'a>(
-        graph: &'a Graph,
-        pred: impl Fn(&Symbol) -> bool,
-    ) -> Vec<(SymbolId, &'a Symbol)> {
+    fn find_symbols(graph: &Graph, pred: impl Fn(&Symbol) -> bool) -> Vec<(SymbolId, &Symbol)> {
         graph.all_symbols().filter(|(_, s)| pred(s)).collect()
     }
 

@@ -1101,7 +1101,7 @@ fn test_c15_t29_dogfood_total_findings_stable() {
     // removed ~132 findings (117 stale_reference + cascading).
     // C15 baseline: 620, C16 post-fix baseline: ~488.
     assert!(
-        total >= 350 && total <= 650,
+        (350..=650).contains(&total),
         "T29: Total findings ({}) outside safety range [350, 650]. \
          C16 post-fix baseline: ~488. Investigate if count changed significantly.",
         total

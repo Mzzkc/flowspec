@@ -98,13 +98,73 @@ fn isolated_opt_in_adapter_enters_actual_graph_dispatch_and_report_with_honest_l
         .unwrap()
         .iter()
         .any(|l| l["stage"] == "adapter_recovery"));
-    assert!(a["analysis_graph"]["entities"]
-        .as_array()
-        .unwrap()
+    let original: Vec<_> = result
+        .graph
+        .all_symbols()
+        .map(|(_, symbol)| symbol)
+        .collect();
+    assert!(
+        !original.is_empty(),
+        "factory output must reach the original Graph"
+    );
+    assert!(original.iter().any(|symbol| symbol.name == "_orphan"));
+    assert!(original
         .iter()
-        .all(|e| e["subject"]["language"] == "synthetic"));
+        .all(|symbol| symbol.location.file.ends_with("entry.synth")));
+    assert!(result
+        .manifest
+        .entities
+        .iter()
+        .any(|entity| entity.id.ends_with("::_orphan")));
+    let graph = &a["analysis_graph"];
+    if graph["projection"]["analysis_graph"] == "omitted" {
+        assert_eq!(
+            graph["projection"]["compatibility_losses"],
+            "/authority/losses"
+        );
+        assert_eq!(
+            graph["projection"]["compatibility_pattern_state"],
+            "/authority/pattern_state"
+        );
+        assert_eq!(a["continuation"]["truncated"], true);
+        assert!(a["losses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|loss| loss["reason"] == "output_truncation"));
+        assert_eq!(
+            result.manifest.execution,
+            Some(flowspec::Execution::Incomplete)
+        );
+    } else {
+        let decoded = if graph["encoding"] == "flowspec.graph.tables.v1" {
+            flowspec::commands::expand_graph_tables(graph)
+                .expect("lossless versioned graph decoder")
+        } else {
+            graph.clone()
+        };
+        let entities = decoded["entities"].as_array().unwrap();
+        assert_eq!(entities.len(), original.len());
+        assert!(!entities.is_empty());
+        for symbol in original {
+            let entity = entities
+                .iter()
+                .find(|entity| entity["subject"]["qualified_name"] == symbol.qualified_name)
+                .unwrap();
+            assert_eq!(entity["subject"]["language"], "synthetic");
+            assert!(entity["key"].as_str().unwrap().starts_with("sha256:"));
+            assert_eq!(entity["subject"]["binding_id"], entity["key"]);
+            assert_eq!(entity["range"]["start_line"], symbol.location.line);
+            assert_eq!(entity["range"]["end_line"], symbol.location.end_line);
+            assert!(
+                entity["range"]["end_byte"].as_u64().unwrap()
+                    >= entity["range"]["start_byte"].as_u64().unwrap()
+            );
+        }
+    }
     assert!(analyze(dir.path(), &Config::default(), &["synthetic".into()]).is_err());
 }
+
 #[test]
 fn registry_rejects_duplicate_id_alias_extension_and_missing_factory_atomically() {
     for mutation in 0..5 {

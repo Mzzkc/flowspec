@@ -2173,7 +2173,7 @@ class Calculator {
     fn test_empty_js_file_no_panic() {
         let result = parse_js("empty.js", "");
         assert_eq!(result.symbols.len(), 0, "Empty file must produce 0 symbols");
-        assert!(result.scopes.len() >= 1, "Must have at least file scope");
+        assert!(!result.scopes.is_empty(), "Must have at least file scope");
     }
 
     #[test]
@@ -3505,7 +3505,7 @@ class Builder {
             0,
             "Empty .ts file must produce 0 symbols"
         );
-        assert!(result.scopes.len() >= 1, "Must have at least file scope");
+        assert!(!result.scopes.is_empty(), "Must have at least file scope");
     }
 
     #[test]

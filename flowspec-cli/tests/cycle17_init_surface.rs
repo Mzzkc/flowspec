@@ -428,7 +428,8 @@ fn t19_init_stdout_pipe_safe() {
 #[test]
 fn t20_diff_watch_still_unimplemented() {
     // diff is implemented as of C18 — only watch remains deferred
-    for (cmd, args) in &[("watch", vec!["watch"])] {
+    {
+        let (cmd, args) = &("watch", vec!["watch"]);
         let output = flowspec().args(args).output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(

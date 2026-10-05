@@ -459,7 +459,7 @@ fn multi_entry_shared_infra_preserved() {
     // (not collapsed because of shared intermediate steps)
     if result.manifest.flows.len() > 1 {
         assert!(
-            entry_names.len() >= 1,
+            !entry_names.is_empty(),
             "Flows from different entry points must not be over-deduped"
         );
     }

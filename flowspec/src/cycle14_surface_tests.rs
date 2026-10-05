@@ -926,7 +926,7 @@ fn t39_adversarial_over_floor_ratio_exactly_10() {
 fn t40_adversarial_unicode_manifest_byte_vs_char_count() {
     // 4-byte UTF-8 emoji: each char is 4 bytes
     // 4750 chars × 4 bytes = 19,000 bytes — under 20KB floor
-    let serialized: String = std::iter::repeat('\u{1F600}').take(4750).collect();
+    let serialized: String = "\u{1F600}".repeat(4750);
     assert_eq!(serialized.len(), 19_000, "Should be exactly 19,000 bytes");
     let result = validate_manifest_size(&serialized, 2000, "yaml");
     assert!(

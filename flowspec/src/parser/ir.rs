@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_visibility_all_variants() {
-        let variants = vec![
+        let variants = [
             Visibility::Public,
             Visibility::Private,
             Visibility::Crate,
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_reference_kind_all_variants() {
-        let variants = vec![
+        let variants = [
             ReferenceKind::Call,
             ReferenceKind::Read,
             ReferenceKind::Annotation,
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_boundary_kind_all_variants() {
-        let variants = vec![
+        let variants = [
             BoundaryKind::Module,
             BoundaryKind::Package,
             BoundaryKind::Network,
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_scope_kind_all_variants() {
-        let variants = vec![
+        let variants = [
             ScopeKind::File,
             ScopeKind::Module,
             ScopeKind::Function,
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_edge_kind_all_variants() {
-        let variants = vec![
+        let variants = [
             EdgeKind::Calls,
             EdgeKind::References,
             EdgeKind::Contains,
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn test_symbol_kind_serialize_roundtrip() {
         let kind = SymbolKind::Function;
-        let bytes = bincode::encode_to_vec(&kind, bincode::config::standard()).unwrap();
+        let bytes = bincode::encode_to_vec(kind, bincode::config::standard()).unwrap();
         let (decoded, _): (SymbolKind, _) =
             bincode::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
         assert_eq!(kind, decoded);
