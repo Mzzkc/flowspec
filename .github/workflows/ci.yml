@@ -83,7 +83,8 @@ jobs:
       - name: tests-custody gate 4
         run: |
           set -euo pipefail
-          python3 scripts/check-test-custody.py --root . --check-markers --baseline tests/test-custody-baseline.json 2>&1 | tee evidence/custody.log
+          python3 scripts/check-test-custody.py --root . --policy tests/test-custody-policy.json --check-markers 2>&1 | tee evidence/custody-markers.log
+          python3 scripts/check-test-custody.py --root . --policy tests/test-custody-policy.json --baseline tests/test-custody-baseline.json 2>&1 | tee evidence/custody-baseline.log
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
         if: always()
         with:

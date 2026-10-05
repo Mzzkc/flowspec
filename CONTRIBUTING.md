@@ -10,7 +10,8 @@ Run formatting, strict lint, and the locked complete Rust test matrix:
 cargo +1.91.0 fmt --all --check
 cargo +1.91.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo +1.91.0 test --locked --workspace --all-features
-python3 scripts/check-test-custody.py --root . --check-markers --baseline tests/test-custody-baseline.json
+python3 scripts/check-test-custody.py --root . --policy tests/test-custody-policy.json --check-markers
+python3 scripts/check-test-custody.py --root . --policy tests/test-custody-policy.json --baseline tests/test-custody-baseline.json
 ```
 
 The release gate additionally requires inventory proving zero ignored, skipped,

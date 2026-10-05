@@ -23,3 +23,8 @@ pinned actions and tool versions, credential persistence disabled, locked Cargo
 commands, no softened failure status, and failure-safe evidence retention. It does
 not cache oracle results. Runner images and tool downloads still need final
 reproducibility/supply-chain qualification. Missing gate tools cause named HOLDs.
+
+Development packaging preserves binary bytes, including debug strings; it does
+not establish absence of embedded developer paths or secrets in a binary. Final
+release content requires a separate exact-artifact security gate and third-party
+notices. A deterministic development ZIP is not safe-install approval.
