@@ -391,7 +391,7 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["py".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.python".into(),
-            adapter_version: "structured-v1".into(),
+            adapter_version: "structured-v2".into(),
             grammar_version: "tree-sitter-python/0.25.0".into(),
             capabilities: crate::parser::report::implemented_capabilities("python")
                 .iter()
@@ -409,7 +409,7 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["js".into(), "jsx".into(), "mjs".into(), "cjs".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.js".into(),
-            adapter_version: "structured-v1".into(),
+            adapter_version: "structured-v2".into(),
             grammar_version: "tree-sitter-javascript/0.25.0".into(),
             capabilities: crate::parser::report::implemented_capabilities("javascript")
                 .iter()
@@ -427,7 +427,7 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["ts".into(), "tsx".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.typescript".into(),
-            adapter_version: "structured-v1".into(),
+            adapter_version: "structured-v2".into(),
             grammar_version: "tree-sitter-typescript/0.23.2+tsx".into(),
             capabilities: crate::parser::report::implemented_capabilities("typescript")
                 .iter()
@@ -445,7 +445,7 @@ fn builtin_languages() -> Vec<LanguageDescriptor> {
             extensions: vec!["rs".into()],
             default_enabled: true,
             implementation_id: "flowspec.adapter.rust".into(),
-            adapter_version: "structured-v1".into(),
+            adapter_version: "structured-v2".into(),
             grammar_version: "tree-sitter-rust/0.24.0".into(),
             capabilities: crate::parser::report::implemented_capabilities("rust")
                 .iter()

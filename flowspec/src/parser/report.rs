@@ -153,7 +153,7 @@ impl ParseReport {
             source_bytes: source.len() as u64,
             source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
             language: language.into(),
-            adapter_version: "structured-v1".into(),
+            adapter_version: "structured-v2".into(),
             grammar_version: grammar.into(),
             capabilities: Capability::ALL
                 .iter()

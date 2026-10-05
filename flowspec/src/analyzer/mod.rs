@@ -31,3 +31,8 @@ pub(crate) mod semantic_policy;
 
 /// Source-owned module policy and public export closure.
 pub(crate) mod module_policy;
+/// Source-native finite primitive contracts and supplied historical identities.
+pub(crate) mod contract_history;
+
+/// Binding-exact ordered abstract resource protocols.
+pub(crate) mod resources;

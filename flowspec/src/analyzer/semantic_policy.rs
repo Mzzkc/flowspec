@@ -11,7 +11,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
-fn resolve(graph: &Graph, root: &Path, authority: &str) -> Option<SymbolId> {
+pub(super) fn resolve(graph: &Graph, root: &Path, authority: &str) -> Option<SymbolId> {
     let (path, name) = authority.split_once("::")?;
     if name.contains("::") {
         return None;
@@ -49,6 +49,7 @@ fn invocation_paths(
     inputs: &[InputRecord],
     root: &Path,
     active: &mut HashSet<SymbolId>,
+    all_exits: bool,
 ) -> Option<Vec<HashSet<SymbolId>>> {
     if active.len() > 32 || !active.insert(id) {
         return None;
@@ -69,11 +70,29 @@ fn invocation_paths(
         .normal_control
         .iter()
         .find(|c| c.name == symbol.name && c.range.0 == start)?;
-    if !control.unresolved.is_empty() {
+    if !control.unresolved.is_empty()
+        || (all_exits && active.len() > 1 && control.exceptional_paths > 0)
+    {
+        return None;
+    }
+    if all_exits
+        && active.len() > 1
+        && !file.signatures.iter().any(|s| {
+            s.range.0 == start
+                && s.name == symbol.name
+                && s.literal_leaf
+                && s.parameter_types.is_empty()
+                && !s.unsupported_parameters
+        })
+    {
         return None;
     }
     let mut result = Vec::new();
-    for path in &control.paths {
+    for path in if all_exits {
+        &control.all_paths
+    } else {
+        &control.paths
+    } {
         let mut accumulated = vec![HashSet::new()];
         for &(a, b) in path {
             let mut targets = graph
@@ -95,7 +114,7 @@ fn invocation_paths(
             if targets.any(|t| t != target) {
                 return None;
             }
-            let nested = invocation_paths(target, graph, inputs, root, active)?;
+            let nested = invocation_paths(target, graph, inputs, root, active, all_exits)?;
             let mut next = Vec::new();
             for previous in &accumulated {
                 for calls in &nested {
@@ -128,9 +147,7 @@ pub(crate) fn append(
         return;
     };
     for peer in &policy.peers {
-        if peer.exit_scope.as_deref() != Some("normal") {
-            continue;
-        }
+        let all_exits = peer.exit_scope.as_deref() != Some("normal");
         let required: Option<Vec<_>> = peer
             .required_operations
             .iter()
@@ -144,8 +161,9 @@ pub(crate) fn append(
             let range = subject
                 .zip(input)
                 .and_then(|(s, i)| Some(location_range(&key, i.content.as_deref()?, &s.location)));
-            let paths =
-                id.and_then(|id| invocation_paths(id, graph, inputs, root, &mut HashSet::new()));
+            let paths = id.and_then(|id| {
+                invocation_paths(id, graph, inputs, root, &mut HashSet::new(), all_exits)
+            });
             let (Some(required), Some(paths)) = (&required, paths) else {
                 let reason = if id.is_none() || required.is_none() {
                     "policy_binding_unresolved"
@@ -174,7 +192,7 @@ pub(crate) fn append(
             let content = input.content.as_deref().unwrap();
             let range = range.unwrap();
             let base = json!({"path_key":key,"language":input.language,"qualified_name":subject.qualified_name,"construct_kind":"function"});
-            let cause = json!({"key_version":1,"parts":{"relation":"required-invocation-on-every-normal-return-path","policy_subjects":peer.subjects,"required_operations":peer.required_operations,"missing_operations":missing}});
+            let cause = json!({"key_version":1,"parts":{"relation":if all_exits {"required-invocation-on-every-supported-exit-path"} else {"required-invocation-on-every-normal-return-path"},"policy_subjects":peer.subjects,"required_operations":peer.required_operations,"missing_operations":missing}});
             let semantic_id = hash(
                 "finding.semantic",
                 &json!({"pattern_id":"partial_wiring","subject":base,"cause":cause}),
@@ -191,7 +209,7 @@ pub(crate) fn append(
                         && c.range.0 == range["start_byte"].as_u64().unwrap() as usize
                 })
                 .unwrap();
-            let evidence = json!([{"kind":"declared_normal_exit_invocation","cfg_exit_scope":"normal","policy":peer,"normal_paths":control.paths.iter().map(|p|p.iter().map(|&(a,b)|offset_range(&key,content,a as u64,b as u64)).collect::<Vec<_>>()).collect::<Vec<_>>(),"missing_operations":missing,"binding_targets":required.iter().filter_map(|id|graph.get_symbol(*id).map(|s|json!({"path_key":path_key(root,&s.location.file),"qualified_name":s.qualified_name}))).collect::<Vec<_>>()}]);
+            let evidence = json!([{"kind":"declared_normal_exit_invocation","cfg_exit_scope":if all_exits {"all-supported-exits"} else {"normal"},"exceptional_paths":control.exceptional_paths,"policy":peer,"normal_paths":control.paths.iter().map(|p|p.iter().map(|&(a,b)|offset_range(&key,content,a as u64,b as u64)).collect::<Vec<_>>()).collect::<Vec<_>>(),"missing_operations":missing,"binding_targets":required.iter().filter_map(|id|graph.get_symbol(*id).map(|s|json!({"path_key":path_key(root,&s.location.file),"qualified_name":s.qualified_name}))).collect::<Vec<_>>()}]);
             let observation_id = hash(
                 "finding.observation",
                 &json!({"semantic_id":semantic_id,"input":digest(content.as_bytes()),"range":range,"evidence":evidence}),

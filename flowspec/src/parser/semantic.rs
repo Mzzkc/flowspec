@@ -39,6 +39,10 @@ pub struct SemanticFile {
     #[serde(default)]
     pub normal_control: Vec<super::control::NormalControl>,
     #[serde(default)]
+    pub signatures: Vec<super::contracts::SignatureFact>,
+    #[serde(default)]
+    pub literal_calls: Vec<super::contracts::LiteralCall>,
+    #[serde(default)]
     pub private_implementations: Vec<super::private_impl::PrivateImplementation>,
 }
 
@@ -419,6 +423,7 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
         return collector.file;
     }
     collector.file.normal_control = super::control::collect(source, root);
+    (collector.file.signatures, collector.file.literal_calls) = super::contracts::collect(source, root);
     let language_id = crate::registry::language_id_for_path(path);
     let mut pending = vec![(root, 0usize)];
     while let Some((node, depth)) = pending.pop() {
