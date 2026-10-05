@@ -2,29 +2,298 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  formatting-lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
         with:
-          components: rustfmt, clippy
-      - name: Cache cargo
-        uses: actions/cache@v4
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Format check
-        run: cargo fmt --all --check
-      - name: Clippy (lib, -D warnings)
-        run: cargo clippy -p flowspec --lib -- -D warnings
-      - name: Tests
-        run: cargo test --all
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: formatting-lint gate 1
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 fmt --all --check
+      - name: formatting-lint gate 2
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: formatting-lint-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+  tests-custody:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
+        with:
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: tests-custody gate 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ci-prerequisites.py test-inventory --out evidence
+      - name: tests-custody gate 2
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 test --locked --workspace --all-features 2>&1 | tee evidence/tests.log
+      - name: tests-custody gate 3
+        run: |
+          set -euo pipefail
+          python3 scripts/check-test-inventory.py --log evidence/tests.log --out evidence
+      - name: tests-custody gate 4
+        run: |
+          set -euo pipefail
+          python3 scripts/check-test-custody.py --root . --policy tests/test-custody-policy.json --check-markers 2>&1 | tee evidence/custody-markers.log
+          python3 scripts/check-test-custody.py --root . --policy tests/test-custody-policy.json --baseline tests/test-custody-baseline.json 2>&1 | tee evidence/custody-baseline.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: tests-custody-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
+        with:
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: coverage gate 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ci-prerequisites.py coverage --out evidence
+      - name: coverage gate 2
+        run: |
+          set -euo pipefail
+          bash scripts/coverage.sh --locked --out evidence/coverage
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: coverage-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+  oracle-mutations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
+        with:
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: oracle-mutations gate 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ci-prerequisites.py oracle --out evidence
+      - name: oracle-mutations gate 2
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 build --locked --release -p flowspec-cli
+      - name: oracle-mutations gate 3
+        run: |
+          set -euo pipefail
+          python3 scripts/oracle/run.py --binary target/release/flowspec --lock tests/oracle/corpus.lock.json --out evidence/oracle
+      - name: oracle-mutations gate 4
+        run: |
+          set -euo pipefail
+          python3 scripts/oracle/mutations.py --binary target/release/flowspec --lock tests/oracle/corpus.lock.json --out evidence/mutations
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: oracle-mutations-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+  docs-skill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
+        with:
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: Docs and exact package workflow
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 build --locked --release -p flowspec-cli
+          python3 scripts/check-product-contract.py --binary target/release/flowspec --check --require-corpus
+          candidate_digest=$(sha256sum target/release/flowspec | cut -d " " -f1)
+          python3 scripts/package-skill.py --binary target/release/flowspec --binary-sha256 "$candidate_digest" --out evidence/package
+          export FLOWSPEC_SKILL_BINARY="$PWD/target/release/flowspec"
+          export FLOWSPEC_SKILL_ARCHIVE=$(find "$PWD/evidence/package" -name "flowspec-skill-*.zip" -type f -print -quit)
+          python3 -m unittest discover -s tests/skill -p "test_*.py"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: docs-skill-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+  security-dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
+        with:
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: security-dependencies gate 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ci-prerequisites.py security --out evidence
+      - name: security-dependencies gate 2
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 build --locked --release -p flowspec-cli
+      - name: security-dependencies gate 3
+        run: |
+          set -euo pipefail
+          python3 scripts/check-security.py --binary target/release/flowspec --out evidence/security
+      - name: security-dependencies gate 4
+        run: |
+          set -euo pipefail
+          bash scripts/check-dependencies.sh --locked --out evidence/dependencies
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: security-dependencies-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+  cache-reproducibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; verified upstream commit
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0; verified upstream commit
+        with:
+          python-version: 3.11.15
+      - name: Evidence directory
+        run: mkdir -p evidence
+      - name: Pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc +1.91.0 --version > evidence/toolchain.txt
+          python3 --version >> evidence/toolchain.txt
+          git rev-parse HEAD >> evidence/toolchain.txt
+      - name: cache-reproducibility gate 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ci-prerequisites.py cache-equivalence --out evidence
+      - name: cache-reproducibility gate 2
+        run: |
+          set -euo pipefail
+          python3 scripts/check-ci-prerequisites.py reproducibility --out evidence
+      - name: cache-reproducibility gate 3
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 build --locked --release -p flowspec-cli
+      - name: cache-reproducibility gate 4
+        run: |
+          set -euo pipefail
+          python3 scripts/check-cache-equivalence.py --binary target/release/flowspec --out evidence/cache-equivalence
+      - name: cache-reproducibility gate 5
+        run: |
+          set -euo pipefail
+          bash scripts/check-reproducibility.sh --locked --out evidence/reproducibility
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; verified upstream commit
+        if: always()
+        with:
+          name: cache-reproducibility-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
