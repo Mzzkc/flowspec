@@ -83,6 +83,7 @@ pub(crate) fn parser_losses(
     descriptor: &crate::registry::LanguageDescriptor,
     registry: &crate::registry::Registry,
     report: &crate::parser::report::ParseReport,
+    config: &Config,
 ) -> Vec<Value> {
     use crate::parser::report::{Capability, CapabilityDisposition, ParseEventCode};
     let key = path_key(root, path);
@@ -95,10 +96,21 @@ pub(crate) fn parser_losses(
         && report.schema_version == 1;
     let mut losses = Vec::new();
     for pattern in registry.patterns() {
+        if matches!(pattern.id, "partial_wiring" | "asymmetric_handling")
+            && config
+                .semantic_policy
+                .as_ref()
+                .is_none_or(|p| p.peers.is_empty())
+        {
+            continue;
+        }
         let missing: Vec<_> = pattern
             .required_capabilities
             .iter()
             .filter(|name| {
+                if provenance_valid && !input_requires_capability(source, &descriptor.id, name) {
+                    return false;
+                }
                 !provenance_valid
                     || !descriptor.capabilities.iter().any(|c| c == **name)
                     || !Capability::ALL
@@ -164,6 +176,77 @@ pub(crate) fn parser_losses(
         losses.push(item);
     }
     losses
+}
+
+// Absence of a construct is established from the original grammar, never from
+// a missing adapter capability. Failed parsing retains the prerequisite.
+fn input_requires_capability(source: &str, language: &str, capability: &str) -> bool {
+    let grammar = match language {
+        "python" => tree_sitter_python::LANGUAGE.into(),
+        "javascript" => tree_sitter_javascript::LANGUAGE.into(),
+        "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "rust" => tree_sitter_rust::LANGUAGE.into(),
+        _ => return true,
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&grammar).is_err() {
+        return true;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return true;
+    };
+    if tree.root_node().has_error() {
+        return true;
+    }
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        let relevant = match capability {
+            "implementations" => matches!(
+                node.kind(),
+                "class_definition"
+                    | "class_declaration"
+                    | "impl_item"
+                    | "trait_item"
+                    | "interface_declaration"
+            ),
+            "types" => matches!(
+                node.kind(),
+                "type"
+                    | "type_annotation"
+                    | "typed_parameter"
+                    | "type_identifier"
+                    | "class_definition"
+                    | "class_declaration"
+                    | "struct_item"
+                    | "impl_item"
+                    | "trait_item"
+                    | "interface_declaration"
+            ),
+            "control_flow" => {
+                node.parent().is_none_or(|p| p.kind() != "module")
+                    && matches!(
+                        node.kind(),
+                        "if_statement"
+                            | "if_expression"
+                            | "for_statement"
+                            | "for_expression"
+                            | "while_statement"
+                            | "while_expression"
+                            | "try_statement"
+                            | "match_expression"
+                            | "switch_statement"
+                            | "conditional_expression"
+                    )
+            }
+            _ => return true,
+        };
+        if relevant {
+            return true;
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    false
 }
 
 fn loss_applies_to_language(
@@ -755,7 +838,9 @@ pub(crate) fn build(
             let mut affected_paths = std::collections::BTreeSet::new();
             for loss in relevant_losses {
                 for capability in loss["required_capabilities"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                    capabilities.insert(capability.to_string());
+                    if crate::parser::report::Capability::ALL.iter().any(|c| c.as_str() == capability) {
+                        capabilities.insert(capability.to_string());
+                    }
                 }
                 for key in loss["scope_paths"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                     if key.is_empty() {
@@ -763,7 +848,13 @@ pub(crate) fn build(
                     } else { affected_paths.insert(key.to_string()); }
                 }
             }
-            let policy_absent = pattern=="layer_violation" && config.semantic_policy.as_ref().is_none_or(|policy|policy.layers.is_empty());
+            let policy_absent = match pattern {
+                "layer_violation" => config.semantic_policy.as_ref().is_none_or(|p| p.layers.is_empty()),
+                "partial_wiring" | "asymmetric_handling" => config.semantic_policy.as_ref().is_none_or(|p| p.peers.is_empty()),
+                "incomplete_migration" => config.semantic_policy.as_ref().is_none_or(|p| p.migrations.is_empty()),
+                "missing_reexport" => config.semantic_policy.as_ref().is_none_or(|p| p.exports.is_empty()),
+                _ => false,
+            };
             if policy_absent { reasons.push("policy_absent".to_string()); }
             let state=if policy_absent {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
             json!({"language":lang,"state":state,"required_capabilities":capabilities,"affected_paths":affected_paths,"reason_codes":reasons})
@@ -921,7 +1012,11 @@ fn append_duplication_proofs(
                 item["required_capabilities"] = json!([issue.operation]);
                 losses.push(item);
             }
-            if function.normal_form.is_none() {
+            if function.normal_form.is_none()
+                || function.weight < 8
+                || !((function.control_shape && function.operations >= 3)
+                    || function.max_operation_chain >= 3)
+            {
                 continue;
             }
             let environment = config
@@ -1028,20 +1123,18 @@ fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
                     | "duplication_environment"
                     | "adapter_capability"
                     | "resolution"
+                    | "resolve"
                     | "parse"
             )
         ) {
             retained.push(item);
             continue;
         }
-        let key = serde_json::to_string(&json!([
-            item["stage"],
-            item["reason"],
-            item["affected_patterns"],
-            item["required_capabilities"],
-            item["origin"]
-        ]))
-        .unwrap();
+        let mut meaning = item.clone();
+        for field in ["id", "scope_paths", "ranges"] {
+            meaning.as_object_mut().unwrap().remove(field);
+        }
+        let key = serde_json::to_string(&meaning).unwrap();
         if let Some(group) = groups.get_mut(&key) {
             for field in ["scope_paths", "ranges"] {
                 let items = item[field].as_array().unwrap();
@@ -1074,16 +1167,13 @@ fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
             .as_array_mut()
             .unwrap()
             .sort_by_key(|v| v.as_str().unwrap_or("").to_string());
-        group["id"] = json!(hash(
-            "loss",
-            &json!([
-                group["stage"],
-                group["reason"],
-                group["scope_paths"],
-                group["ranges"],
-                group["required_capabilities"]
-            ])
-        ));
+        group["ranges"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_key(|v| serde_json::to_string(v).unwrap());
+        let mut identity = group.clone();
+        identity.as_object_mut().unwrap().remove("id");
+        group["id"] = json!(hash("loss", &identity));
         retained.push(group);
     }
     *losses = retained;

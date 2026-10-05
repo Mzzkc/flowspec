@@ -227,6 +227,7 @@ pub fn implemented_capabilities(language: &str) -> Vec<Capability> {
         DependencyEdges,
         Resolution,
         Registration,
+        BindingStructure,
     ];
     if matches!(language, "python" | "rust" | "typescript") {
         caps.extend([Types, Annotations]);

@@ -802,7 +802,7 @@ fn reg2_type_reference_emission_still_works() {
         }],
         symbols: vec![
             {
-                let s = Symbol {
+                Symbol {
                     id: SymbolId::default(),
                     kind: SymbolKind::Variable,
                     name: "Path".to_string(),
@@ -819,8 +819,7 @@ fn reg2_type_reference_emission_still_works() {
                     resolution: ResolutionStatus::Resolved,
                     scope: ScopeId::default(),
                     annotations: vec!["import".to_string()],
-                };
-                s
+                }
             },
             Symbol {
                 id: SymbolId::default(),
@@ -866,7 +865,7 @@ fn reg2_type_reference_emission_still_works() {
         .find(|(_, s)| {
             s.name == "Path"
                 && s.annotations.contains(&"import".to_string())
-                && s.location.file == PathBuf::from("types.rs")
+                && s.location.file.as_path() == std::path::Path::new("types.rs")
         })
         .map(|(id, _)| id);
 

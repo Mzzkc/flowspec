@@ -299,35 +299,8 @@ pub(crate) fn normalize_report(result: &mut crate::AnalysisResult) -> Result<(),
             }
         }
     }
-    // Re-measure the actual packed representation before choosing omission.
-    // Earlier raw lengths no longer describe the report after graph packing.
-    let full_json =
-        serde_json::to_string(&result.manifest).map_err(|error| FlowspecError::Manifest {
-            reason: error.to_string(),
-        })?;
-    let full_yaml = analyze_yaml(&result.manifest)?;
-    // An already incomplete report can omit auxiliary graph evidence while
-    // retaining the full finding catalog and the legacy consumer projection.
-    // Choose this once, before display filters, for both structured formats.
-    if result.manifest.execution == Some(crate::Execution::Incomplete)
-        && (validate_manifest_size(&full_json, result.source_bytes, "json").is_err()
-            || validate_manifest_size(&full_yaml, result.source_bytes, "yaml").is_err())
-    {
-        compact_incomplete_report(&mut result.manifest);
-    }
-    let full_json =
-        serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
-            reason: e.to_string(),
-        })?;
-    let full_yaml = analyze_yaml(&result.manifest)?;
-    if result.manifest.execution == Some(crate::Execution::Incomplete)
-        && result.manifest.authority.is_some()
-        && (validate_manifest_size(&full_json, result.source_bytes, "json").is_err()
-            || validate_manifest_size(&full_yaml, result.source_bytes, "yaml").is_err())
-    {
-        bound_analyze_report(&mut result.manifest);
-    }
-
+    // Lossless graph tables are the ordinary normal form. A renderer may refuse
+    // an oversized report; normalization never discards its semantic graph.
     result.manifest.sync_pattern_state();
     Ok(())
 }
@@ -367,46 +340,6 @@ fn render_report(
     };
 
     Ok(output)
-}
-
-fn compact_incomplete_report(manifest: &mut Manifest) {
-    let Some(authority) = manifest.authority.as_mut() else {
-        return;
-    };
-    authority["analysis_graph"] = serde_json::json!({
-        "projection":{
-            "analysis_graph":"omitted",
-            "compatibility_losses":"/authority/losses",
-            "compatibility_pattern_state":"/authority/pattern_state"
-        }
-    });
-    authority["losses"]
-        .as_array_mut()
-        .expect("report losses")
-        .push(crate::report_authority::loss(
-            "output_truncation",
-            String::new(),
-            None,
-            "serialization",
-        ));
-    authority["continuation"]["truncated"] = serde_json::json!(true);
-    for pattern in authority["pattern_state"]
-        .as_array_mut()
-        .expect("pattern states")
-    {
-        for cell in pattern["cells"].as_array_mut().expect("pattern cells") {
-            cell["state"] = serde_json::json!("incomplete");
-            let reasons = cell["reason_codes"].as_array_mut().expect("reason codes");
-            if !reasons.iter().any(|reason| reason == "output_truncation") {
-                reasons.push(serde_json::json!("output_truncation"));
-            }
-        }
-    }
-    // These compatibility arrays are references in this explicit projection;
-    // the authoritative arrays above remain complete, including earlier losses.
-    manifest.losses.clear();
-    manifest.pattern_state.clear();
-    crate::report_authority::refresh_identity(authority);
 }
 
 fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
@@ -449,77 +382,6 @@ fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
         output.push_str(&format!("{key}: {flow}\n"));
     }
     Ok(output)
-}
-
-fn bound_analyze_report(manifest: &mut Manifest) {
-    let Some(authority) = manifest.authority.as_mut() else {
-        return;
-    };
-    authority["analysis_graph"] = serde_json::json!({
-        "projection":{
-            "analysis_graph":"omitted",
-            "compatibility_losses":"/authority/losses",
-            "compatibility_pattern_state":"/authority/pattern_state"
-        }
-    });
-    let loss =
-        crate::report_authority::loss("output_truncation", String::new(), None, "serialization");
-    let losses = authority["losses"].as_array_mut().expect("report losses");
-    if !losses.contains(&loss) {
-        losses.push(loss);
-    }
-    authority["execution"] = serde_json::json!("incomplete");
-    authority["outcome"] = serde_json::json!("incomplete");
-    authority["continuation"]["truncated"] = serde_json::json!(true);
-    authority["gate"]["verdict"] = serde_json::json!("not_evaluated");
-    // The graph projection is unavailable for every affected pattern. Retained
-    // finding proofs remain in the full catalog; omission is explicit loss.
-    for pattern in authority["pattern_state"]
-        .as_array_mut()
-        .expect("pattern states")
-    {
-        for cell in pattern["cells"].as_array_mut().expect("pattern cells") {
-            cell["state"] = serde_json::json!("incomplete");
-            let reasons = cell["reason_codes"].as_array_mut().expect("reason codes");
-            if !reasons.iter().any(|reason| reason == "output_truncation") {
-                reasons.push(serde_json::json!("output_truncation"));
-            }
-        }
-    }
-    crate::report_authority::refresh_identity(authority);
-
-    manifest.execution = Some(crate::Execution::Incomplete);
-    manifest.outcome = Some(crate::Outcome::Incomplete);
-    // The wire reference preserves all authoritative losses without duplication.
-    manifest.losses.clear();
-    manifest.pattern_state = authority["pattern_state"]
-        .as_array()
-        .expect("pattern states")
-        .iter()
-        .flat_map(|pattern| {
-            pattern["cells"].as_array().into_iter().flatten().map(|cell| {
-            serde_json::json!({"pattern_id":pattern["pattern_id"],"language":cell["language"],
-                "state":cell["state"],"reason_codes":cell["reason_codes"]})
-        })
-        })
-        .collect();
-    manifest.diagnostics.clear();
-    // Ordinary entities remain the original symbol inventory even when
-    // auxiliary graph evidence and diagnostic display are explicitly omitted.
-    manifest.flows.clear();
-    manifest.boundaries.clear();
-    manifest.dependency_graph.clear();
-    manifest.type_flows.clear();
-    manifest.summary.modules.clear();
-    manifest.summary.entry_points.clear();
-    manifest.summary.exit_points.clear();
-    manifest.summary.key_flows.clear();
-    recompute_diagnostic_summary(
-        &manifest.diagnostics,
-        &mut manifest.summary.diagnostic_summary,
-    );
-    manifest.metadata.diagnostic_count = 0;
-    manifest.displayed_findings_total = 0;
 }
 
 fn execution_name(execution: crate::Execution) -> &'static str {

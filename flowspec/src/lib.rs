@@ -572,6 +572,7 @@ pub fn analyze_with_registry_and_options(
                             descriptor,
                             registry,
                             &report,
+                            config,
                         )),
                         Err(_) => losses.push(report_authority::loss(
                             "semantic_proof_unavailable",
