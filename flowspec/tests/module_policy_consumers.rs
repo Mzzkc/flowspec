@@ -18,10 +18,10 @@ fn run(files: &[(&str, &str)], policy: Value) -> Value {
     let authority = a.authority.unwrap();
     assert_eq!(authority["pattern_state"].as_array().unwrap().len(), 13);
     assert_eq!(
-        authority["finding_counts"]["by_pattern"]
+        authority["findings"]["by_pattern"]
             .as_object()
-            .map(|m| m.len())
-            .unwrap_or(13),
+            .unwrap()
+            .len(),
         13
     );
     eprintln!("MODULE_POLICY_PRODUCER {}", authority["producer"]);
@@ -39,7 +39,7 @@ fn state(a: &Value, pattern: &str) -> String {
         .into()
 }
 fn findings<'a>(a: &'a Value, p: &str) -> Vec<&'a Value> {
-    a["findings"]
+    a["findings"]["all"]
         .as_array()
         .unwrap()
         .iter()
