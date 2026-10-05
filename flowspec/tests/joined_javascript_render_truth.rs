@@ -8,7 +8,7 @@ fn full_original_javascript_yaml_retains_manifest_within_real_source_ratio() {
     let yaml = flowspec::YamlFormatter::new()
         .format_manifest(&result.manifest)
         .unwrap();
-    let source_bytes = result.source_bytes;
+    let source_bytes = usize::try_from(result.source_bytes).unwrap();
     assert!(
         yaml.len() <= source_bytes * 10,
         "full original YAML {} exceeds actual selected {} at10x",
