@@ -32,6 +32,8 @@ pub struct SemanticFile {
     pub issues: Vec<SemanticIssue>,
     #[serde(default)]
     pub functions: Vec<super::normalization::NormalizedFunction>,
+    #[serde(default)]
+    pub executables: Vec<ExecutableBinding>,
 }
 
 fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
@@ -339,6 +341,9 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
         );
         return collector.file;
     }
+    if crate::registry::language_id_for_path(path) == Some("rust") {
+        collector.file.executables = collect_rust_executables(source, path, root);
+    }
     if let Some(language) = crate::registry::language_id_for_path(path) {
         collector.file.functions = super::normalization::collect(source, language, root);
     }
@@ -353,4 +358,130 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
         collector.productions(root, 0);
     }
     collector.file
+}
+
+/// Resolved standalone executable closure. Trait/impl/attribute/macro routes
+/// are explicitly outside this proof, never inferred from an unread spelling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutableBinding {
+    pub qualified_name: String,
+    pub range: (usize, usize),
+    pub externally_visible: bool,
+    pub consumers: Vec<(usize, usize)>,
+    pub closure: bool,
+}
+fn collect_rust_executables(source: &str, path: &Path, root: Node<'_>) -> Vec<ExecutableBinding> {
+    fn qualified(file: &str, modules: &[String], name: &str) -> String {
+        let mut parts = vec![file.to_string()];
+        parts.extend_from_slice(modules);
+        parts.push(name.to_string());
+        parts.join("::")
+    }
+    let file = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut bindings = Vec::new();
+    let mut uses = Vec::new();
+    let mut declarations = std::collections::HashSet::new();
+    let mut pending = vec![(root, Vec::<String>::new(), true, false, 0usize)];
+    let mut closed = true;
+    while let Some((node, mut modules, mut visible, in_impl, depth)) = pending.pop() {
+        if depth > super::MAX_AST_DEPTH {
+            closed = false;
+            continue;
+        }
+        let public = children(node)
+            .iter()
+            .find(|n| n.kind() == "visibility_modifier")
+            .is_some_and(|n| text(source, *n) == "pub");
+        if node.kind() == "mod_item" {
+            visible &= public;
+            if let Some(name) = node.child_by_field_name("name") {
+                modules.push(text(source, name).to_string());
+                declarations.insert(name.start_byte());
+            }
+        }
+        if matches!(
+            node.kind(),
+            "macro_invocation" | "attribute_item" | "inner_attribute_item"
+        ) {
+            closed = false;
+        }
+        if node.kind() == "function_item" {
+            if let Some(name) = node.child_by_field_name("name") {
+                declarations.insert(name.start_byte());
+                if !in_impl {
+                    bindings.push(ExecutableBinding {
+                        qualified_name: qualified(&file, &modules, text(source, name)),
+                        range: range(node),
+                        externally_visible: visible && public,
+                        consumers: Vec::new(),
+                        closure: true,
+                    });
+                }
+            }
+            if let Some(params) = node.child_by_field_name("parameters") {
+                for parameter in children(params) {
+                    if let Some(name) = parameter.child_by_field_name("pattern") {
+                        declarations.insert(name.start_byte());
+                    }
+                }
+            }
+        }
+        if node.kind() == "let_declaration" {
+            if let Some(name) = node.child_by_field_name("pattern") {
+                declarations.insert(name.start_byte());
+            }
+        }
+        if node.kind() == "scoped_identifier" {
+            let raw = text(source, node);
+            let mut parts: Vec<String> = raw.split("::").map(str::to_string).collect();
+            let resolved = if parts.first().is_some_and(|p| p == "crate") {
+                parts.remove(0);
+                parts
+            } else if parts.first().is_some_and(|p| p == "self") {
+                parts.remove(0);
+                let mut m = modules.clone();
+                m.extend(parts);
+                m
+            } else if parts.first().is_some_and(|p| p == "super") {
+                parts.remove(0);
+                let mut m = modules.clone();
+                m.pop();
+                m.extend(parts);
+                m
+            } else {
+                let mut m = modules.clone();
+                m.extend(parts);
+                m
+            };
+            uses.push((format!("{}::{}", file, resolved.join("::")), range(node)));
+        } else if node.kind() == "identifier"
+            && !node
+                .parent()
+                .is_some_and(|p| p.kind() == "scoped_identifier")
+        {
+            uses.push((qualified(&file, &modules, text(source, node)), range(node)));
+        }
+        let mut next = children(node);
+        next.reverse();
+        for child in next {
+            pending.push((
+                child,
+                modules.clone(),
+                visible,
+                in_impl || matches!(node.kind(), "impl_item" | "trait_item"),
+                depth + 1,
+            ));
+        }
+    }
+    // A same-spelling local may shadow a standalone item. Until its lexical
+    // resolution is available, treat any such use as a consumer (safe refusal).
+    for binding in &mut bindings {
+        binding.closure = closed;
+        binding.consumers = uses
+            .iter()
+            .filter(|(name, r)| name == &binding.qualified_name && !declarations.contains(&r.0))
+            .map(|(_, r)| *r)
+            .collect();
+    }
+    bindings
 }

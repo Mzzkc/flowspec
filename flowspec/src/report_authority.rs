@@ -287,12 +287,25 @@ fn build_finding(
     if diagnostic.pattern != "data_dead_end" {
         return None;
     }
-    let mut candidates = graph.all_symbols().filter(|(_, symbol)| {
+    let mut candidates = graph.all_symbols().filter(|(id, symbol)| {
         symbol.qualified_name == diagnostic.entity
             && symbol.kind == SymbolKind::Function
-            && symbol.location.file.extension().is_some_and(|e| e == "py")
-            && symbol.name.starts_with('_')
-            && !symbol.name.starts_with("__")
+            && ((symbol.location.file.extension().is_some_and(|e| e == "py")
+                && symbol.name.starts_with('_')
+                && !symbol.name.starts_with("__"))
+                || (symbol.location.file.extension().is_some_and(|e| e == "rs")
+                    && graph.effective_visibility(*id)
+                        == Some(crate::parser::ir::Visibility::Private)
+                    && graph
+                        .semantic_files()
+                        .iter()
+                        .find(|f| f.path == symbol.location.file)
+                        .and_then(|f| {
+                            f.executables
+                                .iter()
+                                .find(|p| p.qualified_name == symbol.qualified_name)
+                        })
+                        .is_some_and(|p| p.closure && p.consumers.is_empty())))
     });
     let (_, symbol) = candidates.next()?;
     if candidates.next().is_some() {
@@ -304,7 +317,7 @@ fn build_finding(
         .find(|input| path_key(root, &input.path) == key && input.parsed)?;
     let content = input.content.as_deref()?;
     let range = byte_range(&key, content, &symbol.location);
-    let subject_base = json!({"path_key":key,"language":"python",
+    let subject_base = json!({"path_key":key,"language":input.language,
         "qualified_name":symbol.qualified_name,"construct_kind":"function"});
     let binding_id = hash("binding", &subject_base);
     let mut subject = subject_base.clone();

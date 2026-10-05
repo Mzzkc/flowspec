@@ -129,6 +129,25 @@ impl Graph {
         &self.semantic_files
     }
 
+    /// Transitive source visibility, retaining declared visibility on Symbol.
+    pub fn effective_visibility(&self, id: SymbolId) -> Option<Visibility> {
+        let symbol = self.get_symbol(id)?;
+        let proof = self
+            .semantic_files
+            .iter()
+            .find(|f| f.path == symbol.location.file)
+            .and_then(|f| {
+                f.executables
+                    .iter()
+                    .find(|p| p.qualified_name == symbol.qualified_name)
+            });
+        Some(if proof.is_some_and(|p| !p.externally_visible) {
+            Visibility::Private
+        } else {
+            symbol.visibility
+        })
+    }
+
     pub(crate) fn record_semantic_file(&mut self, file: crate::parser::semantic::SemanticFile) {
         self.semantic_files.retain(|old| old.path != file.path);
         self.semantic_files.push(file);

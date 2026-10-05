@@ -52,11 +52,26 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
             continue;
         }
 
+        let visibility = graph.effective_visibility(id).unwrap_or(symbol.visibility);
+        if graph
+            .semantic_files()
+            .iter()
+            .find(|f| f.path == symbol.location.file)
+            .and_then(|f| {
+                f.executables
+                    .iter()
+                    .find(|p| p.qualified_name == symbol.qualified_name)
+            })
+            .is_some_and(|p| !p.closure || !p.consumers.is_empty())
+        {
+            continue;
+        }
+
         // Only a private executable binding can be proved dead from this graph.
         // Python's leading underscore is a language-level private convention;
         // the same spelling does not make an exported Rust or JS API private.
         if symbol.kind == SymbolKind::Function
-            && symbol.visibility == Visibility::Public
+            && visibility == Visibility::Public
             && !(symbol
                 .location
                 .file
@@ -80,7 +95,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         }
 
         // Determine confidence based on visibility
-        let confidence = match symbol.visibility {
+        let confidence = match visibility {
             Visibility::Private | Visibility::Protected => Confidence::High,
             Visibility::Crate => Confidence::Moderate,
             Visibility::Public => {
