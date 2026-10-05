@@ -32,6 +32,14 @@ class CIContractTests(unittest.TestCase):
             with self.subTest(gate=gate), self.assertRaises(ValueError):
                 self.module.validate_ci(self.text.replace('check-ci-prerequisites.py '+gate, 'echo omitted'))
 
+    def test_custody_marker_command_reaches_live_checker(self):
+        import subprocess, shlex
+        marker_commands=[line.strip() for line in self.text.splitlines() if line.strip().startswith('python3 scripts/check-test-custody.py') and '--check-markers' in line]
+        self.assertEqual(len(marker_commands),1)
+        command=shlex.split(marker_commands[0].split(' 2>&1')[0])
+        result=subprocess.run(command,cwd=ROOT,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_missing_prerequisites_fail_closed(self):
         import subprocess,tempfile,json
         with tempfile.TemporaryDirectory() as t:
