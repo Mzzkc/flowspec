@@ -729,30 +729,19 @@ fn test_c16_t22_verify_issue_20_phantom_glob_reexport() {
 /// T23: Issue #22 — orphaned_impl method-dispatch FP exists.
 #[test]
 fn test_c16_t23_verify_issue_22_orphaned_impl_method_dispatch() {
-    let mut graph = Graph::new();
-
-    // Public method with zero callers (dispatch invisible)
-    graph.add_symbol(make_symbol(
-        "add_symbol",
-        SymbolKind::Method,
-        Visibility::Public,
-        "graph/mod.rs",
-        50,
-    ));
-
+    let graph = crate::test_utils::build_private_method_graph("struct Graph; impl Graph { pub fn add_symbol(&self) {} } fn populate(graph: &Graph) { graph.add_symbol(); }");
+    assert!(graph
+        .all_symbols()
+        .any(|(_, symbol)| symbol.name == "add_symbol"));
     let diagnostics = orphaned_implementation::detect(&graph, Path::new("."));
     assert!(
-        diagnostics.iter().any(|d| d.entity.contains("add_symbol")),
-        "issue #22: orphaned_impl fires on method with zero callers: {:?}",
-        diagnostics.iter().map(|d| &d.entity).collect::<Vec<_>>()
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.entity.contains("add_symbol")),
+        "issue #22: actual source-consumed method must not be classified orphaned"
     );
 }
 
-/// T24: Issue #21 — missing_reexport glob re-export FP verification.
-///
-/// Uses the standard fixture graph (build_missing_reexport_graph) which
-/// has a pkg/__init__.py with one import (helper_a) but a sub-module with
-/// public helper_b that is NOT re-exported.
 #[test]
 fn test_c16_t24_verify_issue_21_missing_reexport_exists() {
     let graph = build_missing_reexport_graph();

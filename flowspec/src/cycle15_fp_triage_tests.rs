@@ -723,107 +723,58 @@ fn test_c15_t19_missing_reexport_inherent_method_is_false_positive() {
 /// T20: Method dispatch not traced (same root as data_dead_end, ~24 FPs).
 #[test]
 fn test_c15_t20_orphaned_impl_method_dispatch_not_traced() {
-    let mut graph = Graph::new();
-
-    graph.add_symbol(make_symbol(
-        "add_symbol",
-        SymbolKind::Method,
-        Visibility::Public,
-        "graph/mod.rs",
-        25,
-    ));
-
-    // NO inbound edges — populate.rs calls graph.add_symbol() but dispatch not traced
+    let graph = crate::test_utils::build_private_method_graph("struct Graph; impl Graph { pub fn add_symbol(&self) {} } fn populate(graph: &Graph) { graph.add_symbol(); }");
+    assert!(
+        graph
+            .all_symbols()
+            .any(|(_, symbol)| symbol.name == "add_symbol"),
+        "Actual rival method must be present"
+    );
     let diagnostics = orphaned_implementation::detect(&graph, Path::new(""));
     assert!(
-        diagnostics.iter().any(|d| d.entity.contains("add_symbol")),
-        "T20: orphaned_impl MUST fire on 'add_symbol' — method dispatch not traced. \
-         Worker 2 found 24 of 53 orphaned_impl findings in graph/mod.rs."
-    );
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.entity.contains("add_symbol"))
-        .unwrap();
-    assert_eq!(
-        diag.confidence,
-        crate::analyzer::diagnostic::Confidence::Moderate,
-        "T20: public method must have MODERATE confidence"
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.entity.contains("add_symbol")),
+        "Source consumed, registered, or trait-dispatched method must not be classified orphaned"
     );
 }
 
-/// T21: Test function method flagged as orphaned (~20 FPs).
-///
-/// Private methods invoked by test runner, not by call edges. File is NOT
-/// a test path (inline test in production file).
 #[test]
 fn test_c15_t21_orphaned_impl_test_method_is_false_positive() {
-    let mut graph = Graph::new();
-
-    // sarif.rs is NOT a test file by is_test_path. Method name doesn't start
-    // with test_ to avoid name-based exclusion. Using a realistic method name.
-    graph.add_symbol(make_symbol(
-        "sarif_rule_ids_check",
-        SymbolKind::Method,
-        Visibility::Private,
-        "sarif.rs",
-        100,
-    ));
-
-    // NO inbound edges — test runner dispatch
+    let graph = crate::test_utils::build_private_method_graph(
+        "struct Registry; impl Registry { fn sarif_rule_ids_check(&self) {} } #[test] fn registered_test() { Registry.sarif_rule_ids_check(); }",
+    );
+    assert!(
+        graph
+            .all_symbols()
+            .any(|(_, symbol)| symbol.name == "sarif_rule_ids_check"),
+        "Actual rival method must be present"
+    );
     let diagnostics = orphaned_implementation::detect(&graph, Path::new(""));
     assert!(
-        diagnostics
+        !diagnostics
             .iter()
-            .any(|d| d.entity.contains("sarif_rule_ids_check")),
-        "T21: orphaned_impl MUST fire on test method in non-test file — \
-         test runner dispatch is invisible. Worker 2 found ~20 such findings."
-    );
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.entity.contains("sarif_rule_ids_check"))
-        .unwrap();
-    assert_eq!(
-        diag.confidence,
-        crate::analyzer::diagnostic::Confidence::High,
-        "T21: private method must have HIGH confidence"
+            .any(|diagnostic| diagnostic.entity.contains("sarif_rule_ids_check")),
+        "Source consumed, registered, or trait-dispatched method must not be classified orphaned"
     );
 }
 
-/// T22: Trait implementation FP (~5 FPs).
-///
-/// Trait methods dispatched through vtable, not direct calls.
 #[test]
 fn test_c15_t22_orphaned_impl_trait_method_is_false_positive() {
-    let mut graph = Graph::new();
-
-    // Display::fmt — dispatched via trait vtable, not direct call
-    graph.add_symbol(make_symbol(
-        "fmt",
-        SymbolKind::Method,
-        Visibility::Public,
-        "diagnostic.rs",
-        50,
-    ));
-
-    // NO inbound Call edges
+    let graph = crate::test_utils::build_private_method_graph("struct Diagnostic; impl std::fmt::Display for Diagnostic { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"diagnostic\") } } fn consume() { let diagnostic = Diagnostic; let _rendered = format!(\"{}\", diagnostic); }");
+    assert!(
+        graph.all_symbols().any(|(_, symbol)| symbol.name == "fmt"),
+        "Actual rival method must be present"
+    );
     let diagnostics = orphaned_implementation::detect(&graph, Path::new(""));
     assert!(
-        diagnostics.iter().any(|d| d.entity.contains("fmt")),
-        "T22: orphaned_impl MUST fire on 'fmt' — trait dispatch via vtable not traced. \
-         Worker 2 found 5 findings in diagnostic.rs."
-    );
-    let diag = diagnostics
-        .iter()
-        .find(|d| d.entity.contains("fmt"))
-        .unwrap();
-    assert_eq!(
-        diag.confidence,
-        crate::analyzer::diagnostic::Confidence::Moderate,
-        "T22: public trait method must have MODERATE confidence"
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.entity.contains("fmt")),
+        "Source consumed, registered, or trait-dispatched method must not be classified orphaned"
     );
 }
 
-/// T23: Genuinely orphaned method is a true positive (control).
 #[test]
 fn test_c15_t23_orphaned_impl_genuinely_orphaned_method_is_true_positive() {
     let graph = build_orphaned_method_graph();
@@ -1312,16 +1263,9 @@ fn test_c15_t32_phantom_and_stale_use_independent_signals() {
 /// Both patterns CAN fire on a Method with zero callers.
 #[test]
 fn test_c15_t33_dead_end_and_orphaned_fire_independently() {
-    let mut graph = Graph::new();
-
-    // Private Method with zero callers
-    graph.add_symbol(make_symbol(
-        "orphan_method",
-        SymbolKind::Method,
-        Visibility::Private,
-        "service.rs",
-        10,
-    ));
+    let graph = crate::test_utils::build_private_method_graph(
+        "struct Service; impl Service { fn orphan_method(&self) {} }",
+    );
 
     let dead_end_diags = data_dead_end::detect(&graph, Path::new(""));
     let orphaned_diags = orphaned_implementation::detect(&graph, Path::new(""));
@@ -1335,6 +1279,10 @@ fn test_c15_t33_dead_end_and_orphaned_fire_independently() {
         .iter()
         .any(|d| d.entity.contains("orphan_method"));
 
+    assert!(
+        dead_end_fires,
+        "A genuine closed private implementation is independently a data dead end"
+    );
     // orphaned_impl MUST fire — it specifically targets Methods
     assert!(
         orphaned_fires,

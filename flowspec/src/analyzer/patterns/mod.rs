@@ -1457,19 +1457,24 @@ mod tests {
             "Evidence must mention 0 callers"
         );
         assert!(d.suggestion.len() > 10, "Suggestion must be actionable");
+        // The same actual method stays negative when the owner is public,
+        // escapes into the public API, or has unknown registration syntax.
+        for source in [
+            "pub struct UserService; impl UserService { pub fn process_user(&self) {} }",
+            "struct UserService; impl UserService { pub fn process_user(&self) {} } pub fn owner() -> UserService { UserService }",
+            "struct UserService; impl UserService { pub fn process_user(&self) {} } macro_rules! opaque { ($owner:ident) => {}; } opaque!(UserService);",
+        ] {
+            let rival = build_private_method_graph(source);
+            assert!(rival.all_symbols().any(|(_, symbol)| symbol.name == "process_user"));
+            assert!(!orphaned_implementation::detect(&rival, Path::new("")).iter().any(|diagnostic| diagnostic.entity.ends_with("UserService::process_user")), "Public, escaped, or unknown registration owner must defeat absence proof");
+        }
     }
 
     #[test]
     fn test_orphaned_implementation_private_method_high_confidence() {
-        let mut graph = Graph::new();
-
-        let _m = graph.add_symbol(make_symbol(
-            "_internal_process",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "service.py",
-            1,
-        ));
+        let graph = crate::test_utils::build_private_method_graph(
+            "struct Service; impl Service { fn _internal_process(&self) {} }",
+        );
 
         let results = orphaned_implementation::detect(&graph, Path::new(""));
         assert_eq!(results.len(), 1);
@@ -1482,52 +1487,7 @@ mod tests {
 
     #[test]
     fn test_orphaned_implementation_detects_multiple_orphans() {
-        let mut graph = Graph::new();
-
-        let _cls = graph.add_symbol(make_symbol(
-            "APIHandler",
-            crate::parser::ir::SymbolKind::Class,
-            crate::parser::ir::Visibility::Public,
-            "api.py",
-            1,
-        ));
-        let get = graph.add_symbol(make_symbol(
-            "handle_get",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Public,
-            "api.py",
-            3,
-        ));
-        let _post = graph.add_symbol(make_symbol(
-            "handle_post",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Public,
-            "api.py",
-            10,
-        ));
-        let _delete = graph.add_symbol(make_symbol(
-            "handle_delete",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Public,
-            "api.py",
-            17,
-        ));
-        let validate = graph.add_symbol(make_symbol(
-            "validate_request",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Public,
-            "api.py",
-            24,
-        ));
-
-        // handle_get calls validate_request
-        add_ref(
-            &mut graph,
-            get,
-            validate,
-            crate::parser::ir::ReferenceKind::Call,
-            "api.py",
-        );
+        let graph = crate::test_utils::build_private_method_graph("struct APIHandler; impl APIHandler { pub fn handle_get(&self) { self.validate_request(); } pub fn handle_post(&self) {} pub fn handle_delete(&self) {} fn validate_request(&self) {} }");
 
         let results = orphaned_implementation::detect(&graph, Path::new(""));
         let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
@@ -1694,38 +1654,7 @@ mod tests {
 
     #[test]
     fn test_orphaned_implementation_internal_class_call_counts() {
-        let mut graph = Graph::new();
-
-        let _cls = graph.add_symbol(make_symbol(
-            "Service",
-            crate::parser::ir::SymbolKind::Class,
-            crate::parser::ir::Visibility::Public,
-            "service.py",
-            1,
-        ));
-        let public_api = graph.add_symbol(make_symbol(
-            "public_api",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Public,
-            "service.py",
-            3,
-        ));
-        let helper = graph.add_symbol(make_symbol(
-            "_helper",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "service.py",
-            10,
-        ));
-
-        // public_api calls _helper (internal class call)
-        add_ref(
-            &mut graph,
-            public_api,
-            helper,
-            crate::parser::ir::ReferenceKind::Call,
-            "service.py",
-        );
+        let graph = crate::test_utils::build_private_method_graph("struct Service; impl Service { pub fn public_api(&self) { self._helper(); } fn _helper(&self) {} }");
 
         let results = orphaned_implementation::detect(&graph, Path::new(""));
         let entities: Vec<&str> = results.iter().map(|d| d.entity.as_str()).collect();
@@ -1751,15 +1680,9 @@ mod tests {
 
     #[test]
     fn test_orphaned_implementation_and_data_dead_end_dedup_on_method() {
-        let mut graph = Graph::new();
-
-        let _m = graph.add_symbol(make_symbol(
-            "orphan_method",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "service.py",
-            1,
-        ));
+        let graph = crate::test_utils::build_private_method_graph(
+            "struct Service; impl Service { fn orphan_method(&self) {} }",
+        );
 
         let orphan_results = orphaned_implementation::detect(&graph, Path::new(""));
         let dead_end_results = data_dead_end::detect(&graph, Path::new(""));
@@ -1770,11 +1693,13 @@ mod tests {
                 .any(|d| d.pattern == DiagnosticPattern::OrphanedImplementation),
             "orphaned_implementation should fire on Method"
         );
-        // After C20 dedup: Methods are excluded from data_dead_end to avoid
-        // 100% overlap with orphaned_impl (Methods have dedicated pattern)
+        // Actual private implementation closure permits both distinct patterns.
         assert!(
-            dead_end_results.is_empty(),
-            "data_dead_end must NOT fire on Method after dedup (dedicated orphaned_impl pattern)"
+            dead_end_results
+                .iter()
+                .any(|d| d.pattern == DiagnosticPattern::DataDeadEnd
+                    && d.entity.contains("orphan_method")),
+            "data_dead_end independently fires on genuinely private closed Method"
         );
     }
 
@@ -2312,14 +2237,7 @@ mod tests {
             "cycle_b.py",
         );
 
-        // Orphaned method (for orphaned_implementation)
-        let _orphan = graph.add_symbol(make_symbol(
-            "orphaned_method",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "methods.py",
-            1,
-        ));
+        // The method positive requires a separate complete original-byte source universe.
 
         // Missing re-export (for missing_reexport)
         let _init = graph.add_symbol(make_symbol(
@@ -2345,8 +2263,17 @@ mod tests {
         ));
 
         let diagnostics = run_all_patterns(&graph, Path::new(""));
-        let patterns: std::collections::HashSet<DiagnosticPattern> =
-            diagnostics.iter().map(|d| d.pattern).collect();
+        let source_graph = build_orphaned_method_graph();
+        let source_diagnostics = run_all_patterns(&source_graph, Path::new(""));
+        for (i, diagnostic) in source_diagnostics.iter().enumerate() {
+            assert_eq!(diagnostic.id, format!("D{:03}", i + 1));
+            assert!(!diagnostic.evidence.is_empty());
+        }
+        let patterns: std::collections::HashSet<DiagnosticPattern> = diagnostics
+            .iter()
+            .chain(source_diagnostics.iter())
+            .map(|d| d.pattern)
+            .collect();
 
         assert!(
             patterns.contains(&DiagnosticPattern::DataDeadEnd),
@@ -2608,29 +2535,7 @@ mod tests {
 
     #[test]
     fn test_orphaned_implementation_confidence_calibration() {
-        let mut graph = Graph::new();
-
-        let _pub = graph.add_symbol(make_symbol(
-            "pub_method",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Public,
-            "calibration.py",
-            1,
-        ));
-        let _priv = graph.add_symbol(make_symbol(
-            "_priv_method",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "calibration.py",
-            5,
-        ));
-        let _crate_vis = graph.add_symbol(make_symbol(
-            "crate_method",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Crate,
-            "calibration.py",
-            10,
-        ));
+        let graph = crate::test_utils::build_private_method_graph("struct Service; impl Service { pub fn pub_method(&self) {} fn _priv_method(&self) {} pub(crate) fn crate_method(&self) {} }");
 
         let results = orphaned_implementation::detect(&graph, Path::new(""));
 
@@ -2769,14 +2674,7 @@ mod tests {
             "reg_b.py",
         );
 
-        // Orphaned method
-        let _orphan = graph.add_symbol(make_symbol(
-            "orphan_m",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "reg_methods.py",
-            1,
-        ));
+        // The method positive requires a separate complete original-byte source universe.
 
         // Missing re-export
         let _init = graph.add_symbol(make_symbol(
@@ -2802,8 +2700,17 @@ mod tests {
         ));
 
         let diagnostics = run_all_patterns(&graph, Path::new(""));
-        let patterns: std::collections::HashSet<DiagnosticPattern> =
-            diagnostics.iter().map(|d| d.pattern).collect();
+        let source_graph = build_orphaned_method_graph();
+        let source_diagnostics = run_all_patterns(&source_graph, Path::new(""));
+        for (i, diagnostic) in source_diagnostics.iter().enumerate() {
+            assert_eq!(diagnostic.id, format!("D{:03}", i + 1));
+            assert!(!diagnostic.evidence.is_empty());
+        }
+        let patterns: std::collections::HashSet<DiagnosticPattern> = diagnostics
+            .iter()
+            .chain(source_diagnostics.iter())
+            .map(|d| d.pattern)
+            .collect();
 
         assert!(
             patterns.contains(&DiagnosticPattern::CircularDependency),
@@ -2922,56 +2829,43 @@ mod tests {
 
     #[test]
     fn test_orphaned_implementation_evidence_shows_analysis_scope() {
-        let mut graph = Graph::new();
-
-        // Build a graph with multiple files to verify scope reporting
-        let _f1 = graph.add_symbol(make_symbol(
-            "func_1",
-            crate::parser::ir::SymbolKind::Function,
-            crate::parser::ir::Visibility::Public,
-            "file_1.py",
-            1,
-        ));
-        let _f2 = graph.add_symbol(make_symbol(
-            "func_2",
-            crate::parser::ir::SymbolKind::Function,
-            crate::parser::ir::Visibility::Public,
-            "file_2.py",
-            1,
-        ));
-        let _f3 = graph.add_symbol(make_symbol(
-            "func_3",
-            crate::parser::ir::SymbolKind::Function,
-            crate::parser::ir::Visibility::Public,
-            "file_3.py",
-            1,
-        ));
-        let _orphan = graph.add_symbol(make_symbol(
-            "orphan_method",
-            crate::parser::ir::SymbolKind::Method,
-            crate::parser::ir::Visibility::Private,
-            "target.py",
-            1,
-        ));
-
-        let results = orphaned_implementation::detect(&graph, Path::new(""));
-        let d = results
+        let closed = crate::test_utils::build_private_method_graph(
+            "struct Service; impl Service { fn orphan_method(&self) {} }",
+        );
+        let closed_findings = orphaned_implementation::detect(&closed, Path::new(""));
+        let finding = closed_findings
             .iter()
             .find(|d| d.entity.contains("orphan_method"))
             .unwrap();
-
-        // Evidence should mention the scope of analysis
-        assert!(
-            d.evidence
-                .iter()
-                .any(|e| e.observation.contains("0 callers")
-                    && e.observation.contains("analyzed files")),
-            "Evidence should quantify analysis scope. Got: {:?}",
-            d.evidence
-                .iter()
-                .map(|e| &e.observation)
-                .collect::<Vec<_>>()
-        );
+        assert!(finding
+            .evidence
+            .iter()
+            .any(|e| e.observation == "0 callers in 1 analyzed files"));
+        // The retained four-file universe is open for the current single-file
+        // private closure provider. Never convert that missing proof to absence.
+        for owner in [
+            "struct Service; impl Service { fn orphan_method(&self) {} }",
+            "pub struct Service; impl Service { fn orphan_method(&self) {} }",
+            "struct Service; impl Service { fn orphan_method(&self) {} } macro_rules! opaque { ($owner:ident) => {}; } opaque!(Service);",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            for (file, source) in [
+                ("file_1.rs", "pub fn func_1() {}"),
+                ("file_2.rs", "pub fn func_2() {}"),
+                ("file_3.rs", "pub fn func_3() {}"),
+                ("target.rs", owner),
+            ] {
+                std::fs::write(directory.path().join(file), source).unwrap();
+            }
+            let config = crate::Config::load(directory.path(), None).unwrap();
+            let report = crate::analyze(directory.path(), &config, &["rust".to_string()]).unwrap();
+            assert_eq!(report.manifest.metadata.file_count, 4);
+            assert!(report.graph.all_symbols().any(|(_, symbol)| symbol.name == "orphan_method"));
+            let results = orphaned_implementation::detect(&report.graph, directory.path());
+            assert!(!results.iter().any(|d| d.entity.contains("orphan_method")), "Multifile open scope must withhold absence proof: {owner}");
+            assert!(report.manifest.authority.as_ref().unwrap()["losses"].as_array().unwrap().iter().any(|loss|
+                loss["reason"] == "implementation_dispatch_unresolved"), "The missing dispatch closure must stay explicit");
+        }
     }
 
     // =========================================================================

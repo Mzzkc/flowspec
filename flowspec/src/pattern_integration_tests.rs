@@ -145,42 +145,43 @@ fn test_data_dead_end_real_data_true_positive() {
     }
 }
 
-/// orphaned_implementation MUST fire on classes.py — Dog.speak, Dog.species,
-/// Animal.speak all have zero callers. __init__ methods are excluded (dunder).
+/// Public Python nominal owners retain their parsed methods without supplying
+/// private implementation closure. A genuine private source supplies the positive.
 #[test]
 fn test_orphaned_implementation_real_data_true_positive() {
-    let graph = fixture_graph("classes.py");
-    let diagnostics = orphaned_implementation::detect(&graph, Path::new(""));
-
+    let open = fixture_graph("classes.py");
+    for name in ["speak", "species", "__init__"] {
+        assert!(
+            open.all_symbols().any(|(_, symbol)| symbol.name == name
+                && symbol.kind == crate::parser::ir::SymbolKind::Method),
+            "Actual classes.py method must be present: {name}"
+        );
+    }
     assert!(
-        !diagnostics.is_empty(),
-        "orphaned_implementation MUST fire on classes.py — Dog.speak, Dog.species, \
-        Animal.speak all have zero callers. Got 0 diagnostics. \
-        If SymbolKind is Function instead of Method, the pattern skips them."
+        orphaned_implementation::detect(&open, Path::new("")).is_empty(),
+        "Public Python owner with no supplied private closure cannot prove orphaned implementation"
     );
-
-    let entities: Vec<&str> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
-
-    // Dunder methods must be excluded
+    let closed = crate::test_utils::build_orphaned_method_graph();
+    let diagnostics = orphaned_implementation::detect(&closed, Path::new(""));
+    let entities: Vec<_> = diagnostics.iter().map(|d| d.entity.as_str()).collect();
     assert!(
-        !entities.iter().any(|e| e.contains("__init__")),
-        "__init__ is a dunder method — must be excluded. Entities: {:?}",
         entities
+            .iter()
+            .any(|entity| entity.ends_with("UserService::process_user")),
+        "Actual private unconsumed implementation must remain positive: {entities:?}"
     );
-
-    // At least one method should be flagged (speak or species)
-    let has_real_method = entities
-        .iter()
-        .any(|e| e.contains("speak") || e.contains("species"));
     assert!(
-        has_real_method,
-        "Expected at least one orphaned method (speak, species). Got: {:?}",
-        entities
+        !entities
+            .iter()
+            .any(|entity| entity.ends_with("UserService::validate")),
+        "Actual self.validate() call must defeat absence"
     );
-
-    for d in &diagnostics {
-        assert_eq!(d.pattern, DiagnosticPattern::OrphanedImplementation);
-        assert_eq!(d.severity, Severity::Warning);
+    for diagnostic in &diagnostics {
+        assert_eq!(
+            diagnostic.pattern,
+            DiagnosticPattern::OrphanedImplementation
+        );
+        assert_eq!(diagnostic.severity, Severity::Warning);
     }
 }
 

@@ -687,42 +687,17 @@ pub fn build_linear_dep_graph() -> Graph {
 /// Class with orphaned method: process_user has zero callers,
 /// validate is called by process_user, __init__ is a dunder.
 pub fn build_orphaned_method_graph() -> Graph {
-    let mut g = Graph::new();
-    let f = "service.py";
+    build_private_method_graph("struct UserService; impl UserService { pub fn process_user(&self) { self.validate(); } fn validate(&self) {} }")
+}
 
-    let _class = g.add_symbol(make_symbol(
-        "UserService",
-        SymbolKind::Class,
-        Visibility::Public,
-        f,
-        1,
-    ));
-    let m1 = g.add_symbol(make_symbol(
-        "process_user",
-        SymbolKind::Method,
-        Visibility::Public,
-        f,
-        3,
-    ));
-    let m2 = g.add_symbol(make_symbol(
-        "validate",
-        SymbolKind::Method,
-        Visibility::Public,
-        f,
-        10,
-    ));
-    let _m3 = g.add_symbol(make_symbol(
-        "__init__",
-        SymbolKind::Method,
-        Visibility::Public,
-        f,
-        20,
-    ));
-
-    // process_user calls validate (internal class call)
-    add_ref(&mut g, m1, m2, ReferenceKind::Call, f);
-
-    g
+/// Complete original-byte normal-parser scope, with an actual private nominal owner.
+pub fn build_private_method_graph(source: &str) -> Graph {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("service.rs"), source).unwrap();
+    let config = crate::Config::load(directory.path(), None).unwrap();
+    crate::analyze(directory.path(), &config, &["rust".to_string()])
+        .unwrap()
+        .graph
 }
 
 // ---------------------------------------------------------------------------

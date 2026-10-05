@@ -423,7 +423,12 @@ fn disambiguated_names_consistent_across_formats() {
         .unwrap();
 
     let yaml_parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let yaml_parsed =
+        crate::commands::expand_report_records(&serde_json::to_value(&yaml_parsed).unwrap())
+            .unwrap();
+    let yaml_parsed: serde_yaml::Value = serde_yaml::to_value(yaml_parsed).unwrap();
     let json_parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json_parsed = crate::commands::expand_report_records(&json_parsed).unwrap();
 
     let yaml_ids: Vec<String> = yaml_parsed["entities"]
         .as_sequence()
@@ -663,7 +668,12 @@ fn entity_ids_match_across_yaml_json() {
         .unwrap();
 
     let yaml_parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let yaml_parsed =
+        crate::commands::expand_report_records(&serde_json::to_value(&yaml_parsed).unwrap())
+            .unwrap();
+    let yaml_parsed: serde_yaml::Value = serde_yaml::to_value(yaml_parsed).unwrap();
     let json_parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json_parsed = crate::commands::expand_report_records(&json_parsed).unwrap();
 
     let yaml_ids: Vec<String> = yaml_parsed["entities"]
         .as_sequence()

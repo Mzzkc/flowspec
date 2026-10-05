@@ -643,17 +643,14 @@ fn int3_true_dead_end_method_still_detected() {
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
-        tmp.path().join("service.py"),
+        tmp.path().join("service.rs"),
         r#"
-class Service:
-    def run(self):
-        return self.process()
-
-    def process(self):
-        return True
-
-    def unused_helper(self):
-        pass
+struct Service;
+impl Service {
+    fn run(&self) -> bool { self.process() }
+    fn process(&self) -> bool { true }
+    fn unused_helper(&self) {}
+}
 "#,
     )
     .unwrap();
@@ -662,7 +659,7 @@ class Service:
     let report = crate::diagnose_report(
         tmp.path(),
         &config,
-        &["python".to_string()],
+        &["rust".to_string()],
         &crate::ReportOptions {
             gate_severity: crate::Severity::Info,
             gate_confidence: crate::Confidence::Low,
@@ -672,13 +669,26 @@ class Service:
     .unwrap();
     let diagnostics = &report.diagnostics;
 
-    // After C20 dedup: Methods are detected by orphaned_impl, not data_dead_end
+    // The source has an actual private owner and no owner escape; process is consumed.
     let orphaned_entities: Vec<&str> = diagnostics
         .iter()
         .filter(|d| d.pattern == "orphaned_impl")
         .map(|d| d.entity.as_str())
         .collect();
 
+    assert!(
+        !orphaned_entities
+            .iter()
+            .any(|entity| entity.ends_with("::process")),
+        "Consumed process must not be orphaned"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.pattern == "data_dead_end"
+                && diagnostic.entity.contains("unused_helper")),
+        "Genuine private unused method retains distinct DDE meaning"
+    );
     // unused_helper is never called by anything — must still be detected
     let has_unused = orphaned_entities
         .iter()

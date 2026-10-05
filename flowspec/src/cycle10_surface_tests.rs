@@ -455,12 +455,16 @@ fn t15_cross_format_diagnostic_count_consistency() {
     let json_formatter = crate::JsonFormatter::new();
     let json_str = json_formatter.format_manifest(&result.manifest).unwrap();
     let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let json_val = crate::commands::expand_report_records(&json_val).unwrap();
     let json_diag_count = json_val["diagnostics"].as_array().unwrap().len();
 
     // Format as YAML
     let yaml_formatter = crate::YamlFormatter::new();
     let yaml_str = yaml_formatter.format_manifest(&result.manifest).unwrap();
     let yaml_val: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+    let yaml_val =
+        crate::commands::expand_report_records(&serde_json::to_value(&yaml_val).unwrap()).unwrap();
+    let yaml_val: serde_yaml::Value = serde_yaml::to_value(yaml_val).unwrap();
     let yaml_diag_count = yaml_val["diagnostics"].as_sequence().unwrap().len();
 
     // Cross-format consistency
@@ -496,11 +500,15 @@ fn t16_cross_format_entity_count_consistency() {
     let json_formatter = crate::JsonFormatter::new();
     let json_str = json_formatter.format_manifest(&result.manifest).unwrap();
     let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let json_val = crate::commands::expand_report_records(&json_val).unwrap();
     let json_entity_count = json_val["entities"].as_array().unwrap().len();
 
     let yaml_formatter = crate::YamlFormatter::new();
     let yaml_str = yaml_formatter.format_manifest(&result.manifest).unwrap();
     let yaml_val: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+    let yaml_val =
+        crate::commands::expand_report_records(&serde_json::to_value(&yaml_val).unwrap()).unwrap();
+    let yaml_val: serde_yaml::Value = serde_yaml::to_value(yaml_val).unwrap();
     let yaml_entity_count = yaml_val["entities"].as_sequence().unwrap().len();
 
     assert_eq!(

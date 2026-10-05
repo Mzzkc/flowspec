@@ -471,12 +471,42 @@ fn read(p: &Path) {}
         "attribute_access:Path reference must exist in parse output for populate.rs resolution"
     );
 
-    // Verify the reference uses ReferenceKind::Read (same as C13's scoped_identifier path)
+    let annotation_line = source
+        .lines()
+        .position(|line| line.contains("fn read(p: &Path)"))
+        .unwrap() as u32
+        + 1;
+    assert!(
+        attr_refs
+            .iter()
+            .all(|reference| reference.location.line == annotation_line),
+        "Annotation reference must point to the original parameter type, not its import"
+    );
+    let annotation_column = source
+        .lines()
+        .find(|line| line.contains("fn read(p: &Path)"))
+        .unwrap()
+        .find("Path")
+        .unwrap() as u32
+        + 1;
+    assert!(
+        attr_refs
+            .iter()
+            .all(|reference| reference.location.column == annotation_column
+                && reference.location.end_column == annotation_column + 4),
+        "Type origin must retain the exact Path token range"
+    );
+    let value_source = "use std::path::Path; fn read() { let constructor = Path::new; }";
+    let value_result = adapter
+        .parse_file(Path::new("lib.rs"), value_source)
+        .unwrap();
+    assert!(value_result.references.iter().any(|reference| reference.kind == crate::parser::ir::ReferenceKind::Read && matches!(&reference.resolution, ResolutionStatus::Partial(info) if info == "attribute_access:Path")), "Normal scoped runtime value must retain Read origin distinct from Annotation");
+    // Preserve the actual type-annotation origin separately from runtime value reads.
     for r in &attr_refs {
         assert_eq!(
             r.kind,
-            crate::parser::ir::ReferenceKind::Read,
-            "Type references must use ReferenceKind::Read for populate.rs compatibility"
+            crate::parser::ir::ReferenceKind::Annotation,
+            "Type references must retain Annotation origin for populate.rs compatibility"
         );
     }
 }

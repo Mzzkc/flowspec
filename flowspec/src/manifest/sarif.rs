@@ -311,6 +311,7 @@ impl OutputFormatter for SarifFormatter {
             value["runs"][0]["properties"] = serde_json::json!({"flowspec":authority});
         }
         let serialized = if manifest.authority.is_some() {
+            value = crate::report_records::pack_sarif_records(value);
             serde_json::to_string(&value)
         } else {
             serde_json::to_string_pretty(&value)

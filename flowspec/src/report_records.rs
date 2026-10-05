@@ -106,6 +106,25 @@ pub(crate) fn pack_report_records(mut report: Value) -> Value {
     report
 }
 
+/// Share only the custom authority extension; standard SARIF fields remain ordinary JSON.
+pub(crate) fn pack_sarif_records(mut report: Value) -> Value {
+    let original = report.clone();
+    let mut envelope = json!({"authority":report["runs"][0]["properties"]["flowspec"]});
+    for field in ROOT_FIELDS {
+        envelope[*field] = json!([]);
+    }
+    let packed = pack_report_records(envelope);
+    let Some(table) = packed.get("report_records") else {
+        return original;
+    };
+    report["runs"][0]["properties"]["flowspec"] = packed["authority"].clone();
+    report["runs"][0]["properties"]["report_records"] = table.clone();
+    if expand_report_records(&report).as_ref() != Ok(&original) {
+        return original;
+    }
+    report
+}
+
 fn index(value: &Value) -> Result<usize, String> {
     value
         .as_u64()
@@ -128,9 +147,36 @@ fn report_slot<'a>(report: &'a mut Value, path: &[&str]) -> Result<&'a mut Value
 /// Unencoded reports pass through unchanged. Malformed tables fail closed;
 /// no partial report, missing finding, or apparently clean result is returned.
 pub fn expand_report_records(report: &Value) -> Result<Value, String> {
-    let Some(table) = report.get("report_records") else {
+    let root_table = report.get("report_records");
+    let sarif_table = report["runs"][0]["properties"].get("report_records");
+    if root_table.is_some() && sarif_table.is_some() {
+        return Err("ambiguous report record table slots".into());
+    }
+    let table = root_table.or(sarif_table);
+    let Some(table) = table else {
         return Ok(report.clone());
     };
+    if root_table.is_none() {
+        let runs = report["runs"]
+            .as_array()
+            .ok_or("SARIF runs must be an array")?;
+        if runs.len() != 1 || !runs[0]["properties"]["flowspec"].is_object() {
+            return Err("encoded SARIF requires one run with flowspec authority".into());
+        }
+        let mut envelope =
+            json!({"authority":runs[0]["properties"]["flowspec"], "report_records":table});
+        for field in ROOT_FIELDS {
+            envelope[*field] = json!([]);
+        }
+        let expanded = expand_report_records(&envelope)?;
+        let mut result = report.clone();
+        result["runs"][0]["properties"]
+            .as_object_mut()
+            .ok_or("SARIF properties must be object")?
+            .remove("report_records");
+        result["runs"][0]["properties"]["flowspec"] = expanded["authority"].clone();
+        return Ok(result);
+    }
     let authority_fields = match table["encoding"].as_str() {
         Some(ENCODING_V1) => AUTHORITY_FIELDS_V1,
         Some(ENCODING) => AUTHORITY_FIELDS,
