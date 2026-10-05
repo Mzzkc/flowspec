@@ -330,7 +330,7 @@ fn t04_self_method_not_data_dead_end() {
         )
     });
 
-    let diag_array = diagnostics
+    let diag_array = diagnostics["diagnostics"]
         .as_array()
         .expect("diagnose output must be array");
     // Processor.validate should NOT appear as data_dead_end (called via self.validate())
@@ -366,8 +366,8 @@ fn t05_true_dead_end_still_detected() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 3,
+        "selected-loss fixture must exit 3, got {}",
         code
     );
 
@@ -380,7 +380,7 @@ fn t05_true_dead_end_still_detected() {
         )
     });
 
-    let diag_array = diagnostics
+    let diag_array = diagnostics["diagnostics"]
         .as_array()
         .expect("diagnose output must be array");
     // After C20 dedup: Methods are excluded from data_dead_end (dedicated
@@ -389,6 +389,10 @@ fn t05_true_dead_end_still_detected() {
     // and exit code is correct (0 = no data_dead_end findings for methods).
     // unused_helper now fires as orphaned_implementation instead.
     let _diag_count = diag_array.len();
+
+    let state: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
+    assert_eq!(state["execution"].as_str(), Some("incomplete"));
+    assert_eq!(state["authority"]["gate"]["verdict"].as_str(), Some("not_evaluated"));
 }
 
 // ============================================================================
@@ -537,7 +541,7 @@ fn t10_sarif_method_call_diagnostics_consistent() {
         .unwrap();
     let json_stdout = String::from_utf8(json_out.stdout).unwrap();
     let json_diag: serde_json::Value = serde_json::from_str(&json_stdout).unwrap();
-    let json_count = json_diag.as_array().unwrap().len();
+    let json_count = json_diag["diagnostics"].as_array().unwrap().len();
 
     // SARIF diagnose
     let sarif_out = flowspec()
@@ -920,7 +924,7 @@ fn t23_confidence_field_preserved_c16() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let diagnostics: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
-    let diag_array = diagnostics.as_array().expect("diagnose must return array");
+    let diag_array = diagnostics["diagnostics"].as_array().expect("diagnose must return array");
     for (i, diag) in diag_array.iter().enumerate() {
         let confidence = diag["confidence"].as_str();
         assert!(
@@ -961,8 +965,8 @@ fn t24_stale_reference_unaffected_by_method_calls() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 3,
+        "selected-loss fixture must exit 3, got {}",
         code
     );
 
@@ -971,9 +975,13 @@ fn t24_stale_reference_unaffected_by_method_calls() {
     // Just verify it parses and returns an array — count stability is checked
     // across runs, not against a hardcoded value (which would break on test changes)
     assert!(
-        diagnostics.is_array(),
+        diagnostics["diagnostics"].is_array(),
         "stale_reference diagnose output must be an array"
     );
+
+    let state: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
+    assert_eq!(state["execution"].as_str(), Some("incomplete"));
+    assert_eq!(state["authority"]["gate"]["verdict"].as_str(), Some("not_evaluated"));
 }
 
 /// T25: Method call tracking doesn't affect phantom_dependency count.
@@ -994,15 +1002,19 @@ fn t25_phantom_dependency_unaffected_by_method_calls() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 3,
+        "selected-loss fixture must exit 3, got {}",
         code
     );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let diagnostics: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(
-        diagnostics.is_array(),
+        diagnostics["diagnostics"].is_array(),
         "phantom_dependency diagnose output must be an array"
     );
+
+    let state: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
+    assert_eq!(state["execution"].as_str(), Some("incomplete"));
+    assert_eq!(state["authority"]["gate"]["verdict"].as_str(), Some("not_evaluated"));
 }

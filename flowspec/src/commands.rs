@@ -203,7 +203,8 @@ pub(crate) fn prepare_report(
             reason: e.to_string(),
         })?;
     let full_yaml = analyze_yaml(&result.manifest)?;
-    if result.manifest.authority.is_some()
+    if result.manifest.execution == Some(crate::Execution::Incomplete)
+        && result.manifest.authority.is_some()
         && (validate_manifest_size(&full_json, result.source_bytes, "json").is_err()
             || validate_manifest_size(&full_yaml, result.source_bytes, "yaml").is_err())
     {
@@ -258,19 +259,9 @@ pub(crate) fn prepare_report(
         &mut result.manifest.summary.diagnostic_summary,
     );
 
-    // Validate both structured projections before any consumer can write output.
-    validate_manifest_size(
-        &serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
-            reason: e.to_string(),
-        })?,
-        result.source_bytes,
-        "json",
-    )?;
-    validate_manifest_size(
-        &analyze_yaml(&result.manifest)?,
-        result.source_bytes,
-        "yaml",
-    )?;
+    // Requested consumers validate their actual serialized bytes before writing.
+    // A complete catalog that cannot fit a structured output remains complete:
+    // its Summary and in-memory report must not acquire serialization loss.
     Ok(result)
 }
 
@@ -513,7 +504,7 @@ pub fn run_diagnose_with_gate(
     for language in languages {
         validate_language(language)?;
     }
-    let report = crate::diagnose_report(
+    let result = crate::diagnose_report_with_source(
         &canonical,
         &config,
         &normalize_languages(languages),
@@ -525,9 +516,10 @@ pub fn run_diagnose_with_gate(
             gate_confidence: gate_confidence.unwrap_or(crate::Confidence::Low),
         },
     )?;
-    let output = render_report(&report, format)?;
+    let output = render_report(&result.manifest, format)?;
+    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
     write_output(&output, output_path)?;
-    Ok(crate::report_exit_code(&report, None))
+    Ok(crate::report_exit_code(&result.manifest, None))
 }
 
 /// Run the `trace` command: trace a single symbol's flow through the codebase.

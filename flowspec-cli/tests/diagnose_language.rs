@@ -44,7 +44,15 @@ fn diagnose_language_python_filters_output() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // No .js file paths should appear in the output
     assert!(
-        !stdout.contains(".js"),
+        {
+            let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(report["authority"]["inventory"]["selected"], 1);
+            report["authority"]["inventory"]["entries"].as_array().unwrap().iter()
+                .filter(|entry| entry["disposition"] == "selected")
+                .all(|entry| !entry["display_path"].as_str().unwrap().contains(".js"))
+                && report["diagnostics"].as_array().unwrap().iter()
+                    .all(|entry| !entry["loc"].as_str().unwrap_or("").contains(".js"))
+        },
         "diagnose --language python should not include JS diagnostics, got:\n{}",
         stdout
     );
@@ -78,7 +86,15 @@ fn diagnose_language_javascript_filters_output() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains(".py"),
+        {
+            let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(report["authority"]["inventory"]["selected"], 1);
+            report["authority"]["inventory"]["entries"].as_array().unwrap().iter()
+                .filter(|entry| entry["disposition"] == "selected")
+                .all(|entry| !entry["display_path"].as_str().unwrap().contains(".py"))
+                && report["diagnostics"].as_array().unwrap().iter()
+                    .all(|entry| !entry["loc"].as_str().unwrap_or("").contains(".py"))
+        },
         "diagnose --language javascript should not include Python diagnostics, got:\n{}",
         stdout
     );
@@ -105,7 +121,7 @@ fn diagnose_no_language_flag_includes_all() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let _arr = parsed.as_array().unwrap();
+    let _arr = parsed["diagnostics"].as_array().unwrap();
     // Default should include diagnostics from both languages (if any exist)
     // The key assertion: no error, valid output
     assert!(
@@ -257,13 +273,21 @@ fn diagnose_language_with_checks_filter() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Language filter + checks filter should compose
     assert!(
-        !stdout.contains(".js"),
+        {
+            let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(report["authority"]["inventory"]["selected"], 1);
+            report["authority"]["inventory"]["entries"].as_array().unwrap().iter()
+                .filter(|entry| entry["disposition"] == "selected")
+                .all(|entry| !entry["display_path"].as_str().unwrap().contains(".js"))
+                && report["diagnostics"].as_array().unwrap().iter()
+                    .all(|entry| !entry["loc"].as_str().unwrap_or("").contains(".js"))
+        },
         "Language + checks filter should not leak JS diagnostics"
     );
 
     // If there are results, they should all be data_dead_end
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout) {
-        if let Some(arr) = parsed.as_array() {
+        if let Some(arr) = parsed["diagnostics"].as_array() {
             for entry in arr {
                 assert_eq!(
                     entry["pattern"].as_str().unwrap_or(""),
@@ -377,7 +401,7 @@ fn diagnose_language_json_format() {
 
     // Verify only Python diagnostics
     if let Ok(val) = parsed {
-        if let Some(arr) = val.as_array() {
+        if let Some(arr) = val["diagnostics"].as_array() {
             for entry in arr {
                 let loc = entry["loc"].as_str().unwrap_or("");
                 assert!(

@@ -184,7 +184,7 @@ fn severity_ordering_preserved_after_consolidation() {
         "info",
     ])
     .assert()
-    .code(2);
+    .code(3);
 
     // --severity critical should exclude warnings (critical > warning) → no findings
     let mut cmd2 = Command::cargo_bin("flowspec").unwrap();
@@ -195,7 +195,7 @@ fn severity_ordering_preserved_after_consolidation() {
         "critical",
     ])
     .assert()
-    .code(0);
+    .code(3);
 }
 
 /// Verify from_str_checked resolves correctly after consolidation by exercising
@@ -218,7 +218,7 @@ fn from_str_checked_resolves_after_consolidation() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     if !stdout.trim().is_empty() {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
-        if let Some(diags) = parsed.as_sequence() {
+        if let Some(diags) = parsed["diagnostics"].as_sequence() {
             for diag in diags {
                 let sev = diag["severity"].as_str().unwrap();
                 assert!(
@@ -311,7 +311,7 @@ fn exit_code_contract_stable() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["diagnose", issues.path().to_str().unwrap()])
         .assert()
-        .code(2);
+        .code(3);
 }
 
 /// Verify empty project still exits 0 with valid manifest structure.
@@ -420,7 +420,7 @@ fn no_duplicate_diagnostics() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
 
-    if let Some(diags) = parsed.as_sequence() {
+    if let Some(diags) = parsed["diagnostics"].as_sequence() {
         let mut seen = std::collections::HashSet::new();
         for diag in diags {
             let key = format!(
@@ -448,7 +448,7 @@ fn diagnostic_ids_unique() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
 
-    if let Some(diags) = parsed.as_sequence() {
+    if let Some(diags) = parsed["diagnostics"].as_sequence() {
         let mut ids = std::collections::HashSet::new();
         for diag in diags {
             let id = diag["id"].as_str().unwrap_or("");

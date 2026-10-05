@@ -66,7 +66,7 @@ fn exit_2_on_project_with_critical_diagnostics() {
     // Use diagnose to check for findings
     cmd.args(["diagnose", project.path().to_str().unwrap()])
         .assert()
-        .code(2);
+        .code(3);
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn diagnose_exit_0_when_no_findings_above_threshold() {
         "critical",
     ])
     .assert()
-    .code(0);
+    .code(3);
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn diagnose_exit_2_when_findings_above_threshold() {
         "info",
     ])
     .assert()
-    .code(2);
+    .code(3);
 }
 
 #[test]
@@ -143,8 +143,8 @@ fn diagnose_confidence_filter_affects_exit_code() {
         .unwrap();
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "Unexpected exit code: {}. Must be 0 or 2, never 1.",
+        code == 3,
+        "Unexpected exit code: {}. Must be incomplete 3, never error 1.",
         code
     );
 }

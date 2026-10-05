@@ -38,15 +38,15 @@ fn diagnose_outputs_diagnostics_only_not_full_manifest() {
     let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
 
     assert!(
-        parsed.is_sequence(),
-        "diagnose output must be a list of diagnostics, not a manifest object.\nGot: {:?}",
+        parsed.is_mapping() && parsed["diagnostics"].is_sequence(),
+        "diagnose output must be an AnalysisReport containing diagnostic entries.\nGot: {:?}",
         parsed
     );
 
     if let Some(map) = parsed.as_mapping() {
         assert!(
-            !map.contains_key(&serde_yaml::Value::String("metadata".to_string())),
-            "diagnose output must NOT contain 'metadata' section"
+            map.contains_key(&serde_yaml::Value::String("metadata".to_string())),
+            "diagnose output must contain 'metadata' section"
         );
     }
 }
@@ -69,7 +69,7 @@ fn diagnose_severity_filter_excludes_lower_severity() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     if !stdout.trim().is_empty() {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
-        if let Some(diags) = parsed.as_sequence() {
+        if let Some(diags) = parsed["diagnostics"].as_sequence() {
             for diag in diags {
                 let severity = diag["severity"].as_str().unwrap();
                 assert_eq!(
@@ -100,7 +100,7 @@ fn diagnose_confidence_filter_excludes_lower_confidence() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     if !stdout.trim().is_empty() {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
-        if let Some(diags) = parsed.as_sequence() {
+        if let Some(diags) = parsed["diagnostics"].as_sequence() {
             for diag in diags {
                 let confidence = diag["confidence"].as_str().unwrap();
                 assert_eq!(
@@ -131,7 +131,7 @@ fn diagnose_checks_filter_limits_to_named_patterns() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     if !stdout.trim().is_empty() {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
-        if let Some(diags) = parsed.as_sequence() {
+        if let Some(diags) = parsed["diagnostics"].as_sequence() {
             for diag in diags {
                 let pattern = diag["pattern"].as_str().unwrap();
                 assert_eq!(

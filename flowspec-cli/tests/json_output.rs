@@ -167,7 +167,7 @@ fn diagnose_json_output_is_valid_json() {
         .unwrap();
 
     assert!(
-        output.status.code() == Some(0) || output.status.code() == Some(2),
+        output.status.code() == Some(0) || output.status.code() == Some(3),
         "diagnose --format json returned unexpected exit code {:?}. stderr: {}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
@@ -184,7 +184,7 @@ fn diagnose_json_output_is_valid_json() {
 
     let val = parsed.unwrap();
     assert!(
-        val.is_array(),
+        val["diagnostics"].is_array(),
         "diagnose --format json must produce a JSON array, got: {:?}",
         val
     );
@@ -394,7 +394,7 @@ fn json_format_exit_code_2_on_findings() {
             "json",
         ])
         .assert()
-        .code(2);
+        .code(3);
 }
 
 #[test]

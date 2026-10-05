@@ -9,7 +9,7 @@ Flowspec tells AI agents exactly how data moves through a system — what's conn
 ### From source
 
 ```bash
-git clone https://github.com/anthropics/flowspec.git
+git clone https://github.com/Mzzkc/flowspec.git
 cd flowspec
 cargo install --path flowspec-cli
 ```

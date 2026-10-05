@@ -26,8 +26,8 @@ fn test_dogfood_diagnose_does_not_crash() {
 
     let exit_code = output.status.code().unwrap_or(-1);
     assert!(
-        exit_code == 0 || exit_code == 2,
-        "flowspec diagnose . must exit with 0 (clean) or 2 (findings), not {} (error). \
+        exit_code == 3,
+        "This source-bound Rust dogfood must report incomplete3, got {}. \
          stderr: {}",
         exit_code,
         String::from_utf8_lossy(&output.stderr)

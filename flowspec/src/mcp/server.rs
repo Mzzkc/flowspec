@@ -131,7 +131,13 @@ impl Workspace {
                 .and_then(crate::Confidence::from_str_checked)
                 .unwrap_or(crate::Confidence::Low),
         };
-        crate::diagnose_report(&path, &config, &languages, &options)
+        let result = crate::diagnose_report_with_source(&path, &config, &languages, &options)?;
+        let serialized =
+            serde_json::to_string(&result.manifest).map_err(|error| FlowspecError::Manifest {
+                reason: error.to_string(),
+            })?;
+        crate::manifest::validate_manifest_size(&serialized, result.source_bytes, "json")?;
+        Ok(result.manifest)
     }
 }
 fn strings(value: Option<&Value>) -> Vec<String> {

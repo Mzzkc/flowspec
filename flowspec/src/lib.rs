@@ -1107,7 +1107,8 @@ impl Default for ReportOptions {
     }
 }
 
-/// Return the full, size-validated analysis report, including loss and gate state.
+/// Return the full analysis report, including loss and gate state.
+/// Consumers validate the requested serialized output before writing it.
 /// Use Info/Low explicitly for diagnose's any-qualified-finding gate;
 /// the default options retain analyze/MCP's Critical/Low gate.
 pub fn diagnose_report(
@@ -1116,7 +1117,17 @@ pub fn diagnose_report(
     languages: &[String],
     options: &ReportOptions,
 ) -> Result<AnalysisReport, FlowspecError> {
-    Ok(commands::prepare_report(project_path, config, languages, options)?.manifest)
+    Ok(diagnose_report_with_source(project_path, config, languages, options)?.manifest)
+}
+
+/// Shared report API implementation retaining the measured source-byte budget.
+pub(crate) fn diagnose_report_with_source(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &ReportOptions,
+) -> Result<AnalysisResult, FlowspecError> {
+    commands::prepare_report(project_path, config, languages, options)
 }
 
 /// Run diagnostics on a project, returning filtered diagnostic entries.
