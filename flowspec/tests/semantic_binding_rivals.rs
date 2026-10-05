@@ -68,8 +68,27 @@ fn getter_and_coercive_production_do_not_claim_a_pure_boolean_proof() {
 }
 #[test]
 fn unimplemented_python_and_rust_local_closure_is_located_pattern_debt() {
- for (ext,source) in [("py","def api(input):\n    discarded = input is None\n    return input\n"),("rs","pub fn api(input: bool) -> bool { let discarded = !input; input }")] {
-  let r=report(source,ext);
-  assert!(r["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="value_binding_unresolved" && l["affected_patterns"].as_array().unwrap().iter().any(|p|p=="data_dead_end")&&!l["ranges"].as_array().unwrap().is_empty()),"unimplemented local binding closure cannot be a clean negative: {r}");
- }
+    for (ext, source) in [
+        (
+            "py",
+            "def api(input):\n    discarded = input is None\n    return input\n",
+        ),
+        (
+            "rs",
+            "pub fn api(input: bool) -> bool { let discarded = !input; input }",
+        ),
+    ] {
+        let r = report(source, ext);
+        assert!(
+            r["losses"].as_array().unwrap().iter().any(|l| l["reason"]
+                == "value_binding_unresolved"
+                && l["affected_patterns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p == "data_dead_end")
+                && !l["ranges"].as_array().unwrap().is_empty()),
+            "unimplemented local binding closure cannot be a clean negative: {r}"
+        );
+    }
 }

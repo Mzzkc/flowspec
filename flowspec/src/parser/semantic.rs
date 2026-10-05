@@ -414,6 +414,34 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
         );
         return collector.file;
     }
+    let language_id = crate::registry::language_id_for_path(path);
+    let mut pending = vec![(root, 0usize)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > super::MAX_AST_DEPTH {
+            collector.issue(node, "depth_truncation", "source prerequisite enumeration");
+            continue;
+        }
+        if (language_id == Some("python") && node.kind() == "assignment")
+            || (language_id == Some("rust") && node.kind() == "let_declaration")
+        {
+            collector.issue(node,"value_binding_unresolved","local produced-value binding/effect/consumer closure not implemented for this grammar");
+        }
+        if language_id == Some("rust")
+            && matches!(
+                node.kind(),
+                "macro_invocation" | "attribute_item" | "inner_attribute_item"
+            )
+        {
+            collector.issue(
+                node,
+                "registration_closure_unresolved",
+                "macro/attribute executable registration",
+            );
+        }
+        for child in children(node) {
+            pending.push((child, depth + 1));
+        }
+    }
     if crate::registry::language_id_for_path(path) == Some("rust") {
         collector.file.executables = collect_rust_executables(source, path, root);
     }
