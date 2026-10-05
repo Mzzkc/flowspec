@@ -100,7 +100,7 @@ pub(crate) fn parser_losses(
             && config
                 .semantic_policy
                 .as_ref()
-                .is_none_or(|p| p.peers.is_empty())
+                .is_none_or(|p| p.peers.is_empty() && p.resources.is_empty())
         {
             continue;
         }
@@ -722,6 +722,8 @@ pub(crate) fn build(
         &mut findings,
         &mut losses,
     );
+    crate::analyzer::contract_history::append(root, config, inputs, graph, &mut findings, &mut losses);
+    crate::analyzer::resources::append(root, config, inputs, graph, &mut findings, &mut losses);
     coalesce_semantic_losses(&mut losses);
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();
@@ -853,7 +855,8 @@ pub(crate) fn build(
             }
             let policy_absent = match pattern {
                 "layer_violation" => config.semantic_policy.as_ref().is_none_or(|p| p.layers.is_empty()),
-                "partial_wiring" | "asymmetric_handling" => config.semantic_policy.as_ref().is_none_or(|p| p.peers.is_empty()),
+                "partial_wiring" => config.semantic_policy.as_ref().is_none_or(|p| p.peers.is_empty()),
+                "asymmetric_handling" => config.semantic_policy.as_ref().is_none_or(|p| p.peers.is_empty() && p.resources.is_empty()),
                 "incomplete_migration" => config.semantic_policy.as_ref().is_none_or(|p| p.migrations.is_empty()),
                 "missing_reexport" => config.semantic_policy.as_ref().is_none_or(|p| p.exports.is_empty()),
                 _ => false,

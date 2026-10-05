@@ -11,7 +11,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
-fn resolve(graph: &Graph, root: &Path, authority: &str) -> Option<SymbolId> {
+pub(super) fn resolve(graph: &Graph, root: &Path, authority: &str) -> Option<SymbolId> {
     let (path, name) = authority.split_once("::")?;
     if name.contains("::") {
         return None;

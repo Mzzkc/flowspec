@@ -50,3 +50,75 @@ fn supplied_shim_identity_history_targets_only_bound_old_calls() {
     let a=run("function current() { return true; } function old() { return current(); } function consumer() { return old(); }","js",p);
     assert_eq!(count(&a,"stale_reference"),1,"supplied identity history and actual old consumer: {a}");
 }
+#[test]
+fn resource_rivals_satisfied_irrelevant_reversed_unknown_and_exceptional() {
+    let p="semantic_policy:\n  version: 1\n  resources:\n    - subjects: [source.js::left, source.js::right]\n      acquire: source.js::acquire\n      release: source.js::release\n";
+    for (body, expected, unknown) in [
+        ("acquire(); release(); return true;",0,false),
+        ("return true;",0,false),
+        ("release(); acquire(); return true;",1,false),
+        ("acquire(); throw true;",1,false),
+        ("acquire(); release(); throw true;",0,false),
+        ("if (false) { acquire(); } return true;",0,false),
+        ("while (true) { acquire(); } return true;",0,true),
+        ("unknown(); return true;",0,true),
+    ] {
+        let source=format!("function acquire() {{ return true; }} function release() {{ return true; }} function left() {{ {body} }} function right() {{ acquire(); release(); return true; }}");
+        let a=run(&source,"js",p);
+        assert_eq!(count(&a,"asymmetric_handling"),expected,"{body}: {a}");
+        assert_eq!(a["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="resource_control_unresolved"),unknown,"{body}: {a}");
+    }
+    let a=run("function acquire() { return unknown; return true; } function release() { return true; } function left() { acquire(); return true; } function right() { acquire(); release(); return true; }","js",p);
+    assert_eq!(count(&a,"asymmetric_handling"),0,"unknown endpoint behavior must not become resource proof: {a}");
+    assert!(a["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="resource_control_unresolved"));
+}
+#[test]
+fn dynamic_annotated_argument_is_unknown_not_boolean() {
+    let p="semantic_policy:\n  version: 1\n  contracts:\n    - target: source.py::accept\n      parameter_types: [boolean]\n";
+    let a=run("def accept(x: bool):\n    return True\ndef caller(y: str):\n    return accept(y)\n","py",p);
+    assert_eq!(count(&a,"contract_mismatch"),0);
+    assert!(a["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="contract_operand_unresolved"));
+}
+#[test]
+fn native_literal_return_contradictions_and_satisfied_controls() {
+    for (ext,bad,good) in [
+        ("py","def api() -> bool:\n    return \"bad\"\n","def api() -> bool:\n    return True\n"),
+        ("ts","function api(): boolean { return \"bad\"; }","function api(): boolean { return true; }"),
+        ("rs","fn api() -> bool { \"bad\" }","fn api() -> bool { true }")
+    ] {
+        assert_eq!(count(&run(bad,ext,""),"contract_mismatch"),1,"{ext}");
+        assert_eq!(count(&run(good,ext,""),"contract_mismatch"),0,"{ext}");
+    }
+}
+#[test]
+fn four_language_history_has_supplied_bound_shim_and_no_history_rival() {
+    for (ext,source) in [
+        ("py","def current():\n    return True\ndef old():\n    return current()\ndef consumer():\n    return old()\n"),
+        ("js","function current() { return true; } function old() { return current(); } function consumer() { return old(); }"),
+        ("ts","function current(): boolean { return true; } function old(): boolean { return current(); } function consumer(): boolean { return old(); }"),
+        ("rs","fn current() -> bool { true } fn old() -> bool { current() } fn consumer() -> bool { old() }")
+    ] {
+        let p=format!("semantic_policy:\n  version: 1\n  history:\n    - event_id: supplied-v1-to-v2\n      old: source.{ext}::old\n      new: source.{ext}::current\n      state: shim\n");
+        assert_eq!(count(&run(source,ext,&p),"stale_reference"),1,"{ext}");
+        assert_eq!(count(&run(source,ext,""),"stale_reference"),0,"history cannot be inferred {ext}");
+        assert_eq!(count(&run(&source.replace("return old()","return current()").replace("{ old() }","{ current() }"),ext,&p),"stale_reference"),0,"satisfied history {ext}");
+    }
+}
+#[test]
+fn removed_history_and_missing_file_are_precise_unknowns() {
+    let p="semantic_policy:\n  version: 1\n  history:\n    - event_id: supplied-removal\n      old: gone.js::old\n      state: removed\n";
+    let a=run("function consumer() { return old(); }","js",p);
+    assert_eq!(count(&a,"stale_reference"),0);
+    assert!(a["losses"].as_array().unwrap().iter().any(|l|l["reason"]=="history_old_binding_unresolved"));
+    assert_eq!(count(&run("function consumer() { return old(); }","js",""),"stale_reference"),0);
+}
+#[test]
+fn same_name_unrelated_file_is_not_contract_or_history_authority() {
+    let d=tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("source.js"),"function accept(x) { return true; } function current() { return true; } function old() { return current(); }").unwrap();
+    std::fs::write(d.path().join("other.js"),"function accept(x) { return true; } function old() { return true; } function consumer() { accept(\"text\"); return old(); }").unwrap();
+    let p=d.path().join("policy.yaml");std::fs::write(&p,"semantic_policy:\n  version: 1\n  contracts:\n    - target: source.js::accept\n      parameter_types: [boolean]\n  history:\n    - event_id: supplied-v1-to-v2\n      old: source.js::old\n      new: source.js::current\n      state: shim\n").unwrap();
+    let c=Config::load(d.path(),Some(&p)).unwrap();let a=analyze(d.path(),&c,&[]).unwrap().manifest.authority.unwrap();
+    assert_eq!(count(&a,"contract_mismatch"),0,"wrong bound declaration: {a}");
+    assert_eq!(count(&a,"stale_reference"),0,"wrong bound old name: {a}");
+}
