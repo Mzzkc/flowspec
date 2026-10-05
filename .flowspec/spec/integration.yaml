@@ -40,11 +40,12 @@ content:
   ci_cd:
     exit_codes: |
       Flowspec uses exit codes for CI integration:
-      - 0: success, no findings at specified severity
+      - 0: complete analysis, selected gate passes
       - 1: error (analysis failed, bad config, etc.)
-      - 2: success with findings at or above specified severity
+      - 2: complete analysis, qualified findings fail selected gate
+      - 3: incomplete analysis, gate not evaluated
       This enables simple CI gates:
-        flowspec diagnose . --severity critical || exit 1
+        flowspec diagnose . --gate-severity critical || exit 1
     output_formats:
       yaml: "Default. Human and AI readable."
       json: "Programmatic consumption. Same structure as YAML."
@@ -57,13 +58,13 @@ content:
     github_actions_example: |
       - name: Flowspec structural check
         run: |
-          flowspec diagnose . --severity warning --format sarif > flowspec.sarif
+          flowspec diagnose . --gate-severity warning --format sarif > flowspec.sarif
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: flowspec.sarif
     generic_ci_example: |
-      flowspec diagnose . --severity critical --format json
+      flowspec diagnose . --gate-severity critical --format json
       # Exit code 2 if critical issues found — fails the pipeline
 
   mcp_server:
@@ -126,3 +127,9 @@ data:
   codegraph_coupling: "none — fully independent"
 
   mcp_priority: "post-v1-cli-stability"
+
+# Local MCP is pinned to 2025-06-18: flowspec mcp serve --root PATH.
+# flowspec_analyze returns full AnalysisReport structuredContent and equal JSON text.
+# Symlinks and outside-root reads are refused; malformed config never defaults.
+# Error 1 > incomplete 3 > selected qualified gate 2 > complete pass 0.
+# Legacy tuple diagnose is deprecated and unqualified, not a shipped caller authority.

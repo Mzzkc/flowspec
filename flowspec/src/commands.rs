@@ -119,7 +119,44 @@ pub fn run_analyze_with_gate(
 
     tracing::info!("Analyzing project at {}", canonical.display());
 
-    let mut result = crate::analyze(&canonical, &config, &normalized)?;
+    let result = prepare_report(
+        &canonical,
+        &config,
+        &normalized,
+        &crate::ReportOptions {
+            checks: checks.to_vec(),
+            severity,
+            confidence,
+            gate_severity: gate_severity.unwrap_or(crate::Severity::Critical),
+            gate_confidence: gate_confidence.unwrap_or(crate::Confidence::Low),
+        },
+    )?;
+
+    let output = render_report(&result.manifest, format)?;
+
+    // Check exactly the bytes that will be written. The compact projection
+    // still carries the full finding catalog and input inventory in authority.
+    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
+
+    write_output(&output, output_path)?;
+
+    Ok(crate::report_exit_code(&result.manifest, None))
+}
+
+/// Prepare one authoritative report for every shipped consumer.
+pub(crate) fn prepare_report(
+    path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &crate::ReportOptions,
+) -> Result<crate::AnalysisResult, FlowspecError> {
+    let checks = &options.checks;
+    let severity = options.severity;
+    let confidence = options.confidence;
+    let gate_severity = Some(options.gate_severity);
+    let gate_confidence = Some(options.gate_confidence);
+    validate_check_patterns(checks)?;
+    let mut result = crate::analyze(path, config, languages)?;
 
     // Exit code is based on UNFILTERED diagnostics — CI gate contract
     if let Some(authority) = result.manifest.authority.as_mut() {
@@ -221,25 +258,41 @@ pub fn run_analyze_with_gate(
         &mut result.manifest.summary.diagnostic_summary,
     );
 
+    // Validate both structured projections before any consumer can write output.
+    validate_manifest_size(
+        &serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?,
+        result.source_bytes,
+        "json",
+    )?;
+    validate_manifest_size(
+        &analyze_yaml(&result.manifest)?,
+        result.source_bytes,
+        "yaml",
+    )?;
+    Ok(result)
+}
+
+fn render_report(
+    manifest: &crate::AnalysisReport,
+    format: OutputFormat,
+) -> Result<String, FlowspecError> {
     let output = match format {
         OutputFormat::Json => {
-            serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
+            serde_json::to_string(manifest).map_err(|e| FlowspecError::Manifest {
                 reason: e.to_string(),
             })?
         }
-        OutputFormat::Yaml => analyze_yaml(&result.manifest)?,
+        OutputFormat::Yaml => analyze_yaml(manifest)?,
         OutputFormat::Summary => {
-            let completeness = result
-                .manifest
-                .completeness
-                .as_ref()
-                .expect("analyzed report");
+            let completeness = manifest.completeness.as_ref().expect("analyzed report");
             let mut state = format!(
                 "schema_version: {}\nexecution: {}\nfindings_present: {}\noutcome: {}\nselected: {}\nread: {}\nparsed: {}\nrejected: {}\n",
-                result.manifest.schema_version.expect("analyzed report"),
-                execution_name(result.manifest.execution.expect("analyzed report")),
-                result.manifest.findings_present.expect("analyzed report"),
-                outcome_name(result.manifest.outcome.expect("analyzed report")),
+                manifest.schema_version.expect("analyzed report"),
+                execution_name(manifest.execution.expect("analyzed report")),
+                manifest.findings_present.expect("analyzed report"),
+                outcome_name(manifest.outcome.expect("analyzed report")),
                 completeness.selected,
                 completeness.read,
                 completeness.parsed,
@@ -249,19 +302,13 @@ pub fn run_analyze_with_gate(
                 state.push_str(&format!("{}: {}\n", file.path, file.reason));
             }
             state.push('\n');
-            state.push_str(&SummaryFormatter::new().format_manifest(&result.manifest)?);
+            state.push_str(&SummaryFormatter::new().format_manifest(manifest)?);
             state
         }
-        OutputFormat::Sarif => format_with(format, |f| f.format_manifest(&result.manifest))?,
+        OutputFormat::Sarif => format_with(format, |f| f.format_manifest(manifest))?,
     };
 
-    // Check exactly the bytes that will be written. The compact projection
-    // still carries the full finding catalog and input inventory in authority.
-    validate_manifest_size(&output, result.source_bytes, format_name(format))?;
-
-    write_output(&output, output_path)?;
-
-    Ok(crate::report_exit_code(&result.manifest, None))
+    Ok(output)
 }
 
 fn compact_incomplete_report(manifest: &mut Manifest) {
@@ -416,7 +463,8 @@ fn outcome_name(outcome: crate::Outcome) -> &'static str {
 
 /// Run the `diagnose` command: run diagnostics with optional filters.
 ///
-/// Returns the exit code on success (0 = clean, 2 = findings).
+/// Returns 0 for a complete passing gate, 2 for a complete failing gate,
+/// and 3 for incomplete execution, independent of presentation filters.
 #[allow(clippy::too_many_arguments)]
 pub fn run_diagnose(
     path: &Path,
@@ -428,54 +476,58 @@ pub fn run_diagnose(
     output_path: Option<&Path>,
     config_path: Option<&Path>,
 ) -> Result<u8, FlowspecError> {
-    if !matches!(
+    run_diagnose_with_gate(
+        path,
+        languages,
+        checks,
+        severity,
+        confidence,
         format,
-        OutputFormat::Yaml | OutputFormat::Json | OutputFormat::Sarif | OutputFormat::Summary
-    ) {
-        return Err(FlowspecError::FormatNotImplemented {
-            format: format_name(format).to_string(),
-        });
-    }
+        output_path,
+        config_path,
+        None,
+        None,
+    )
+}
 
+/// Diagnose with independent gate thresholds; default is any qualified finding.
+#[allow(clippy::too_many_arguments)]
+pub fn run_diagnose_with_gate(
+    path: &Path,
+    languages: &[String],
+    checks: &[String],
+    severity: Option<crate::Severity>,
+    confidence: Option<crate::Confidence>,
+    format: OutputFormat,
+    output_path: Option<&Path>,
+    config_path: Option<&Path>,
+    gate_severity: Option<crate::Severity>,
+    gate_confidence: Option<crate::Confidence>,
+) -> Result<u8, FlowspecError> {
     if path.as_os_str().is_empty() {
         return Err(FlowspecError::EmptyPath);
     }
-
+    validate_check_patterns(checks)?;
     let canonical = resolve_path(path)?;
     let config = Config::load(&canonical, config_path)?;
-
-    for lang in languages {
-        validate_language(lang)?;
+    for language in languages {
+        validate_language(language)?;
     }
-
-    let checks_filter = if checks.is_empty() {
-        None
-    } else {
-        Some(checks)
-    };
-
-    let normalized = normalize_languages(languages);
-
-    tracing::info!("Running diagnostics on {}", canonical.display());
-
-    let (diagnostics, has_findings) = crate::diagnose(
+    let report = crate::diagnose_report(
         &canonical,
         &config,
-        &normalized,
-        severity,
-        confidence,
-        checks_filter,
+        &normalize_languages(languages),
+        &crate::ReportOptions {
+            checks: checks.to_vec(),
+            severity,
+            confidence,
+            gate_severity: gate_severity.unwrap_or(crate::Severity::Info),
+            gate_confidence: gate_confidence.unwrap_or(crate::Confidence::Low),
+        },
     )?;
-
-    let output = format_with(format, |f| f.format_diagnostics(&diagnostics))?;
-
+    let output = render_report(&report, format)?;
     write_output(&output, output_path)?;
-
-    if has_findings {
-        Ok(2)
-    } else {
-        Ok(0)
-    }
+    Ok(crate::report_exit_code(&report, None))
 }
 
 /// Run the `trace` command: trace a single symbol's flow through the codebase.

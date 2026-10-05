@@ -1,9 +1,4 @@
-//! MCP (Model Context Protocol) server for Flowspec.
-//!
-//! Exposes Flowspec's analysis capabilities as MCP tools, communicable via
-//! JSON-RPC 2.0 over stdio. Behind the `mcp` feature flag.
-//!
-//! Enable with `cargo build --features mcp`. Run with `flowspec mcp`.
-
-#[cfg(feature = "mcp")]
+//! Root-scoped local MCP 2025-06-18 over stdio.
+//! The packaged CLI enables this feature and serves with `flowspec mcp serve --root PATH`.
+//! Tools return the full AnalysisReport as structured content and equal serialized JSON text.
 pub mod server;

@@ -10,7 +10,7 @@ name = "flowspec"
 path = "src/main.rs"
 
 [dependencies]
-flowspec = { path = "../flowspec" }
+flowspec = { path = "../flowspec", features = ["mcp"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"

@@ -301,7 +301,7 @@ fn analyze_core(
 
     // Discover source files (respects .gitignore, config exclude, hardcoded skip_dirs)
     let (mut files, detected_langs, mut input_records, mut losses) =
-        discover_source_files(project_path, &config.exclude);
+        discover_source_files(project_path, &config.exclude, config.read_root.is_some());
 
     // Language priority: CLI flags > config languages > auto-detect
     let active_languages = if !languages.is_empty() {
@@ -1080,6 +1080,45 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
     unique
 }
 
+/// Effective report controls shared by analyze, diagnose and MCP.
+/// Presentation filters never remove authority findings or affect the gate.
+#[derive(Debug, Clone)]
+pub struct ReportOptions {
+    /// Display only these patterns; empty displays all.
+    pub checks: Vec<String>,
+    /// Minimum displayed severity.
+    pub severity: Option<Severity>,
+    /// Minimum displayed confidence.
+    pub confidence: Option<Confidence>,
+    /// Minimum qualified severity for the full catalog gate.
+    pub gate_severity: Severity,
+    /// Minimum qualified confidence for the full catalog gate.
+    pub gate_confidence: Confidence,
+}
+impl Default for ReportOptions {
+    fn default() -> Self {
+        Self {
+            checks: Vec::new(),
+            severity: None,
+            confidence: None,
+            gate_severity: Severity::Critical,
+            gate_confidence: Confidence::Low,
+        }
+    }
+}
+
+/// Return the full, size-validated analysis report, including loss and gate state.
+/// Use Info/Low explicitly for diagnose's any-qualified-finding gate;
+/// the default options retain analyze/MCP's Critical/Low gate.
+pub fn diagnose_report(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &ReportOptions,
+) -> Result<AnalysisReport, FlowspecError> {
+    Ok(commands::prepare_report(project_path, config, languages, options)?.manifest)
+}
+
 /// Run diagnostics on a project, returning filtered diagnostic entries.
 ///
 /// Runs the full [`analyze()`] pipeline internally, then filters the
@@ -1097,6 +1136,9 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
 ///
 /// A tuple of `(filtered_diagnostics, has_findings)`. The boolean indicates
 /// whether any diagnostics survived filtering.
+#[deprecated(
+    note = "Unqualified legacy projection discards report state; use diagnose_report and report_exit_code"
+)]
 pub fn diagnose(
     project_path: &Path,
     config: &Config,
@@ -1169,6 +1211,7 @@ fn file_identity(meta: &std::fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64
 fn discover_source_files(
     project_path: &Path,
     exclude_patterns: &[String],
+    scoped: bool,
 ) -> (
     Vec<PathBuf>,
     Vec<String>,
@@ -1213,6 +1256,9 @@ fn discover_source_files(
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true);
+    if scoped {
+        builder.parents(false).git_global(false).git_exclude(false);
+    }
 
     for result in builder.build() {
         let entry = match result {

@@ -78,7 +78,7 @@ content:
 
     diagnose:
       usage: "flowspec diagnose [path] [flags]"
-      description: "Run diagnostics only — output structural issues found"
+      description: "Run diagnostics — output full AnalysisReport with presentation filters"
       args:
         - name: "path"
           type: "optional path"
@@ -92,6 +92,14 @@ content:
           type: "enum: critical, warning, info"
           description: "Minimum severity to report"
           default: "info (show everything)"
+        - flag: "--gate-severity <level>"
+          type: "enum: critical, warning, info"
+          description: "Qualified full-catalog gate severity, independent of presentation"
+          default: "info"
+        - flag: "--gate-confidence <level>"
+          type: "enum: high, moderate, low"
+          description: "Qualified full-catalog gate confidence, independent of presentation"
+          default: "low"
         - flag: "--confidence <level>"
           type: "enum: high, moderate, low"
           description: "Minimum confidence to report"
@@ -99,15 +107,16 @@ content:
         - flag: "--language, -l <lang>"
           type: "optional, repeatable"
           description: "Restrict analysis to specific language(s). Auto-detected if omitted."
-      output: "Diagnostics section only (not full manifest)"
+      output: "Full AnalysisReport in JSON/YAML; state-aware summary or SARIF projection"
       exit_codes:
-        0: "No diagnostics at or above specified severity"
+        0: "Complete analysis; selected gate passes"
         1: "Analysis failed"
-        2: "Diagnostics found at or above specified severity"
+        2: "Complete analysis; qualified findings fail selected gate"
+        3: "Incomplete analysis; gate not evaluated"
       ci_usage: |
-        flowspec diagnose --severity critical exits with code 2 if any
+        flowspec diagnose --gate-severity critical exits with code 2 if any
         critical diagnostics exist. Use as a CI gate:
-          flowspec diagnose . --severity critical --format json
+          flowspec diagnose . --gate-severity critical --format json
 
     trace:
       usage: "flowspec trace [path] --symbol <id> [flags]"
@@ -229,3 +238,10 @@ data:
     0: "success"
     1: "error"
     2: "success-with-findings"
+
+# Accepted consumer migration: JSON/YAML diagnose returns full AnalysisReport.
+# Presentation flags do not alter authoritative catalog, identity, gate or exit.
+# Diagnose gate defaults Info/Low; analyze and MCP default Critical/Low.
+# --gate-severity / --gate-confidence select the gate independently.
+# Exit precedence: error 1 before output, incomplete 3, qualified gate 2, clean 0.
+# Packaged local entrypoint: flowspec mcp serve --root PATH (MCP 2025-06-18).

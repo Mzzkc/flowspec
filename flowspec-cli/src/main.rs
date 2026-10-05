@@ -107,9 +107,22 @@ enum Commands {
         #[arg(long)]
         confidence: Option<ConfidenceArg>,
 
+        /// Minimum qualified gate severity (default info), independent of display.
+        #[arg(long)]
+        gate_severity: Option<SeverityArg>,
+        /// Minimum qualified gate confidence (default low), independent of display.
+        #[arg(long)]
+        gate_confidence: Option<ConfidenceArg>,
+
         /// Restrict analysis to specific language(s).
         #[arg(short, long)]
         language: Vec<String>,
+    },
+
+    /// Serve local MCP 2025-06-18 over stdin/stdout within an explicit workspace.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
     },
 
     /// Trace a single symbol's complete flow through the codebase.
@@ -158,6 +171,16 @@ enum Commands {
         /// Project root.
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Start the root-scoped local stdio server.
+    Serve {
+        /// Canonical workspace boundary for every policy and source read.
+        #[arg(long)]
+        root: PathBuf,
     },
 }
 
@@ -317,7 +340,9 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             severity,
             confidence,
             language,
-        } => commands::run_diagnose(
+            gate_severity,
+            gate_confidence,
+        } => commands::run_diagnose_with_gate(
             &path,
             &language,
             &checks,
@@ -326,7 +351,21 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
             format,
             output_path,
             config_path,
+            gate_severity.map(|s| s.to_severity()),
+            gate_confidence.map(|c| c.to_confidence()),
         )?,
+        Commands::Mcp {
+            command: McpCommand::Serve { root },
+        } => {
+            if output_path.is_some() {
+                return Err(FlowspecError::Config {
+                    reason: "MCP uses stdout transport; --output is invalid".into(),
+                    suggestion: "omit --output".into(),
+                });
+            }
+            flowspec::mcp::server::run_scoped(&root, config_path)?;
+            0
+        }
         Commands::Trace {
             path,
             symbol,
