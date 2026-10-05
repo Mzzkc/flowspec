@@ -191,9 +191,25 @@ fn incomplete_retains_positive_findings() {
     fs::write(dir.path().join("missing.js"), JAVASCRIPT_MISSING).unwrap();
     let (after_code, after) = json_report(dir.path(), &[]);
     assert_eq!(after_code, 3);
-    state(&after, "incomplete", true, "incomplete");
+    state(&after, "incomplete", false, "incomplete");
     counts(&after, 2, 2, 1, 1);
     rejection(&after, "missing.js", "parse_error");
+    assert_eq!(after["authority"]["findings"]["total"], 0);
+    assert!(after["authority"]["losses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|loss| loss["reason"] == "semantic_proof_unavailable"
+            && loss["required_capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cap| cap == "consumer_closure")
+            && loss["affected_patterns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pattern| pattern == "data_dead_end")));
     assert_eq!(
         positive(&after),
         expected,
@@ -219,8 +235,24 @@ fn filtered_incomplete_still_exits_three() {
         ],
     );
     assert_eq!(code, 3, "display filtering cannot mask input loss");
-    state(&report, "incomplete", true, "incomplete");
+    state(&report, "incomplete", false, "incomplete");
     counts(&report, 2, 2, 1, 1);
+    assert_eq!(report["authority"]["findings"]["total"], 0);
+    assert!(report["authority"]["losses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|loss| loss["reason"] == "semantic_proof_unavailable"
+            && loss["required_capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cap| cap == "consumer_closure")
+            && loss["affected_patterns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pattern| pattern == "data_dead_end")));
     assert!(report["diagnostics"].as_array().unwrap().is_empty());
     rejection(&report, "missing.js", "parse_error");
 }
