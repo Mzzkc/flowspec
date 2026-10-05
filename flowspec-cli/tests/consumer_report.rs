@@ -29,7 +29,8 @@ fn diagnose_keeps_full_report_and_selected_parse_loss() {
         Some(3),
         "selected parse loss cannot become clean"
     );
-    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let wire: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let report = flowspec::commands::expand_report_records(&wire).unwrap();
     assert_eq!(report["execution"], "incomplete");
     assert!(!report["authority"]["losses"].as_array().unwrap().is_empty());
 }
@@ -38,7 +39,8 @@ fn diagnose_json_is_report_even_for_complete_clean() {
     let p = project("# clean empty module\n");
     let out = diagnose(&p, &[]);
     assert_eq!(out.status.code(), Some(0));
-    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let wire: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let report = flowspec::commands::expand_report_records(&wire).unwrap();
     assert!(report.is_object(), "full report envelope required");
     assert_eq!(report["execution"], "complete");
     assert!(report["authority"]["producer"]["build_sha"].is_string());
@@ -62,7 +64,8 @@ fn diagnose_gate_flags_are_separate_from_display() {
         Some(0),
         "valid gate controls must be accepted"
     );
-    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let wire: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let report = flowspec::commands::expand_report_records(&wire).unwrap();
     assert!(report["authority"].is_object());
 }
 fn frames(root: &std::path::Path, requests: Vec<Value>) -> (std::process::ExitStatus, Vec<Value>) {
@@ -135,9 +138,32 @@ fn private_positive_gate_survives_hidden_display_and_equal_options_identity() {
     let p = project("def _unused():\n    return 1\n");
     let hidden = diagnose(&p, &["--severity", "critical"]);
     assert_eq!(hidden.status.code(), Some(2));
-    let report: Value = serde_json::from_slice(&hidden.stdout).unwrap();
+    let hidden_wire: Value = serde_json::from_slice(&hidden.stdout).unwrap();
+    let report = flowspec::commands::expand_report_records(&hidden_wire).unwrap();
     assert_eq!(report["execution"], "complete");
-    assert_eq!(report["authority"]["findings"]["total"], 1);
+    assert_eq!(report["authority"]["findings"]["total"], 2);
+    let catalog = report["authority"]["findings"]["all"].as_array().unwrap();
+    for pattern in ["data_dead_end", "isolated_cluster"] {
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|f| f["pattern_id"] == pattern)
+                .count(),
+            1
+        );
+    }
+    let dde = catalog
+        .iter()
+        .find(|f| f["pattern_id"] == "data_dead_end")
+        .unwrap();
+    let cluster = catalog
+        .iter()
+        .find(|f| f["pattern_id"] == "isolated_cluster")
+        .unwrap();
+    assert_eq!(dde["subject"], cluster["subject"]);
+    assert_eq!(dde["range"], cluster["range"]);
+    assert_ne!(dde["semantic_id"], cluster["semantic_id"]);
+    assert_ne!(dde["cause"], cluster["cause"]);
     assert_eq!(report["authority"]["gate"]["verdict"], "fail");
     assert_eq!(report["authority"]["display"]["indices"], json!([]));
     let analyzed = Command::cargo_bin("flowspec")
@@ -154,7 +180,9 @@ fn private_positive_gate_survives_hidden_display_and_equal_options_identity() {
         ])
         .output()
         .unwrap();
-    let analyze: Value = serde_json::from_slice(&analyzed.stdout).unwrap();
+    let analyze_wire: Value = serde_json::from_slice(&analyzed.stdout).unwrap();
+    let analyze = flowspec::commands::expand_report_records(&analyze_wire).unwrap();
+    assert_eq!(hidden_wire["authority"], analyze_wire["authority"]);
     assert_eq!(report["authority"], analyze["authority"]);
     let (_, rows) = frames(
         p.path(),
@@ -164,7 +192,8 @@ fn private_positive_gate_survives_hidden_display_and_equal_options_identity() {
     );
     assert_eq!(rows[0]["result"]["isError"], false);
     assert_eq!(
-        rows[0]["result"]["structuredContent"]["authority"],
+        flowspec::commands::expand_report_records(&rows[0]["result"]["structuredContent"]).unwrap()
+            ["authority"],
         report["authority"]
     );
 }
@@ -186,14 +215,36 @@ fn mcp_full_catalog_retains_more_than_five_genuine_findings() {
         result["isError"], false,
         "catalog should be delivered, not truncated or defaulted"
     );
-    let report = &result["structuredContent"];
-    assert_eq!(report["authority"]["findings"]["total"], 8);
+    let report = flowspec::commands::expand_report_records(&result["structuredContent"]).unwrap();
+    assert_eq!(report["authority"]["findings"]["total"], 16);
+    let catalog = report["authority"]["findings"]["all"].as_array().unwrap();
+    for pattern in ["data_dead_end", "isolated_cluster"] {
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|f| f["pattern_id"] == pattern)
+                .count(),
+            8
+        );
+    }
+    for dde in catalog
+        .iter()
+        .filter(|f| f["pattern_id"] == "data_dead_end")
+    {
+        let cluster = catalog
+            .iter()
+            .find(|f| f["pattern_id"] == "isolated_cluster" && f["subject"] == dde["subject"])
+            .unwrap();
+        assert_eq!(cluster["range"], dde["range"]);
+        assert_ne!(cluster["semantic_id"], dde["semantic_id"]);
+        assert_ne!(cluster["cause"], dde["cause"]);
+    }
     assert_eq!(
         report["authority"]["findings"]["all"]
             .as_array()
             .unwrap()
             .len(),
-        8
+        16
     );
     assert!(report["authority"]["findings"]["all"]
         .as_array()

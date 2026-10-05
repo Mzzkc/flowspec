@@ -20,6 +20,7 @@ fn run(root: &std::path::Path, format: &str, extra: &[&str]) -> (i32, Value, usi
     } else {
         serde_json::from_slice(&out.stdout).unwrap()
     };
+    let value = flowspec::commands::expand_report_records(&value).unwrap();
     (out.status.code().unwrap(), value, out.stdout.len())
 }
 
@@ -51,7 +52,17 @@ fn decorator_registration_consumes_function_and_plain_private_survives() {
     )
     .unwrap();
     let (_, report, _) = run(plain.path(), "json", &[]);
-    assert_eq!(report["authority"]["findings"]["total"], 1);
+    assert_eq!(report["authority"]["findings"]["total"], 2);
+    let catalog = report["authority"]["findings"]["all"].as_array().unwrap();
+    for pattern in ["data_dead_end", "isolated_cluster"] {
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|f| f["pattern_id"] == pattern)
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -74,7 +85,28 @@ fn near_bound_full_authority_is_independent_of_format_and_display() {
     for (format, extra) in controls {
         let (code, report, bytes) = run(dir.path(), format, &extra);
         let a = &report["authority"];
-        assert_eq!(a["findings"]["total"], 3);
+        assert_eq!(a["findings"]["total"], 6);
+        let catalog = a["findings"]["all"].as_array().unwrap();
+        for pattern in ["data_dead_end", "isolated_cluster"] {
+            assert_eq!(
+                catalog
+                    .iter()
+                    .filter(|f| f["pattern_id"] == pattern)
+                    .count(),
+                3
+            );
+        }
+        for dde in catalog
+            .iter()
+            .filter(|f| f["pattern_id"] == "data_dead_end")
+        {
+            let cluster = catalog
+                .iter()
+                .find(|f| f["pattern_id"] == "isolated_cluster" && f["subject"] == dde["subject"])
+                .unwrap();
+            assert_eq!(cluster["range"], dde["range"]);
+            assert_ne!(cluster["semantic_id"], dde["semantic_id"]);
+        }
         if let Some(ref id) = identity {
             assert_eq!(
                 &a["report_identity"], id,
@@ -87,7 +119,13 @@ fn near_bound_full_authority_is_independent_of_format_and_display() {
         identity = Some(a["report_identity"].clone());
         exit = Some(code);
         assert!(bytes < 20480 || bytes <= source.len() * if format == "json" { 15 } else { 10 });
-        let matched = if extra.is_empty() { 3 } else { 0 };
+        let matched = if extra.is_empty() {
+            6
+        } else if format == "json" {
+            3
+        } else {
+            0
+        };
         assert_eq!(a["continuation"]["matched_total"], matched);
         assert_eq!(
             report["metadata"]["entity_count"].as_u64().unwrap() as usize,

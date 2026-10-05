@@ -71,7 +71,12 @@ fn clean_success_and_real_private_finding_survive() {
             assert_eq!(code, 0);
             assert_eq!(report["authority"]["execution"], "complete");
             assert!(report["authority"]["losses"].as_array().unwrap().is_empty());
-            assert_eq!(report["authority"]["findings"]["total"], findings);
+            assert_eq!(report["authority"]["findings"]["total"], findings * 2);
+            let report = flowspec::commands::expand_report_records(&report).unwrap();
+            let catalog = report["authority"]["findings"]["all"].as_array().unwrap();
+            for pattern in ["data_dead_end", "isolated_cluster"] {
+                assert_eq!(catalog.iter().filter(|f| f["pattern_id"] == pattern).count(), findings);
+            }
         }
     }
 }
@@ -87,7 +92,20 @@ fn incomplete_type_debt_keeps_real_private_catalog_under_filter() {
     )
     .unwrap();
     let baseline = flowspec::commands::expand_report_records(&baseline).unwrap();
-    assert_eq!(baseline["authority"]["findings"]["total"], 1);
+    assert_eq!(baseline["authority"]["findings"]["total"], 2);
+    let catalog = baseline["authority"]["findings"]["all"].as_array().unwrap();
+    for pattern in ["data_dead_end", "isolated_cluster"] {
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|f| f["pattern_id"] == pattern)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(catalog[0]["subject"], catalog[1]["subject"]);
+    assert_eq!(catalog[0]["range"], catalog[1]["range"]);
+    assert_ne!(catalog[0]["semantic_id"], catalog[1]["semantic_id"]);
     let mut identity = None;
     for (format, extra) in [
         ("json", vec![]),
@@ -121,7 +139,7 @@ fn incomplete_type_debt_keeps_real_private_catalog_under_filter() {
         identity = Some(a["report_identity"].clone());
         assert_eq!(
             a["continuation"]["matched_total"],
-            if extra.is_empty() { 1 } else { 0 }
+            if extra.is_empty() { 2 } else { 0 }
         );
     }
 }
