@@ -100,6 +100,17 @@ fn index(value: &Value) -> Result<usize, String> {
         .ok_or_else(|| "invalid record index".into())
 }
 
+fn report_slot<'a>(report: &'a mut Value, path: &[&str]) -> Result<&'a mut Value, String> {
+    let mut slot = report;
+    for key in path {
+        slot = slot
+            .as_object_mut()
+            .and_then(|fields| fields.get_mut(*key))
+            .ok_or_else(|| format!("missing or invalid report field {}", path.join(".")))?;
+    }
+    Ok(slot)
+}
+
 /// Expand `flowspec.report.records.v1` to the complete ordinary report value.
 /// Unencoded reports pass through unchanged. Malformed tables fail closed;
 /// no partial report, missing finding, or apparently clean result is returned.
@@ -195,9 +206,9 @@ pub fn expand_report_records(report: &Value) -> Result<Value, String> {
     for (parent, fields) in [("authority", AUTHORITY_FIELDS), ("", ROOT_FIELDS)] {
         for field in fields {
             let slot = if parent.is_empty() {
-                &mut result[*field]
+                report_slot(&mut result, &[*field])?
             } else {
-                &mut result[parent][*field]
+                report_slot(&mut result, &[parent, *field])?
             };
             if *slot == json!([]) {
                 continue;
@@ -211,7 +222,7 @@ pub fn expand_report_records(report: &Value) -> Result<Value, String> {
         }
     }
     for (parent, field) in [("inventory", "entries"), ("findings", "all")] {
-        let slot = &mut result["authority"][parent][field];
+        let slot = report_slot(&mut result, &["authority", parent, field])?;
         if *slot == json!([]) {
             continue;
         }
