@@ -9,7 +9,7 @@ Flowspec tells AI agents exactly how data moves through a system — what's conn
 ### From source
 
 ```bash
-git clone https://github.com/anthropics/flowspec.git
+git clone https://github.com/Mzzkc/flowspec.git
 cd flowspec
 cargo install --path flowspec-cli
 ```
@@ -101,7 +101,7 @@ flowspec diagnose . --checks phantom_dependency      # Single pattern
 flowspec diagnose . --confidence high                # High-confidence only
 ```
 
-Example output:
+Example summary projection (`--format summary`):
 
 ```
 Diagnostics: 3 finding(s)
@@ -115,6 +115,38 @@ Critical: 0  Warning: 2  Info: 1
 [INFO] phantom_dependency — Phantom dependency: import 'os' is never used in this file (dead_code.py:2)
   Fix: Remove the unused import 'os' to reduce phantom dependencies and improve clarity.
 ```
+
+Diagnose JSON/YAML now returns the full `AnalysisReport`, including authoritative
+findings, inventory, provenance, losses, pattern state and report identity.
+`--severity`, `--confidence`, and `--checks` change presentation only.
+The default diagnose gate is Info/Low (any qualified finding); use
+`--gate-severity` and `--gate-confidence` to choose the gate separately.
+Errors exit 1 before output, incomplete execution exits 3, a complete failing
+gate exits 2, and a complete passing gate exits 0. Analyze and MCP default to
+Critical/Low. Equal effective options retain equal authority identity and catalog.
+
+### Local MCP
+
+Run `flowspec mcp serve --root /absolute/workspace`. The normal packaged binary
+serves newline-delimited JSON-RPC on stdin/stdout, pinned to MCP 2025-06-18.
+`flowspec_analyze` accepts `path`, optional language/check arrays, display
+severity/confidence and separate gate thresholds. It returns the full report in
+`structuredContent` and the same JSON in a text block, without a top-five limit.
+Analysis/config/scope failures return `isError: true`; invalid arguments and
+unknown methods return JSON-RPC errors. Notifications emit no response.
+
+Relative tool paths and `--config` resolve from the canonical workspace root.
+Paths outside that root, parent traversal and every symlink in an analyzed tree
+are refused, including config links. Scoped discovery reads local ignore files
+only: parent/global ignore files and Git's ambient exclude policy are disabled.
+The local workspace must not be adversarially mutated during a call; concurrent
+symlink replacement is not an OS sandbox guarantee. This is a bounded local
+transport, with no remote server or qualification of newer protocol versions.
+
+Library callers should use `diagnose_report(path, config, languages, options)`
+and `report_exit_code`. `ReportOptions::default()` uses Critical/Low; set
+`gate_severity: Severity::Info` explicitly for diagnose's default intent.
+The old tuple `diagnose` is deprecated and unqualified: it discards report state.
 
 ### Trace
 
@@ -271,7 +303,7 @@ jobs:
         run: cargo install --path flowspec-cli
 
       - name: Structural diagnostics
-        run: flowspec diagnose . --severity warning --format sarif > results.sarif
+        run: flowspec diagnose . --gate-severity warning --format sarif > results.sarif
 
       - name: Upload SARIF
         if: always()
@@ -286,14 +318,15 @@ Use the exit code to gate merges:
 
 ```bash
 # Exit code 2 = diagnostics found at or above specified severity
-flowspec diagnose . --severity critical --format json
+flowspec diagnose . --gate-severity critical --format json
 ```
 
 | Exit Code | Meaning |
 |-----------|---------|
-| 0 | Success (no findings at specified severity) |
+| 0 | Complete analysis; selected gate passes |
 | 1 | Error (analysis failed) |
-| 2 | Findings detected at or above specified severity |
+| 2 | Complete analysis; qualified findings fail selected gate |
+| 3 | Incomplete analysis; gate not evaluated |
 
 ## Documentation
 
@@ -309,3 +342,12 @@ Detailed specification files are in [`.flowspec/spec/`](.flowspec/spec/):
 ## License
 
 AGPL-3.0 + Commercial dual license. See [LICENSE](LICENSE) for details.
+
+Complete reports may use `authority.analysis_graph.encoding = flowspec.graph.tables.v1`
+to retain graph records as indexed tables. This lossless form derives stable binding
+and edge keys from their unchanged subjects; Rust consumers can call
+`flowspec::commands::expand_graph_tables` to recover the original graph exactly.
+Compatibility loss and pattern-state arrays refer to the full authoritative arrays
+at the paths recorded in the graph payload. This encoding adds no analysis loss;
+requested JSON/YAML bytes still pass the original prewrite size guard, and Summary
+retains its exemption. The separate incomplete graph projection remains explicit.

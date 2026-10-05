@@ -312,10 +312,27 @@ fn test_c16_t12_other_patterns_unchanged_after_fix() {
     );
 
     // circular and isolated should be stable (circular was 5 pre-C20, now 6 with code growth)
-    assert!(
-        circular >= 5 && circular <= 8,
-        "circular_dependency should be 5-8, got {}",
-        circular
+    let mut circular_subjects: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.pattern == "circular_dependency")
+        .map(|d| d.entity.as_str())
+        .collect();
+    circular_subjects.sort_unstable();
+    assert_eq!(
+        circular_subjects,
+        vec![
+            "analyzer/extraction.rs, analyzer/patterns/mod.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "analyzer/flow.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "analyzer/patterns/mod.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "commands.rs, lib.rs, config/mod.rs",
+            "graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "graph/mod.rs, graph/populate.rs",
+            "manifest/json.rs, manifest/mod.rs",
+            "manifest/mod.rs, manifest/sarif.rs",
+            "manifest/mod.rs, manifest/summary.rs",
+            "manifest/mod.rs, manifest/yaml.rs",
+        ],
+        "exact self-source module cycles must match independently reviewed edges"
     );
     assert_eq!(isolated, 1, "isolated_cluster should be unchanged");
     // After C20 dedup: Methods excluded from data_dead_end (dedicated orphaned_impl pattern)
@@ -430,7 +447,28 @@ fn test_c16_t14_dogfood_per_pattern_post_fix_baseline() {
         orphaned
     );
     // C20: circular_dependency increased to 6 (code growth + improved detection)
-    assert_eq!(circular, 6, "circular_dependency = 6 (C20 baseline)");
+    let mut circular_subjects: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.pattern == "circular_dependency")
+        .map(|d| d.entity.as_str())
+        .collect();
+    circular_subjects.sort_unstable();
+    assert_eq!(
+        circular_subjects,
+        vec![
+            "analyzer/extraction.rs, analyzer/patterns/mod.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "analyzer/flow.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "analyzer/patterns/mod.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "commands.rs, lib.rs, config/mod.rs",
+            "graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "graph/mod.rs, graph/populate.rs",
+            "manifest/json.rs, manifest/mod.rs",
+            "manifest/mod.rs, manifest/sarif.rs",
+            "manifest/mod.rs, manifest/summary.rs",
+            "manifest/mod.rs, manifest/yaml.rs",
+        ],
+        "exact self-source module cycles must match independently reviewed edges"
+    );
     assert_eq!(partial, 2, "partial_wiring = 2");
     assert_eq!(isolated, 1, "isolated_cluster = 1");
     // Registered test functions are consumers, not a required false-positive floor.

@@ -291,7 +291,12 @@ pub fn analyze_with_registry(
     let requested = canonicalize(languages)?;
     let configured = canonicalize(&config.languages)?;
     let (mut files, detected_langs, mut input_records, mut losses) =
-        discover_source_files_with_registry(project_path, &config.exclude, registry);
+        discover_source_files_with_registry(
+            project_path,
+            &config.exclude,
+            registry,
+            config.read_root.is_some(),
+        );
     let active_languages = if !requested.is_empty() {
         requested
     } else if !configured.is_empty() {
@@ -1097,6 +1102,56 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
     unique
 }
 
+/// Effective report controls shared by analyze, diagnose and MCP.
+/// Presentation filters never remove authority findings or affect the gate.
+#[derive(Debug, Clone)]
+pub struct ReportOptions {
+    /// Display only these patterns; empty displays all.
+    pub checks: Vec<String>,
+    /// Minimum displayed severity.
+    pub severity: Option<Severity>,
+    /// Minimum displayed confidence.
+    pub confidence: Option<Confidence>,
+    /// Minimum qualified severity for the full catalog gate.
+    pub gate_severity: Severity,
+    /// Minimum qualified confidence for the full catalog gate.
+    pub gate_confidence: Confidence,
+}
+impl Default for ReportOptions {
+    fn default() -> Self {
+        Self {
+            checks: Vec::new(),
+            severity: None,
+            confidence: None,
+            gate_severity: Severity::Critical,
+            gate_confidence: Confidence::Low,
+        }
+    }
+}
+
+/// Return the full analysis report, including loss and gate state.
+/// Consumers validate the requested serialized output before writing it.
+/// Use Info/Low explicitly for diagnose's any-qualified-finding gate;
+/// the default options retain analyze/MCP's Critical/Low gate.
+pub fn diagnose_report(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &ReportOptions,
+) -> Result<AnalysisReport, FlowspecError> {
+    Ok(diagnose_report_with_source(project_path, config, languages, options)?.manifest)
+}
+
+/// Shared report API implementation retaining the measured source-byte budget.
+pub(crate) fn diagnose_report_with_source(
+    project_path: &Path,
+    config: &Config,
+    languages: &[String],
+    options: &ReportOptions,
+) -> Result<AnalysisResult, FlowspecError> {
+    commands::prepare_report(project_path, config, languages, options)
+}
+
 /// Run diagnostics on a project, returning filtered diagnostic entries.
 ///
 /// Runs the full [`analyze()`] pipeline internally, then filters the
@@ -1114,6 +1169,9 @@ pub fn deduplicate_flows(flows: Vec<FlowEntry>) -> Vec<FlowEntry> {
 ///
 /// A tuple of `(filtered_diagnostics, has_findings)`. The boolean indicates
 /// whether any diagnostics survived filtering.
+#[deprecated(
+    note = "Unqualified legacy projection discards report state; use diagnose_report and report_exit_code"
+)]
 pub fn diagnose(
     project_path: &Path,
     config: &Config,
@@ -1187,6 +1245,7 @@ fn discover_source_files_with_registry(
     project_path: &Path,
     exclude_patterns: &[String],
     registry: &registry::Registry,
+    scoped: bool,
 ) -> (
     Vec<PathBuf>,
     Vec<String>,
@@ -1231,6 +1290,9 @@ fn discover_source_files_with_registry(
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true);
+    if scoped {
+        builder.parents(false).git_global(false).git_exclude(false);
+    }
 
     for result in builder.build() {
         let entry = match result {

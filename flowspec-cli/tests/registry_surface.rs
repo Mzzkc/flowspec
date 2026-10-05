@@ -40,16 +40,17 @@ fn normal_cli_reports_full_registry_even_when_pattern_filtered() {
         .unwrap();
     assert!(matches!(out.status.code(), Some(0 | 2 | 3)));
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let catalog_output = Command::cargo_bin("flowspec")
+        .unwrap()
+        .arg("registry")
+        .output()
+        .unwrap();
+    assert!(catalog_output.status.success());
+    let catalog: serde_json::Value = serde_json::from_slice(&catalog_output.stdout).unwrap();
     assert_eq!(
-        report["provenance"]["registry"]["patterns"]
-            .as_array()
-            .map(Vec::len),
-        Some(13)
+        report["authority"]["provenance"]["registry"]["digest"],
+        catalog["digest"]
     );
-    assert_eq!(
-        report["provenance"]["registry"]["languages"]
-            .as_array()
-            .map(Vec::len),
-        Some(4)
-    );
+    assert_eq!(catalog["patterns"].as_array().map(Vec::len), Some(13));
+    assert_eq!(catalog["languages"].as_array().map(Vec::len), Some(4));
 }

@@ -228,11 +228,7 @@ fn diagnose_yaml_rust_fixture() {
     let output = flowspec().args(["diagnose", &fixture]).output().unwrap();
 
     let code = output.status.code().unwrap();
-    assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
-        code
-    );
+    assert!(code == 3, "selected-loss fixture must exit 3, got {}", code);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&stdout);
@@ -241,6 +237,13 @@ fn diagnose_yaml_rust_fixture() {
         "Rust fixture diagnose YAML invalid: {:?}\nOutput:\n{}",
         parsed.err(),
         &stdout[..stdout.len().min(500)]
+    );
+
+    let state: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
+    assert_eq!(state["execution"].as_str(), Some("incomplete"));
+    assert_eq!(
+        state["authority"]["gate"]["verdict"].as_str(),
+        Some("not_evaluated")
     );
 }
 
@@ -253,11 +256,7 @@ fn diagnose_json_rust_fixture() {
         .unwrap();
 
     let code = output.status.code().unwrap();
-    assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
-        code
-    );
+    assert!(code == 3, "selected-loss fixture must exit 3, got {}", code);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
@@ -269,12 +268,12 @@ fn diagnose_json_rust_fixture() {
     });
 
     assert!(
-        parsed.is_array(),
+        parsed["diagnostics"].is_array(),
         "Diagnose JSON output must be an array, got: {}",
         parsed
     );
 
-    if let Some(arr) = parsed.as_array() {
+    if let Some(arr) = parsed["diagnostics"].as_array() {
         for entry in arr {
             assert!(
                 entry.get("pattern").is_some(),
@@ -290,6 +289,13 @@ fn diagnose_json_rust_fixture() {
             );
         }
     }
+
+    let state: serde_yaml::Value = serde_yaml::from_str(&stdout).unwrap();
+    assert_eq!(state["execution"].as_str(), Some("incomplete"));
+    assert_eq!(
+        state["authority"]["gate"]["verdict"].as_str(),
+        Some("not_evaluated")
+    );
 }
 
 #[test]
@@ -301,11 +307,7 @@ fn diagnose_sarif_rust_fixture() {
         .unwrap();
 
     let code = output.status.code().unwrap();
-    assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
-        code
-    );
+    assert!(code == 3, "selected-loss fixture must exit 3, got {}", code);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
@@ -371,8 +373,8 @@ fn exit_code_2_diagnose_findings_all_formats() {
 
         assert_eq!(
             output.status.code().unwrap(),
-            2,
-            "Diagnose with findings for format '{}' should exit 2, got {:?}",
+            3,
+            "Diagnose with findings for format '{}' must report incomplete3, got {:?}",
             format,
             output.status.code()
         );
@@ -555,7 +557,9 @@ fn diagnose_checks_filter_stable() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let entries = parsed.as_array().expect("Diagnose JSON should be an array");
+    let entries = parsed["diagnostics"]
+        .as_array()
+        .expect("Diagnose JSON should be an array");
 
     for entry in entries {
         let pattern = entry["pattern"].as_str().unwrap_or("");
@@ -584,7 +588,9 @@ fn diagnose_severity_filter_stable() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let entries = parsed.as_array().expect("Diagnose JSON should be an array");
+    let entries = parsed["diagnostics"]
+        .as_array()
+        .expect("Diagnose JSON should be an array");
 
     let valid_severities = ["warning", "critical"];
     for entry in entries {

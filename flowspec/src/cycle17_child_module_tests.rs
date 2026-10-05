@@ -748,10 +748,27 @@ fn test_c17_t21_stable_patterns_unchanged() {
     );
 
     // circular was 5 pre-C20, now 6 with code growth
-    assert!(
-        circular >= 5 && circular <= 8,
-        "circular_dependency should be 5-8, got {}",
-        circular
+    let mut circular_subjects: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.pattern == "circular_dependency")
+        .map(|d| d.entity.as_str())
+        .collect();
+    circular_subjects.sort_unstable();
+    assert_eq!(
+        circular_subjects,
+        vec![
+            "analyzer/extraction.rs, analyzer/patterns/mod.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "analyzer/flow.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "analyzer/patterns/mod.rs, graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "commands.rs, lib.rs, config/mod.rs",
+            "graph/mod.rs, graph/module_index.rs, registry.rs, lib.rs",
+            "graph/mod.rs, graph/populate.rs",
+            "manifest/json.rs, manifest/mod.rs",
+            "manifest/mod.rs, manifest/sarif.rs",
+            "manifest/mod.rs, manifest/summary.rs",
+            "manifest/mod.rs, manifest/yaml.rs",
+        ],
+        "exact self-source module cycles must match independently reviewed edges"
     );
     assert_eq!(partial, 2, "partial_wiring must be exactly 2");
     assert_eq!(isolated, 1, "isolated_cluster must be exactly 1");

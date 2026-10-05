@@ -588,7 +588,7 @@ fn python_exit_codes_unchanged_by_js_adapter() {
         .unwrap()
         .args(["diagnose", issues.path().to_str().unwrap()])
         .assert()
-        .code(2);
+        .code(3);
 }
 
 // === Category 6: Diagnose Command with JS (P1) ===
@@ -614,7 +614,7 @@ function main() { console.log(used()); }
 
     assert_eq!(
         output.status.code(),
-        Some(2),
+        Some(3),
         "JS dead code should produce findings (exit 2). Got: {:?}",
         output.status.code()
     );
@@ -622,7 +622,7 @@ function main() { console.log(used()); }
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(
-        parsed.as_array().unwrap().len() > 0,
+        parsed["diagnostics"].as_array().unwrap().len() > 0,
         "diagnose should produce >= 1 diagnostic for JS dead code"
     );
 }
@@ -649,8 +649,8 @@ fn js_diagnose_json_valid_array() {
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("JS diagnose --format json is not valid JSON");
     assert!(
-        parsed.is_array(),
-        "JS diagnose output must be a JSON array, got: {:?}",
+        parsed["diagnostics"].is_array(),
+        "JS diagnose report diagnostics must be a JSON array, got: {:?}",
         parsed
     );
 }

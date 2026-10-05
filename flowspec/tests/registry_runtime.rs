@@ -23,11 +23,16 @@ fn report_exposes_result_determining_registry_descriptors() {
         .manifest
         .authority
         .unwrap();
-    let registry = &a["provenance"]["registry"];
+    let registered = flowspec::registry::Registry::default();
+    let registry = registered.metadata();
+    assert_eq!(
+        a["provenance"]["registry"]["digest"],
+        serde_json::json!(registered.digest())
+    );
     assert_eq!(
         registry["languages"].as_array().map(Vec::len),
         Some(4),
-        "report must carry the same language descriptors used by discovery/factories"
+        "public catalog must carry the same language descriptors bound by the report digest"
     );
     assert_eq!(registry["patterns"].as_array().map(Vec::len), Some(13));
     assert_eq!(registry["languages"][2]["id"], "typescript");
@@ -40,7 +45,7 @@ fn report_exposes_result_determining_registry_descriptors() {
         .unwrap()
         .iter()
         .any(|v| v == "typescript_preprocessing"));
-    assert!(registry["digest"].as_str().unwrap().starts_with("sha256:"));
+    assert!(registered.digest().starts_with("sha256:"));
 }
 
 #[test]

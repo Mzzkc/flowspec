@@ -556,8 +556,8 @@ fn language_filter_preserves_exit_2_for_findings() {
 
     let code = output.status.code().unwrap();
     assert_eq!(
-        code, 2,
-        "Python with dead code + phantom dep should exit 2 from diagnose. Got {}",
+        code, 3,
+        "Python with dead code + phantom dep must report incomplete3 from diagnose. Got {}",
         code
     );
 }

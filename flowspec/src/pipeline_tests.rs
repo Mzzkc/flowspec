@@ -665,9 +665,23 @@ fn test_text_scanner_functions_deleted_from_source() {
 fn test_pipeline_imports_present_in_lib() {
     let lib_source = include_str!("lib.rs");
 
+    let registry = crate::registry::Registry::default();
+    let python = registry.language("python").unwrap();
+    let adapter = python.factory.unwrap()();
+    assert_eq!(adapter.language_name(), "python");
+    let parsed = adapter
+        .parse_file(
+            std::path::Path::new("pipeline.py"),
+            "def _actual_parser_probe():\n    return 1\n",
+        )
+        .unwrap();
+    assert!(parsed
+        .symbols
+        .iter()
+        .any(|s| s.name == "_actual_parser_probe"));
     assert!(
-        lib_source.contains("PythonAdapter") || lib_source.contains("python::"),
-        "lib.rs must use PythonAdapter for real parsing"
+        lib_source.contains("d.factory"),
+        "lib.rs must invoke registered factories"
     );
     assert!(
         lib_source.contains("populate_graph"),

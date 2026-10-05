@@ -36,6 +36,8 @@ pub struct Config {
     pub origin: String,
     /// Digest of the bytes consumed while loading the policy file.
     pub source_sha256: Option<String>,
+    /// Optional local transport read boundary; excludes ambient global/parent ignore policy.
+    pub read_root: Option<PathBuf>,
 }
 
 impl Config {
@@ -43,8 +45,7 @@ impl Config {
     ///
     /// If `config_path` is Some, load from that path. Otherwise, look for
     /// `.flowspec/config.yaml` in the project root. If no config file exists,
-    /// use defaults. Malformed YAML degrades gracefully to defaults with a
-    /// warning rather than crashing analysis.
+    /// use defaults. Invalid or unreadable policy refuses analysis.
     pub fn load(
         project_root: &Path,
         config_path: Option<&Path>,
@@ -66,6 +67,7 @@ impl Config {
                 exclude: config_file.exclude,
                 origin: "explicit".to_string(),
                 source_sha256: Some(source_sha256),
+                read_root: None,
             });
         }
 
@@ -78,6 +80,7 @@ impl Config {
                 exclude: config_file.exclude,
                 origin: "implicit".to_string(),
                 source_sha256: Some(source_sha256),
+                read_root: None,
             })
         } else {
             Ok(Self {
@@ -86,15 +89,16 @@ impl Config {
                 exclude: Vec::new(),
                 origin: "default".to_string(),
                 source_sha256: None,
+                read_root: None,
             })
         }
     }
 }
 
-/// Read and deserialize a config file, returning defaults on any error.
+/// Read and deserialize a config file, refusing invalid policy.
 ///
 /// Handles: empty files, comment-only YAML, malformed YAML, encoding issues.
-/// Logs a warning on parse failure rather than crashing.
+/// Read, syntax and unsupported-policy failures are explicit errors.
 fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::FlowspecError> {
     let failure = |reason: String| crate::error::FlowspecError::Config {
         reason: format!("{}: {}", path.display(), reason),

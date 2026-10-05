@@ -22,11 +22,52 @@ fn legacy_collision_projection_preserves_unique_rust_module_bindings() {
 }
 #[test]
 fn full_authority_sarif_obeys_preserved_rust_fixture_output_budget() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rust");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/rust");
     let result = analyze(&root, &Config::default(), &["rust".into()]).unwrap();
-    let output = SarifFormatter::new()
+    let raw_output = SarifFormatter::new()
         .format_manifest(&result.manifest)
         .unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let output_path = destination.path().join("report.sarif");
+    let exit = flowspec::commands::run_analyze(
+        &root,
+        &["rust".into()],
+        flowspec::OutputFormat::Sarif,
+        Some(&output_path),
+        None,
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(exit, 0 | 2 | 3));
+    let output = std::fs::read_to_string(output_path).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&raw_output).unwrap();
+    let rendered: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let mut expected_ids: Vec<_> = result.manifest.authority.as_ref().unwrap()["findings"]["all"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| finding["semantic_id"].as_str().unwrap().to_owned())
+        .collect();
+    let mut actual_ids: Vec<_> = rendered["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            finding["partialFingerprints"]["flowspec.semantic_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    expected_ids.sort();
+    actual_ids.sort();
+    assert_eq!(expected_ids, actual_ids);
+    assert_eq!(
+        raw["runs"][0]["tool"]["driver"]["rules"],
+        rendered["runs"][0]["tool"]["driver"]["rules"]
+    );
     assert!(
         validate_manifest_size(&output, result.source_bytes, "sarif").is_ok(),
         "full SARIF authority must retain the existing20x/floor budget; bytes={} source={}",

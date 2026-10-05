@@ -169,7 +169,7 @@ fn regression_diagnose_checks_filter() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = parsed.as_array().unwrap();
+    let arr = parsed["diagnostics"].as_array().unwrap();
 
     for entry in arr {
         assert_eq!(
