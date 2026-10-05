@@ -421,6 +421,48 @@ pub(crate) fn build(
     registry: &crate::registry::Registry,
 ) -> Value {
     let (root, config) = context;
+    if let Some(policy) = &config.semantic_policy {
+        for (pattern, requested, operation) in [
+            (
+                "partial_wiring",
+                !policy.peers.is_empty(),
+                "peer operation/complete CFG closure",
+            ),
+            (
+                "asymmetric_handling",
+                !policy.peers.is_empty(),
+                "peer effect/resource invariants",
+            ),
+            (
+                "incomplete_migration",
+                !policy.migrations.is_empty(),
+                "old/new authority consumer closure",
+            ),
+            (
+                "missing_reexport",
+                !policy.exports.is_empty(),
+                "complete parent export graph",
+            ),
+            (
+                "layer_violation",
+                !policy.layers.is_empty(),
+                "resolved forbidden module edges",
+            ),
+        ] {
+            if requested {
+                let mut item = loss(
+                    "policy_operation_unavailable",
+                    String::new(),
+                    None,
+                    "semantic_policy",
+                );
+                item["affected_patterns"] = json!([pattern]);
+                item["required_capabilities"] = json!([operation]);
+                item["policy"] = json!(policy);
+                losses.push(item);
+            }
+        }
+    }
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
@@ -510,7 +552,7 @@ pub(crate) fn build(
         );
     }
     let effective = json!({"languages":languages,"exclude":config.exclude,
-        "gate_threshold":{"min_severity":"critical","min_confidence":"low"}});
+        "gate_threshold":{"min_severity":"critical","min_confidence":"low"},"semantic_policy":config.semantic_policy});
     let config_provenance = json!({"origin":origin,"source_path_key":config_key,
         "source_sha256":config.source_sha256,"effective_digest":hash("config",&effective),"effective":effective});
     let effective_languages: Vec<String> = inputs
@@ -572,8 +614,9 @@ pub(crate) fn build(
                     } else { affected_paths.insert(key.to_string()); }
                 }
             }
-            if pattern == "layer_violation" { reasons.push("policy_absent".to_string()); }
-            let state=if pattern=="layer_violation" {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
+            let policy_absent = pattern=="layer_violation" && config.semantic_policy.as_ref().is_none_or(|policy|policy.layers.is_empty());
+            if policy_absent { reasons.push("policy_absent".to_string()); }
+            let state=if policy_absent {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
             json!({"language":lang,"state":state,"required_capabilities":capabilities,"affected_paths":affected_paths,"reason_codes":reasons})
         }).collect();
         pattern_state.push(json!({"pattern_id":pattern,"cells":cells}));
