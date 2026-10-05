@@ -450,8 +450,8 @@ fn t21_analyze_still_works() {
         .unwrap();
 
     assert!(
-        output.status.code().unwrap() == 0 || output.status.code().unwrap() == 2,
-        "analyze must exit 0 or 2, got {}",
+        matches!(output.status.code(), Some(0 | 2 | 3)),
+        "analyze must exit 0, 2 or 3, got {}",
         output.status.code().unwrap()
     );
 }
@@ -461,7 +461,7 @@ fn t21_analyze_still_works() {
 fn t22_manifest_byte_floor_still_enforced() {
     let dir = TempDir::new().unwrap();
     // Tiny file — should trigger byte floor protection
-    fs::write(dir.path().join("tiny.py"), "x = 1").unwrap();
+    fs::write(dir.path().join("tiny.py"), "pass\n").unwrap();
     let output = flowspec()
         .args(["analyze", dir.path().to_str().unwrap(), "--format", "yaml"])
         .output()

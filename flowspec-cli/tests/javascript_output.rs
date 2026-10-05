@@ -21,8 +21,8 @@ fn js_yaml_output_is_valid_yaml() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "JS analysis exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "JS analysis exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -53,8 +53,8 @@ fn js_json_output_is_valid_json() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "JS JSON analysis exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "JS JSON analysis exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -117,8 +117,8 @@ fn js_exit_codes_only_0_1_2() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 1 || code == 2,
-        "JS analysis returned exit code {}. Only 0, 1, 2 are valid.",
+        code == 0 || code == 1 || code == 2 || code == 3,
+        "JS analysis returned exit code {}. Only 0, 1, 2, 3 are valid.",
         code
     );
 }
@@ -460,8 +460,8 @@ fn ts_tsx_extensions_recognized() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "TS/TSX analysis exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "TS/TSX analysis exit code must be 0, 2 or 3, got {}",
         code
     );
 

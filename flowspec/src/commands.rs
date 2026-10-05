@@ -152,6 +152,20 @@ pub fn run_analyze_with_gate(
         serde_yaml::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
             reason: e.to_string(),
         })?;
+    // An already incomplete report can omit auxiliary graph evidence while
+    // retaining the full finding catalog and the legacy consumer projection.
+    // Choose this once, before display filters, for both structured formats.
+    let compact_budget = result.source_bytes.max(1024).saturating_mul(10);
+    if result.manifest.execution == Some(crate::Execution::Incomplete)
+        && (full_json.len() as u64 > compact_budget || full_yaml.len() as u64 > compact_budget)
+    {
+        compact_incomplete_report(&mut result.manifest);
+    }
+    let full_json =
+        serde_json::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?;
+    let full_yaml = analyze_yaml(&result.manifest)?;
     if result.manifest.authority.is_some()
         && (validate_manifest_size(&full_json, result.source_bytes, "json").is_err()
             || validate_manifest_size(&full_yaml, result.source_bytes, "yaml").is_err())
@@ -213,11 +227,7 @@ pub fn run_analyze_with_gate(
                 reason: e.to_string(),
             })?
         }
-        OutputFormat::Yaml => {
-            serde_yaml::to_string(&result.manifest).map_err(|e| FlowspecError::Manifest {
-                reason: e.to_string(),
-            })?
-        }
+        OutputFormat::Yaml => analyze_yaml(&result.manifest)?,
         OutputFormat::Summary => {
             let completeness = result
                 .manifest
@@ -252,6 +262,70 @@ pub fn run_analyze_with_gate(
     write_output(&output, output_path)?;
 
     Ok(crate::report_exit_code(&result.manifest, None))
+}
+
+fn compact_incomplete_report(manifest: &mut Manifest) {
+    let Some(authority) = manifest.authority.as_mut() else {
+        return;
+    };
+    authority["analysis_graph"] = serde_json::json!({
+        "projection":{
+            "analysis_graph":"omitted",
+            "compatibility_losses":"/authority/losses",
+            "compatibility_pattern_state":"/authority/pattern_state"
+        }
+    });
+    authority["losses"]
+        .as_array_mut()
+        .expect("report losses")
+        .push(crate::report_authority::loss(
+            "output_truncation",
+            String::new(),
+            None,
+            "serialization",
+        ));
+    authority["continuation"]["truncated"] = serde_json::json!(true);
+    for pattern in authority["pattern_state"]
+        .as_array_mut()
+        .expect("pattern states")
+    {
+        for cell in pattern["cells"].as_array_mut().expect("pattern cells") {
+            cell["state"] = serde_json::json!("incomplete");
+            let reasons = cell["reason_codes"].as_array_mut().expect("reason codes");
+            if !reasons.iter().any(|reason| reason == "output_truncation") {
+                reasons.push(serde_json::json!("output_truncation"));
+            }
+        }
+    }
+    // These compatibility arrays are references in this explicit projection;
+    // the authoritative arrays above remain complete, including earlier losses.
+    manifest.losses.clear();
+    manifest.pattern_state.clear();
+    crate::report_authority::refresh_identity(authority);
+}
+
+fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
+    let projected = manifest.authority.as_ref().is_some_and(|authority| {
+        authority["analysis_graph"]["projection"]["analysis_graph"] == "omitted"
+    });
+    if !projected {
+        return serde_yaml::to_string(manifest).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        });
+    }
+    // JSON flow values are valid YAML. Keep ordinary top-level YAML sections
+    // while avoiding the indentation overhead of the authoritative payload.
+    let value = serde_json::to_value(manifest).map_err(|e| FlowspecError::Manifest {
+        reason: e.to_string(),
+    })?;
+    let mut output = String::new();
+    for (key, value) in value.as_object().expect("manifest object") {
+        let flow = serde_json::to_string(value).map_err(|e| FlowspecError::Manifest {
+            reason: e.to_string(),
+        })?;
+        output.push_str(&format!("{key}: {flow}\n"));
+    }
+    Ok(output)
 }
 
 fn bound_analyze_report(manifest: &mut Manifest) {

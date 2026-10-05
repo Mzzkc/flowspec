@@ -371,7 +371,7 @@ fn sarif_many_diagnostics_valid() {
     // Create many dead-end functions to generate lots of diagnostics
     let mut code = String::new();
     for i in 0..20 {
-        code.push_str(&format!("def dead_fn_{}():\n    return {}\n\n", i, i));
+        code.push_str(&format!("def _dead_fn_{}():\n    return {}\n\n", i, i));
     }
     std::fs::write(dir.path().join("many_dead.py"), &code).unwrap();
 

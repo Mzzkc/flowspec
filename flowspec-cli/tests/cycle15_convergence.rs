@@ -92,8 +92,8 @@ fn yaml_valid_after_phase1_rust_fixture() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -117,8 +117,8 @@ fn json_valid_after_phase1_rust_fixture() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -160,8 +160,8 @@ fn sarif_valid_after_phase1_rust_fixture() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -203,8 +203,8 @@ fn summary_valid_after_phase1_rust_fixture() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 

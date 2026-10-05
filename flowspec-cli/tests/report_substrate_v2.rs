@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
-const UNUSED: &str = "def unused():\n    return 1\n";
+const UNUSED: &str = "def _unused():\n    return 1\n";
 const PYTHON_ERROR: &str = "def broken(\n";
 const JAVASCRIPT_MISSING: &str = "function f() {\n";
 
@@ -90,10 +90,10 @@ fn positive(report: &Value) -> Value {
         .iter()
         .find(|item| {
             item["pattern"] == "data_dead_end"
-                && item["entity"] == "unused.py::unused"
+                && item["entity"] == "unused.py::_unused"
                 && item["loc"] == "unused.py:1"
         })
-        .expect("valid positive finding for unused.py::unused at unused.py:1");
+        .expect("valid positive finding for unused.py::_unused at unused.py:1");
     json!({
         "pattern": diagnostic["pattern"],
         "entity": diagnostic["entity"],
@@ -122,9 +122,19 @@ fn complete_findings_report_v2() {
         b"class Box:\n    @staticmethod\n    def open(self):\n        return 1\n",
     )]);
     let (code, report) = json_report(dir.path(), &[]);
-    assert_eq!(code, 2, "critical finding must pass the existing gate");
-    state(&report, "complete", true, "findings");
+    assert_eq!(
+        code, 3,
+        "raw legacy critical observation is unsupported authority"
+    );
+    state(&report, "incomplete", false, "incomplete");
     counts(&report, 1, 1, 1, 0);
+    assert_eq!(report["authority"]["gate"]["verdict"], "not_evaluated");
+    assert_eq!(report["authority"]["findings"]["total"], 0);
+    assert!(report["authority"]["losses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|loss| loss["reason"] == "semantic_proof_unavailable"));
     assert!(report["diagnostics"]
         .as_array()
         .unwrap()

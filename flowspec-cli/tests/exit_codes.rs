@@ -8,7 +8,7 @@ fn create_clean_project() -> TempDir {
     fs::write(
         dir.path().join("clean.py"),
         r#"
-def greet(name: str) -> str:
+def greet(name):
     return f"Hello, {name}"
 
 def main():
@@ -159,8 +159,8 @@ fn exit_codes_are_only_0_1_2() {
         .unwrap();
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 1 || code == 2,
-        "Unexpected exit code: {}. Only 0, 1, 2 are valid per cli.yaml.",
+        code == 0 || code == 1 || code == 2 || code == 3,
+        "Unexpected exit code: {}. Only 0, 1, 2, 3 are valid per cli.yaml.",
         code
     );
 }

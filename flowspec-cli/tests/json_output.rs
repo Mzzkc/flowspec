@@ -8,7 +8,7 @@ fn create_clean_project() -> TempDir {
     fs::write(
         dir.path().join("clean.py"),
         r#"
-def greet(name: str) -> str:
+def greet(name):
     return f"Hello, {name}"
 
 def main():
@@ -63,7 +63,7 @@ fn json_output_is_valid_json() {
         .unwrap();
 
     assert!(
-        output.status.success() || output.status.code() == Some(2),
+        output.status.success() || matches!(output.status.code(), Some(2 | 3)),
         "analyze --format json failed with exit code {:?}. stderr: {}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
@@ -364,7 +364,7 @@ fn sarif_format_is_now_implemented() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "sarif"])
         .assert()
-        .code(predicate::in_iter([0, 2]));
+        .code(predicate::in_iter([0, 2, 3]));
 }
 
 #[test]

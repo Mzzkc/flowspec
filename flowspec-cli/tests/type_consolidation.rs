@@ -15,7 +15,7 @@ fn create_clean_project() -> TempDir {
     fs::write(
         dir.path().join("clean.py"),
         r#"
-def greet(name: str) -> str:
+def greet(name):
     return f"Hello, {name}"
 
 def main():

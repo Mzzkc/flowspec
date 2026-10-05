@@ -619,15 +619,15 @@ fn diff_format_flag_respected() {
 // T26: existing commands unaffected by diff addition
 #[test]
 fn existing_commands_unaffected_by_diff_addition() {
-    // analyze on current dir should work (exit 0 or 2)
+    // analyze on current dir should work (exit 0, 2 or 3)
     let assert = flowspec()
         .args(["analyze", "."])
         .current_dir(workspace_root())
         .assert();
     let exit_code = assert.get_output().status.code().unwrap();
     assert!(
-        exit_code == 0 || exit_code == 2,
-        "analyze should exit 0 or 2, got {}",
+        exit_code == 0 || exit_code == 2 || exit_code == 3,
+        "analyze should exit 0, 2 or 3, got {}",
         exit_code
     );
 

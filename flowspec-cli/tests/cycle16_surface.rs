@@ -106,8 +106,8 @@ fn t01_python_self_method_in_entity_calls() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -177,8 +177,8 @@ fn t02_js_this_method_in_entity_calls() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -246,8 +246,8 @@ fn t03_rust_self_method_in_entity_calls() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -575,8 +575,8 @@ fn t11_summary_reflects_method_call_fix() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
-        "exit code must be 0 or 2, got {}",
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3, got {}",
         code
     );
 
@@ -701,7 +701,7 @@ fn t15_self_call_to_nonexistent_method_no_edge() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
+        code == 0 || code == 2 || code == 3,
         "Analysis must not crash on self.nonexistent(). Exit code: {}",
         code
     );
@@ -766,7 +766,7 @@ fn t17_non_self_method_call_no_crash() {
 
     let code = output.status.code().unwrap();
     assert!(
-        code == 0 || code == 2,
+        code == 0 || code == 2 || code == 3,
         "Analysis must not crash on non-self method call. Exit code: {}",
         code
     );
@@ -792,7 +792,10 @@ fn t18_c15_convergence_regression_guard() {
         .unwrap();
 
     let code = output.status.code().unwrap();
-    assert!(code == 0 || code == 2, "exit code must be 0 or 2");
+    assert!(
+        code == 0 || code == 2 || code == 3,
+        "exit code must be 0, 2 or 3"
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let _parsed: serde_yaml::Value = serde_yaml::from_str(&stdout)

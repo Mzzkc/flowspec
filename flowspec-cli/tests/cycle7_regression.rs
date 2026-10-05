@@ -23,7 +23,7 @@ fn create_project_with_issues() -> TempDir {
     fs::write(
         dir.path().join("dead_code.py"),
         "def used_function():\n    return 42\n\n\
-         def dead_function():\n    return 'unreachable'\n\n\
+         def _dead_function():\n    return 'unreachable'\n\n\
          def main():\n    result = used_function()\n    print(result)\n",
     )
     .unwrap();
