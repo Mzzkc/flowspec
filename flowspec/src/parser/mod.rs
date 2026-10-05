@@ -19,15 +19,19 @@ pub mod ir;
 pub mod javascript;
 /// Python language adapter (imports, decorators, class hierarchy, attribute access).
 pub mod python;
+/// Structured per-file parser evidence.
+pub mod report;
 /// Rust language adapter (modules, traits, impls, use declarations).
 pub mod rust;
+/// Native original-byte TypeScript and TSX extraction.
+pub mod typescript;
 
 use std::path::Path;
 
 /// Maximum AST recursion depth for all language adapters.
 ///
 /// When depth exceeds this limit during AST traversal, the adapter emits a
-/// `tracing::warn!` and returns partial results for the current subtree.
+/// located `DepthTruncated` report event and returns partial IR for the subtree.
 /// Sibling nodes continue processing normally. This prevents stack overflow
 /// on adversarial input (e.g., 10,000-deep nested expressions) while
 /// preserving useful output for the rest of the file.
@@ -88,31 +92,20 @@ pub(crate) fn source_parse_loss_range(path: &Path, content: &str) -> Option<(u64
     None
 }
 
-/// Keep actual adapter traversal loss in the same IR that enters resolution.
+/// Keep actual adapter traversal loss in the structured output consumed by analysis.
 /// Source coordinates come from the node that exceeded the real depth budget.
 pub(crate) fn record_depth_loss(
-    result: &mut ParseResult,
+    result: &mut report::ParseOutput,
     path: &Path,
     node: tree_sitter::Node<'_>,
 ) {
-    let start = node.start_position();
-    let end = node.end_position();
-    result.references.push(ir::Reference {
-        id: ir::ReferenceId::default(),
-        from: ir::SymbolId::default(),
-        to: ir::SymbolId::default(),
-        kind: ir::ReferenceKind::Read,
-        location: ir::Location {
-            file: path.to_path_buf(),
-            line: start.row as u32 + 1,
-            column: start.column as u32 + 1,
-            end_line: end.row as u32 + 1,
-            end_column: end.column as u32 + 1,
-        },
-        resolution: ir::ResolutionStatus::Partial(
-            "prerequisite_loss:depth_truncation:parser_traversal".to_string(),
-        ),
-    });
+    let _ = path;
+    result.report.event(
+        node,
+        report::ParseEventCode::DepthTruncated,
+        report::Capability::ALL,
+        "actual adapter traversal exceeded MAX_AST_DEPTH",
+    );
 }
 
 /// Trait implemented by each language adapter.
@@ -135,6 +128,20 @@ pub trait LanguageAdapter: Send + Sync {
     /// The `content` parameter is the file's text. The adapter creates a
     /// tree-sitter parser internally (parsers are not `Send`).
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError>;
+    /// Structured analysis entry point. Legacy extensions retain IR compatibility
+    /// while honestly exposing absent capability/recovery evidence.
+    fn parse_output(
+        &self,
+        path: &Path,
+        content: &str,
+    ) -> Result<report::ParseOutput, FlowspecError> {
+        Ok(report::ParseOutput::from_legacy(
+            path,
+            content,
+            self.language_name(),
+            self.parse_file(path, content)?,
+        ))
+    }
 }
 
 fn registry_grammar_source(path: &Path, content: &str) -> Option<(tree_sitter::Language, String)> {
@@ -144,16 +151,8 @@ fn registry_grammar_source(path: &Path, content: &str) -> Option<(tree_sitter::L
         "tree-sitter-python/0.25.0" => tree_sitter_python::LANGUAGE.into(),
         "tree-sitter-rust/0.24.0" => tree_sitter_rust::LANGUAGE.into(),
         "tree-sitter-javascript/0.25.0" => tree_sitter_javascript::LANGUAGE.into(),
+        "tree-sitter-typescript/0.23.2+tsx" => typescript::grammar_for_path(path),
         _ => return None,
     };
-    let source = if descriptor
-        .limitations
-        .iter()
-        .any(|l| l == "typescript_preprocessing")
-    {
-        javascript::preprocess_typescript(content)
-    } else {
-        content.to_string()
-    };
-    Some((language, source))
+    Some((language, content.to_string()))
 }

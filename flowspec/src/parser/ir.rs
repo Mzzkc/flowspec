@@ -294,7 +294,7 @@ pub struct Edge {
 ///
 /// Contains all IR nodes extracted from a single source file. The graph
 /// engine inserts these into its flat tables, assigning real IDs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParseResult {
     /// Symbols extracted from the file.
     pub symbols: Vec<Symbol>,

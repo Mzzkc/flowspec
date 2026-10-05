@@ -75,13 +75,133 @@ pub(crate) fn loss(reason: &str, path_key: String, range: Option<Value>, stage: 
         "stage":stage,"continuation":"inspect the affected source and rerun analysis"})
 }
 
+/// Reduce the selected adapter's actual per-file evidence without reparsing through a default registry.
+pub(crate) fn parser_losses(
+    root: &Path,
+    path: &Path,
+    source: &str,
+    descriptor: &crate::registry::LanguageDescriptor,
+    registry: &crate::registry::Registry,
+    report: &crate::parser::report::ParseReport,
+) -> Vec<Value> {
+    use crate::parser::report::{Capability, CapabilityDisposition, ParseEventCode};
+    let key = path_key(root, path);
+    let provenance_valid = report.file == path
+        && report.source_bytes == source.len() as u64
+        && report.source_sha256 == format!("{:x}", Sha256::digest(source.as_bytes()))
+        && report.language == descriptor.id
+        && report.grammar_version == descriptor.grammar_version
+        && report.adapter_version == descriptor.adapter_version
+        && report.schema_version == 1;
+    let mut losses = Vec::new();
+    for pattern in registry.patterns() {
+        let missing: Vec<_> = pattern
+            .required_capabilities
+            .iter()
+            .filter(|name| {
+                !provenance_valid
+                    || !descriptor.capabilities.iter().any(|c| c == **name)
+                    || !Capability::ALL
+                        .iter()
+                        .find(|c| c.as_str() == **name)
+                        .is_some_and(|c| {
+                            report.capabilities.get(c) == Some(&CapabilityDisposition::Implemented)
+                        })
+            })
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            let mut item = loss(
+                "semantic_proof_unavailable",
+                key.clone(),
+                None,
+                "adapter_capability",
+            );
+            item["affected_patterns"] = json!([pattern.id]);
+            item["required_capabilities"] = json!(missing);
+            item["id"] = json!(hash(
+                "parser-capability-loss",
+                &json!({"path":key,"pattern":pattern.id,"missing":missing,"schema":report.schema_version})
+            ));
+            losses.push(item);
+        }
+    }
+    for event in &report.events {
+        let reason = match event.code {
+            ParseEventCode::ParserRecovery | ParseEventCode::MissingNode => "parse_recovery",
+            ParseEventCode::DepthTruncated => "depth_truncation",
+            ParseEventCode::UnsupportedDynamic | ParseEventCode::UnsupportedSyntax => {
+                "unsupported_construct"
+            }
+            ParseEventCode::CapabilityUnavailable => "capability_unavailable",
+            ParseEventCode::UnresolvedReference => "unresolved_reference",
+            ParseEventCode::UnknownLegacyReport => "semantic_proof_unavailable",
+        };
+        let affects: Vec<_> = event.affects.iter().map(|c| c.as_str()).collect();
+        let patterns: Vec<_> = registry
+            .patterns()
+            .iter()
+            .filter(|p| p.required_capabilities.iter().any(|c| affects.contains(c)))
+            .map(|p| p.id)
+            .collect();
+        let range = offset_range(&key, source, event.byte_start, event.byte_end);
+        let mut item = loss(
+            reason,
+            key.clone(),
+            Some(range),
+            if event.code == ParseEventCode::UnknownLegacyReport {
+                "adapter_recovery"
+            } else {
+                "parse"
+            },
+        );
+        item["required_capabilities"] = json!(affects);
+        item["affected_patterns"] = json!(patterns);
+        item["id"] = json!(hash(
+            "parser-event-loss",
+            &json!({"path":key,"code":event.code,"start":event.byte_start,"end":event.byte_end,"affects":affects})
+        ));
+        losses.push(item);
+    }
+    losses
+}
+
+fn loss_applies_to_language(
+    loss: &Value,
+    language: &Value,
+    inputs: &[InputRecord],
+    root: &Path,
+) -> bool {
+    loss["scope_paths"].as_array().is_none_or(|paths| {
+        paths.is_empty()
+            || paths.iter().any(|key| {
+                key == ""
+                    || inputs.iter().any(|input| {
+                        input.language.as_deref() == language.as_str()
+                            && key.as_str() == Some(path_key(root, &input.path).as_str())
+                    })
+            })
+    })
+}
+
 fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Value]) -> Vec<String> {
     let mut blocked = Vec::new();
     for loss in losses {
         let reason = loss["reason"].as_str().unwrap_or("");
+        // Type-only and control-flow debt cannot hide a runtime consumer. Explicit
+        // structured capability debt blocks closure only when that evidence is lost.
+        if let Some(caps) = loss["required_capabilities"].as_array() {
+            if !caps.is_empty() && !caps.iter().any(|c| c == "consumer_closure") {
+                continue;
+            }
+        }
+        if loss["origin"] == "Annotation" {
+            continue;
+        }
         if !matches!(
             reason,
-            "discovery_error"
+            "semantic_proof_unavailable"
+                | "discovery_error"
                 | "read_error"
                 | "changed_during_run"
                 | "parse_recovery"
@@ -290,9 +410,10 @@ fn build_finding(
     let mut candidates = graph.all_symbols().filter(|(_, symbol)| {
         symbol.qualified_name == diagnostic.entity
             && symbol.kind == SymbolKind::Function
-            && symbol.location.file.extension().is_some_and(|e| e == "py")
-            && symbol.name.starts_with('_')
-            && !symbol.name.starts_with("__")
+            && (symbol.visibility == crate::parser::ir::Visibility::Private
+                || (input_language(inputs, &symbol.location.file) == "python"
+                    && symbol.name.starts_with('_')
+                    && !symbol.name.starts_with("__")))
     });
     let (_, symbol) = candidates.next()?;
     if candidates.next().is_some() {
@@ -304,7 +425,7 @@ fn build_finding(
         .find(|input| path_key(root, &input.path) == key && input.parsed)?;
     let content = input.content.as_deref()?;
     let range = byte_range(&key, content, &symbol.location);
-    let subject_base = json!({"path_key":key,"language":"python",
+    let subject_base = json!({"path_key":key,"language":input_language(inputs,&symbol.location.file),
         "qualified_name":symbol.qualified_name,"construct_kind":"function"});
     let binding_id = hash("binding", &subject_base);
     let mut subject = subject_base.clone();
@@ -411,16 +532,27 @@ pub(crate) fn set_gate(authority: &mut Value, severity: &str, confidence: &str) 
     refresh_identity(authority);
 }
 
+/// Effective source and registry scope shared by every report consumer.
+pub(crate) struct ReportContext<'a> {
+    pub root: &'a Path,
+    pub config: &'a Config,
+    pub languages: &'a [String],
+    pub registry: &'a crate::registry::Registry,
+}
+
 pub(crate) fn build(
-    context: (&Path, &Config),
-    languages: &[String],
+    context: ReportContext<'_>,
     inputs: &[InputRecord],
     diagnostics: &[DiagnosticEntry],
     graph: &Graph,
     mut losses: Vec<Value>,
-    registry: &crate::registry::Registry,
 ) -> Value {
-    let (root, config) = context;
+    let ReportContext {
+        root,
+        config,
+        languages,
+        registry,
+    } = context;
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
@@ -554,10 +686,10 @@ pub(crate) fn build(
     let mut pattern_state = Vec::new();
     for pattern in PATTERNS {
         let cells:Vec<Value>=scope["effective_languages"].as_array().unwrap().iter().map(|lang|{
-            let mut reasons:Vec<String>=losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
+            let mut reasons:Vec<String>=losses.iter().filter(|loss| loss_applies_to_language(loss,lang,inputs,root)).filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
             reasons.sort(); reasons.dedup();
             let capabilities = registry.patterns().iter().find(|d|d.id==pattern).expect("canonical pattern").required_capabilities;
-            let relevant_losses: Vec<_> = losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).collect();
+            let relevant_losses: Vec<_> = losses.iter().filter(|loss| loss_applies_to_language(loss,lang,inputs,root)).filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).collect();
             let mut capabilities: std::collections::BTreeSet<String> = capabilities.iter().map(|name| name.to_string()).collect();
             let mut affected_paths = std::collections::BTreeSet::new();
             for loss in relevant_losses {

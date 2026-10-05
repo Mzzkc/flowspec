@@ -604,22 +604,8 @@ pub fn analyze_with_registry_and_options(
                 Ok((result, _report)) => {
                     populate_graph(&mut graph, &result);
                     if parse_loss {
-                        tracing::warn!("Parse recovery in {}", file.display());
                         completeness.reject(file.display().to_string(), "parse_error");
                         record.rejected_reason = Some("parse_error".to_string());
-                        let key = report_authority::path_key(project_path, file);
-                        let range = descriptor
-                            .recovery_range
-                            .and_then(|probe| probe(file, &content))
-                            .map(|(start, end, _, _)| {
-                                report_authority::offset_range(&key, &content, start, end)
-                            });
-                        losses.push(report_authority::loss(
-                            "parse_recovery",
-                            key,
-                            range,
-                            "parse",
-                        ));
                     } else {
                         parsed_file_count += 1;
                         completeness.parsed += 1;
@@ -683,7 +669,17 @@ pub fn analyze_with_registry_and_options(
             } else {
                 "Value"
             });
-        loss["affected_patterns"] = if capability == "type_flows" {
+        loss["affected_patterns"] = if reference.kind == parser::ir::ReferenceKind::Annotation {
+            serde_json::json!(registry
+                .patterns()
+                .iter()
+                .filter(|pattern| pattern
+                    .required_capabilities
+                    .iter()
+                    .any(|c| matches!(*c, "types" | "annotations")))
+                .map(|p| p.id)
+                .collect::<Vec<_>>())
+        } else if capability == "type_flows" {
             serde_json::json!(["contract_mismatch", "orphaned_impl"])
         } else {
             serde_json::json!([
@@ -734,12 +730,35 @@ pub fn analyze_with_registry_and_options(
                 .find(|input| input.path == symbol.location.file)
                 .and_then(|input| input.content.as_deref())
                 .map(|content| report_authority::location_range(&key, content, &symbol.location));
-            losses.push(report_authority::loss(
-                "unresolved_import",
+            let type_only = symbol
+                .annotations
+                .iter()
+                .any(|a| a == "type_only" || a == "type_checking");
+            let mut debt = report_authority::loss(
+                if type_only {
+                    "unresolved_type"
+                } else {
+                    "unresolved_import"
+                },
                 key,
                 range,
                 "resolve",
-            ));
+            );
+            if type_only {
+                let capabilities = ["types", "imports", "resolution"];
+                debt["origin"] = serde_json::json!("Annotation");
+                debt["required_capabilities"] = serde_json::json!(capabilities);
+                debt["affected_patterns"] = serde_json::json!(registry
+                    .patterns()
+                    .iter()
+                    .filter(|p| p
+                        .required_capabilities
+                        .iter()
+                        .any(|c| capabilities.contains(c)))
+                    .map(|p| p.id)
+                    .collect::<Vec<_>>());
+            }
+            losses.push(debt);
         }
     }
 
@@ -1138,13 +1157,16 @@ pub fn analyze_with_registry_and_options(
     #[cfg(feature = "fault_probe")]
     losses.extend(fault_probe::drain_losses());
     let mut authority = report_authority::build(
-        (project_path, config),
-        &active_languages,
+        report_authority::ReportContext {
+            root: project_path,
+            config,
+            languages: &active_languages,
+            registry,
+        },
         &input_records,
         &manifest.diagnostics,
         &graph,
         losses,
-        registry,
     );
     authority["analysis_graph"]["type_flows"] =
         serde_json::to_value(&manifest.type_flows).expect("serializable type flows");

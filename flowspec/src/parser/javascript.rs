@@ -7,17 +7,15 @@
 //! hierarchy. Detects `export` for visibility (`export` = public, no
 //! `export` = private).
 //!
-//! TypeScript files (`.ts`, `.tsx`) are accepted and parsed with the
-//! JavaScript grammar as a stopgap — `tree-sitter-typescript` 0.23.2 is
-//! incompatible with `tree-sitter = "0.25"`. Basic TS parses correctly;
-//! generics, interfaces, and type annotations may produce parse errors
-//! but tree-sitter is error-tolerant.
+//! TypeScript/TSX paths delegate to the native adapter. Shared extraction
+//! always consumes unchanged source bytes and original AST locations.
 
 use std::path::Path;
 
 use tree_sitter::{Node, Parser};
 
 use super::ir::*;
+use super::report::{observe_tree, ParseOutput};
 use super::LanguageAdapter;
 use crate::error::FlowspecError;
 
@@ -54,72 +52,83 @@ impl LanguageAdapter for JsAdapter {
     }
 
     fn parse_file(&self, path: &Path, content: &str) -> Result<ParseResult, FlowspecError> {
-        let is_ts = is_typescript_file(path);
-        let mut ts_entities: Vec<Symbol> = Vec::new();
-        let parse_content = if is_ts {
-            let fs = path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            ts_entities = pre_extract_ts_entities(content, path, &fs);
-            preprocess_typescript(content)
-        } else {
-            content.to_string()
-        };
-
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_javascript::LANGUAGE.into())
-            .map_err(|e| FlowspecError::Parse {
-                file: path.to_path_buf(),
-                reason: format!("failed to set JavaScript language: {}", e),
-            })?;
-
-        let tree = parser
-            .parse(&parse_content, None)
-            .ok_or_else(|| FlowspecError::Parse {
-                file: path.to_path_buf(),
-                reason: "tree-sitter failed to produce a parse tree".to_string(),
-            })?;
-
-        let content_bytes = parse_content.as_bytes();
-        let file_stem = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let mut result = ParseResult::default();
-
-        // Create file-level scope
-        let root = tree.root_node();
-        result.scopes.push(Scope {
-            id: ScopeId::default(),
-            kind: ScopeKind::File,
-            parent: None,
-            name: path.to_string_lossy().to_string(),
-            location: node_location(path, root),
-        });
-
-        // Walk the AST
-        let mut scope_stack: Vec<usize> = vec![0]; // file scope index
-        visit_children(
-            &mut result,
-            &mut scope_stack,
-            content_bytes,
-            path,
-            &file_stem,
-            root,
-            false, // not inside export
-            0,
-        );
-
-        // Extract all function/method calls from the AST
-        extract_all_calls(&mut result, content_bytes, path, root, 0);
-
-        result.symbols.extend(ts_entities);
-
-        Ok(result)
+        Ok(self.parse_output(path, content)?.ir)
     }
+    fn parse_output(&self, path: &Path, content: &str) -> Result<ParseOutput, FlowspecError> {
+        if is_typescript_file(path) {
+            return super::typescript::TsAdapter::new().parse_output(path, content);
+        }
+        parse_native(
+            path,
+            content,
+            tree_sitter_javascript::LANGUAGE.into(),
+            "javascript",
+            "tree-sitter-javascript/0.25.0",
+        )
+    }
+}
+
+/// Shared ECMAScript visitor over the original bytes and selected native AST.
+pub(crate) fn parse_native(
+    path: &Path,
+    content: &str,
+    language: tree_sitter::Language,
+    language_id: &str,
+    grammar_version: &str,
+) -> Result<ParseOutput, FlowspecError> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .map_err(|e| FlowspecError::Parse {
+            file: path.to_path_buf(),
+            reason: format!("failed to set JavaScript language: {}", e),
+        })?;
+
+    let tree = parser
+        .parse(content, None)
+        .ok_or_else(|| FlowspecError::Parse {
+            file: path.to_path_buf(),
+            reason: "tree-sitter failed to produce a parse tree".to_string(),
+        })?;
+
+    let content_bytes = content.as_bytes();
+    let file_stem = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let mut result = ParseOutput::new(path, content, language_id, grammar_version);
+    observe_tree(&mut result.report, tree.root_node(), content.as_bytes());
+
+    // Create file-level scope
+    let root = tree.root_node();
+    result.scopes.push(Scope {
+        id: ScopeId::default(),
+        kind: ScopeKind::File,
+        parent: None,
+        name: path.to_string_lossy().to_string(),
+        location: node_location(path, root),
+    });
+
+    // Walk the AST
+    let mut scope_stack: Vec<usize> = vec![0]; // file scope index
+    visit_children(
+        &mut result,
+        &mut scope_stack,
+        content_bytes,
+        path,
+        &file_stem,
+        root,
+        false, // not inside export
+        0,
+    );
+
+    // Extract all function/method calls from the AST
+    extract_all_calls(&mut result, content_bytes, path, root, 0);
+
+    extract_native_references(&mut result, content_bytes, path, root);
+    result.report.finish();
+    Ok(result)
 }
 
 /// Extracts UTF-8 text from a tree-sitter node.
@@ -144,7 +153,7 @@ fn node_location(path: &Path, node: Node) -> Location {
 
 /// Builds a qualified name from scope stack.
 fn build_qualified_name(
-    result: &ParseResult,
+    result: &ParseOutput,
     scope_stack: &[usize],
     file_stem: &str,
     name: &str,
@@ -162,7 +171,7 @@ fn build_qualified_name(
 /// Visit all children of a node and extract IR.
 #[allow(clippy::too_many_arguments)]
 fn visit_children(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -198,7 +207,7 @@ fn visit_children(
 /// Visit a single AST node and extract IR.
 #[allow(clippy::too_many_arguments)]
 fn visit_node(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -218,7 +227,7 @@ fn visit_node(
         return;
     }
     match node.kind() {
-        "function_declaration" | "generator_function_declaration" => {
+        "function_declaration" | "generator_function_declaration" | "function_signature" => {
             extract_function_declaration(
                 result,
                 scope_stack,
@@ -230,7 +239,7 @@ fn visit_node(
                 depth,
             );
         }
-        "class_declaration" => {
+        "class_declaration" | "abstract_class_declaration" => {
             extract_class_declaration(
                 result,
                 scope_stack,
@@ -260,6 +269,21 @@ fn visit_node(
         "import_statement" => {
             extract_import(result, content, path, node);
         }
+        "interface_declaration"
+        | "type_alias_declaration"
+        | "enum_declaration"
+        | "internal_module" => {
+            extract_ts_declaration(
+                result,
+                scope_stack,
+                content,
+                path,
+                file_stem,
+                node,
+                exported,
+                depth,
+            );
+        }
         _ => {
             // Recurse into other nodes
             visit_children(
@@ -269,7 +293,7 @@ fn visit_node(
                 path,
                 file_stem,
                 node,
-                false,
+                exported,
                 depth,
             );
         }
@@ -278,7 +302,7 @@ fn visit_node(
 
 /// Handle `export_statement` — sets exported flag and visits inner declarations.
 fn visit_export_statement(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -286,10 +310,18 @@ fn visit_export_statement(
     node: Node,
     depth: usize,
 ) {
+    if let Some(value) = node.child_by_field_name("value") {
+        if value.kind() == "identifier" {
+            let name = node_text(content, value);
+            for symbol in result.symbols.iter_mut().filter(|s| s.name == name) {
+                symbol.visibility = Visibility::Public;
+            }
+        }
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "function_declaration" | "generator_function_declaration" => {
+            "function_declaration" | "generator_function_declaration" | "function_signature" => {
                 extract_function_declaration(
                     result,
                     scope_stack,
@@ -301,7 +333,7 @@ fn visit_export_statement(
                     depth,
                 );
             }
-            "class_declaration" => {
+            "class_declaration" | "abstract_class_declaration" => {
                 extract_class_declaration(
                     result,
                     scope_stack,
@@ -353,6 +385,20 @@ fn visit_export_statement(
                     );
                 }
             }
+            "ambient_declaration"
+            | "interface_declaration"
+            | "type_alias_declaration"
+            | "enum_declaration"
+            | "internal_module" => visit_node(
+                result,
+                scope_stack,
+                content,
+                path,
+                file_stem,
+                child,
+                true,
+                depth,
+            ),
             _ => {}
         }
     }
@@ -363,7 +409,7 @@ fn visit_export_statement(
 /// Creates import symbols for each re-exported name with `"from:<module>"`
 /// annotations so that cross-file resolution can trace the chain.
 fn extract_reexport_clause(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     file_stem: &str,
@@ -403,7 +449,7 @@ fn extract_reexport_clause(
 /// Handles `export { foo }` and `export { foo as bar }` syntax. For each
 /// `export_specifier`, extracts the local name (the `name` field) and updates
 /// the matching symbol's visibility. Unknown names are silently skipped.
-fn apply_export_clause_visibility(result: &mut ParseResult, content: &[u8], clause_node: Node) {
+fn apply_export_clause_visibility(result: &mut ParseOutput, content: &[u8], clause_node: Node) {
     let mut cursor = clause_node.walk();
     for child in clause_node.children(&mut cursor) {
         if child.kind() == "export_specifier" {
@@ -431,7 +477,7 @@ fn apply_export_clause_visibility(result: &mut ParseResult, content: &[u8], clau
 /// Extract a function declaration (named, async, generator).
 #[allow(clippy::too_many_arguments)]
 fn extract_function_declaration(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -521,7 +567,7 @@ fn extract_function_declaration(
 /// extracts it as a `SymbolKind::Function` with the variable name.
 #[allow(clippy::too_many_arguments)]
 fn extract_arrow_functions_from_declaration(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -674,7 +720,7 @@ fn extract_arrow_functions_from_declaration(
 /// Extract a class declaration.
 #[allow(clippy::too_many_arguments)]
 fn extract_class_declaration(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -728,7 +774,10 @@ fn extract_class_declaration(
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.children(&mut cursor) {
-            if child.kind() == "method_definition" {
+            if matches!(
+                child.kind(),
+                "method_definition" | "method_signature" | "abstract_method_signature"
+            ) {
                 extract_method_definition(
                     result,
                     scope_stack,
@@ -763,7 +812,7 @@ fn extract_class_declaration(
 /// named `getUser` or `setValue` are NOT affected — only the `get`/`set`
 /// keyword syntax produces prefixed names.
 fn extract_method_definition(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     scope_stack: &mut Vec<usize>,
     content: &[u8],
     path: &Path,
@@ -888,7 +937,7 @@ fn extract_source_module(content: &[u8], node: Node) -> Option<String> {
 /// annotation so that `phantom_dependency` can find and check import symbols.
 /// Also extracts the source module path as a `"from:<module>"` annotation for
 /// cross-file resolution.
-fn extract_import(result: &mut ParseResult, content: &[u8], path: &Path, node: Node) {
+fn extract_import(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     let file_stem = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -953,7 +1002,7 @@ fn extract_specifier_names(content: &[u8], specifier: Node) -> (String, Option<S
 /// Passes the `source_module` from the parent `import_statement` to each
 /// `add_import_symbol` call, and extracts `original_name` for aliased imports.
 fn extract_import_clause(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     file_stem: &str,
@@ -1033,7 +1082,7 @@ fn extract_import_clause(
 /// When `original_name` differs from `name`, adds `"original_name:<name>"`
 /// so aliased imports resolve to the correct definition.
 fn add_import_symbol(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     file_stem: &str,
     name: &str,
     original_name: Option<&str>,
@@ -1041,16 +1090,24 @@ fn add_import_symbol(
     path: &Path,
     node: Node,
 ) {
+    let type_only = type_only_import(node);
     result.references.push(Reference {
         id: ReferenceId::default(),
         from: SymbolId::default(),
         to: SymbolId::default(),
-        kind: ReferenceKind::Import,
+        kind: if type_only {
+            ReferenceKind::Annotation
+        } else {
+            ReferenceKind::Import
+        },
         location: node_location(path, node),
         resolution: ResolutionStatus::Partial("external".to_string()),
     });
 
     let mut annotations = vec!["import".to_string()];
+    if type_only {
+        annotations.push("type_only".into());
+    }
     if let Some(src) = source_module {
         if !src.is_empty() {
             annotations.push(format!("from:{}", src));
@@ -1086,7 +1143,7 @@ fn add_import_symbol(
 /// CJS `require()` calls with a string literal argument are intercepted and
 /// converted to import symbols instead of regular call references.
 fn extract_all_calls(
-    result: &mut ParseResult,
+    result: &mut ParseOutput,
     content: &[u8],
     path: &Path,
     node: Node,
@@ -1337,6 +1394,220 @@ fn extract_callee_name(content: &[u8], func_node: Node) -> Option<String> {
     }
 }
 
+// TypeScript declaration extraction uses grammar fields and unchanged bytes.
+#[allow(clippy::too_many_arguments)]
+fn extract_ts_declaration(
+    result: &mut ParseOutput,
+    stack: &mut Vec<usize>,
+    content: &[u8],
+    path: &Path,
+    file_stem: &str,
+    node: Node,
+    exported: bool,
+    depth: usize,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = node_text(content, name_node).to_string();
+    let kind = match node.kind() {
+        "enum_declaration" => SymbolKind::Enum,
+        "internal_module" => SymbolKind::Module,
+        _ => SymbolKind::Interface,
+    };
+    let qualified_name = build_qualified_name(result, stack, file_stem, &name);
+    result.symbols.push(Symbol {
+        id: SymbolId::default(),
+        kind,
+        name: name.clone(),
+        qualified_name,
+        visibility: if exported {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        },
+        signature: None,
+        location: node_location(path, node),
+        resolution: ResolutionStatus::Resolved,
+        scope: ScopeId::default(),
+        annotations: if node.kind() == "type_alias_declaration" {
+            vec!["type_alias".into()]
+        } else {
+            vec![]
+        },
+    });
+    if node.kind() == "internal_module" {
+        if let Some(body) = node.child_by_field_name("body") {
+            visit_children(
+                result,
+                stack,
+                content,
+                path,
+                file_stem,
+                body,
+                false,
+                depth + 1,
+            );
+        }
+    }
+}
+fn type_only_import(node: Node) -> bool {
+    let mut current = Some(node);
+    while let Some(n) = current {
+        if matches!(
+            n.kind(),
+            "import_specifier" | "import_statement" | "export_specifier" | "export_statement"
+        ) {
+            let mut cursor = n.walk();
+            if n.children(&mut cursor).any(|c| c.kind() == "type") {
+                return true;
+            }
+        }
+        if matches!(
+            n.kind(),
+            "import_statement" | "export_statement" | "program"
+        ) {
+            break;
+        }
+        current = n.parent();
+    }
+    false
+}
+/// Annotation origins and function binding values remain separate through graph resolution.
+fn extract_native_references(result: &mut ParseOutput, content: &[u8], path: &Path, root: Node) {
+    let mut pending = vec![(root, 0)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > super::MAX_AST_DEPTH {
+            super::record_depth_loss(result, path, node);
+            continue;
+        }
+        if node.kind() == "implements_clause" {
+            let mut cursor = node.walk();
+            for target in node.named_children(&mut cursor) {
+                let name = target
+                    .child_by_field_name("name")
+                    .map(|n| node_text(content, n))
+                    .unwrap_or_else(|| node_text(content, target));
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Implement,
+                    location: node_location(path, target),
+                    resolution: ResolutionStatus::Partial(format!("attribute_access:{name}")),
+                });
+            }
+        }
+        if node.kind() == "type_identifier" {
+            let name = node_text(content, node);
+            let definition = node
+                .parent()
+                .is_some_and(|p| p.child_by_field_name("name") == Some(node));
+            let mut ancestor = node.parent();
+            let mut bound = false;
+            while let Some(parent) = ancestor {
+                if let Some(params) = parent.child_by_field_name("type_parameters") {
+                    let mut cursor = params.walk();
+                    bound |= params.named_children(&mut cursor).any(|parameter| {
+                        parameter
+                            .child_by_field_name("name")
+                            .is_some_and(|n| node_text(content, n) == name)
+                    });
+                }
+                ancestor = parent.parent();
+            }
+            if !definition && !bound {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Annotation,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("attribute_access:{name}")),
+                });
+            }
+        }
+        if node.kind() == "identifier" || node.kind() == "shorthand_property_identifier" {
+            let name = node_text(content, node);
+            let mut parent = node.parent();
+            let mut annotation = false;
+            while let Some(ancestor) = parent {
+                if matches!(
+                    ancestor.kind(),
+                    "type_query" | "type_annotation" | "type_alias_declaration"
+                ) {
+                    annotation = true;
+                    break;
+                }
+                if matches!(
+                    ancestor.kind(),
+                    "statement_block" | "program" | "function_declaration"
+                ) {
+                    break;
+                }
+                parent = ancestor.parent();
+            }
+            if annotation {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Annotation,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("attribute_access:{name}")),
+                });
+            }
+            let excluded = node.parent().is_some_and(|p| {
+                matches!(
+                    p.kind(),
+                    "import_specifier"
+                        | "import_clause"
+                        | "namespace_import"
+                        | "export_specifier"
+                        | "required_parameter"
+                        | "optional_parameter"
+                        | "formal_parameters"
+                ) || p.child_by_field_name("name") == Some(node)
+                    || p.child_by_field_name("left") == Some(node)
+                    || p.child_by_field_name("function") == Some(node)
+            });
+            let imported = result
+                .symbols
+                .iter()
+                .any(|s| s.name == name && s.annotations.iter().any(|a| a == "import"));
+            if !excluded && !annotation && !type_only_import(node) && imported {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("attribute_access:{name}")),
+                });
+            }
+            if !excluded
+                && !annotation
+                && !type_only_import(node)
+                && result
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == name && s.kind == SymbolKind::Function)
+            {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Read,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(format!("value_use:{name}")),
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor).map(|c| (c, depth + 1)));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TypeScript preprocessing
 // ---------------------------------------------------------------------------
@@ -1365,6 +1636,7 @@ fn is_typescript_file(path: &Path) -> bool {
     crate::registry::language_id_for_path(path) == Some("typescript")
 }
 
+#[cfg(test)]
 pub(crate) fn preprocess_typescript(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let lines: Vec<&str> = content.split('\n').collect();
@@ -1418,12 +1690,14 @@ pub(crate) fn preprocess_typescript(content: &str) -> String {
     result
 }
 
+#[cfg(test)]
 fn blank_line(result: &mut String, line: &str) {
     for c in line.chars() {
         result.push(if c == '\t' { '\t' } else { ' ' });
     }
 }
 
+#[cfg(test)]
 fn detect_ts_block_start(trimmed: &str) -> Option<&str> {
     let mut s = trimmed;
     if let Some(r) = s.strip_prefix("export") {
@@ -1455,6 +1729,7 @@ fn detect_ts_block_start(trimmed: &str) -> Option<&str> {
     None
 }
 
+#[cfg(test)]
 fn count_braces_in_line(line: &str, mut depth: i32) -> (i32, bool) {
     let mut in_str = false;
     let mut sc = ' ';
@@ -1485,6 +1760,7 @@ fn count_braces_in_line(line: &str, mut depth: i32) -> (i32, bool) {
     (depth, false)
 }
 
+#[cfg(test)]
 fn strip_ts_line_syntax(line: &str) -> String {
     let mut s = line.to_string();
     s = strip_keyword_after(&s, "import", "type");
@@ -1500,6 +1776,7 @@ fn strip_ts_line_syntax(line: &str) -> String {
     s
 }
 
+#[cfg(test)]
 fn strip_keyword_after(line: &str, kw1: &str, kw2: &str) -> String {
     if let Some(p) = line.find(kw1) {
         let after = p + kw1.len();
@@ -1521,6 +1798,7 @@ fn strip_keyword_after(line: &str, kw1: &str, kw2: &str) -> String {
     line.to_string()
 }
 
+#[cfg(test)]
 fn strip_leading_keyword(line: &str, keyword: &str) -> String {
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
@@ -1551,6 +1829,7 @@ fn strip_leading_keyword(line: &str, keyword: &str) -> String {
     line.to_string()
 }
 
+#[cfg(test)]
 fn strip_leading_modifier(line: &str, keyword: &str) -> String {
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
@@ -1567,6 +1846,7 @@ fn strip_leading_modifier(line: &str, keyword: &str) -> String {
     line.to_string()
 }
 
+#[cfg(test)]
 fn strip_generics(line: &str) -> String {
     let b = line.as_bytes();
     let len = b.len();
@@ -1605,6 +1885,7 @@ fn strip_generics(line: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| line.to_string())
 }
 
+#[cfg(test)]
 fn is_generic_open(bytes: &[u8], i: usize) -> bool {
     if i == 0 {
         return false;
@@ -1625,6 +1906,7 @@ fn is_generic_open(bytes: &[u8], i: usize) -> bool {
 ///
 /// Word-boundary check: requires a space before `implements` to prevent false matches
 /// on identifiers like `implements_count` or `implementsInterface`.
+#[cfg(test)]
 fn strip_implements_clause(line: &str) -> String {
     // Search for " implements " with a leading space (word boundary).
     // We search for " implements " to ensure it's not part of an identifier.
@@ -1654,6 +1936,7 @@ fn strip_implements_clause(line: &str) -> String {
     result
 }
 
+#[cfg(test)]
 fn strip_type_annotations(line: &str) -> String {
     let bytes = line.as_bytes();
     let len = bytes.len();
@@ -1712,6 +1995,7 @@ fn strip_type_annotations(line: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| line.to_string())
 }
 
+#[cfg(test)]
 fn find_type_colon(bytes: &[u8]) -> Option<usize> {
     let mut i = 0;
     while i < bytes.len() && bytes[i] == b' ' {
@@ -1726,6 +2010,7 @@ fn find_type_colon(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 fn is_param_type_colon(bytes: &[u8], i: usize) -> bool {
     if i == 0 {
         return false;
@@ -1734,6 +2019,7 @@ fn is_param_type_colon(bytes: &[u8], i: usize) -> bool {
     p.is_ascii_alphanumeric() || p == b'_' || p == b'$' || p == b'?'
 }
 
+#[cfg(test)]
 fn find_annotation_end(bytes: &[u8], in_params: bool) -> usize {
     let mut i = 1;
     let len = bytes.len();
@@ -1786,6 +2072,8 @@ fn find_annotation_end(bytes: &[u8], in_params: bool) -> usize {
     len
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn pre_extract_ts_entities(content: &str, path: &Path, file_stem: &str) -> Vec<Symbol> {
     let mut entities = Vec::new();
     let lines: Vec<&str> = content.split('\n').collect();
@@ -1819,6 +2107,8 @@ fn pre_extract_ts_entities(content: &str, path: &Path, file_stem: &str) -> Vec<S
     entities
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn try_extract_ts_entity(
     trimmed: &str,
     path: &Path,
@@ -1947,6 +2237,8 @@ fn try_extract_ts_entity(
     None
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn extract_identifier(s: &str) -> Option<String> {
     let name: String = s
         .chars()
