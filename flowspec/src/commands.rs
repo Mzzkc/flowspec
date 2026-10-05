@@ -398,14 +398,18 @@ fn bound_analyze_report(manifest: &mut Manifest) {
         return;
     };
     authority["analysis_graph"] = serde_json::json!({
-        "entities":[],"flows":[],"boundaries":[],"dependency_graph":[],"type_flows":[]
+        "projection":{
+            "analysis_graph":"omitted",
+            "compatibility_losses":"/authority/losses",
+            "compatibility_pattern_state":"/authority/pattern_state"
+        }
     });
     let loss =
         crate::report_authority::loss("output_truncation", String::new(), None, "serialization");
-    authority["losses"]
-        .as_array_mut()
-        .expect("report losses")
-        .push(loss);
+    let losses = authority["losses"].as_array_mut().expect("report losses");
+    if !losses.contains(&loss) {
+        losses.push(loss);
+    }
     authority["execution"] = serde_json::json!("incomplete");
     authority["outcome"] = serde_json::json!("incomplete");
     authority["continuation"]["truncated"] = serde_json::json!(true);
@@ -428,10 +432,8 @@ fn bound_analyze_report(manifest: &mut Manifest) {
 
     manifest.execution = Some(crate::Execution::Incomplete);
     manifest.outcome = Some(crate::Outcome::Incomplete);
-    manifest.losses = authority["losses"]
-        .as_array()
-        .expect("report losses")
-        .clone();
+    // The wire reference preserves all authoritative losses without duplication.
+    manifest.losses.clear();
     manifest.pattern_state = authority["pattern_state"]
         .as_array()
         .expect("pattern states")

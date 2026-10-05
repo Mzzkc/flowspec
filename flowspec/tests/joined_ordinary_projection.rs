@@ -6,12 +6,18 @@ use tempfile::TempDir;
 fn incomplete_rust_report_preserves_entities_within_requested_output_bounds() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/rust");
     let result = analyze(&root, &Config::default(), &["rust".into()]).unwrap();
-    let expected = result.graph.all_symbols().filter(|(_, symbol)|
-        symbol.kind != flowspec::parser::ir::SymbolKind::Module).count();
+    let expected = result
+        .graph
+        .all_symbols()
+        .filter(|(_, symbol)| symbol.kind != flowspec::parser::ir::SymbolKind::Module)
+        .count();
     assert_eq!(result.manifest.entities.len(), expected);
     assert!(expected > 0);
     let output = TempDir::new().unwrap();
-    for (format, name, ratio) in [(OutputFormat::Yaml, "yaml", 10), (OutputFormat::Json, "json", 15)] {
+    for (format, name, ratio) in [
+        (OutputFormat::Yaml, "yaml", 10),
+        (OutputFormat::Json, "json", 15),
+    ] {
         let target = output.path().join(name);
         commands::run_analyze(&root, &[], format, Some(&target), None, &[], None, None).unwrap();
         let bytes = fs::read(&target).unwrap();
