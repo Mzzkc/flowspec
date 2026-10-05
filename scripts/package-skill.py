@@ -121,7 +121,7 @@ def build_package(root, binary, out, expected_sha256):
     tree = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
     if a['producer'].get('build_sha') != head or a['producer'].get('source_tree_sha') != tree:
         raise ValueError('candidate producer does not match package source')
-    if a['provenance']['registry_digest'] != catalog['digest']:
+    if a['provenance']['registry']['digest'] != catalog['digest']:
         raise ValueError('candidate registry differs from public catalog')
     source_paths = ['skills/flowspec', 'scripts/package-skill.py', 'LICENSE', 'LICENSE-AGPL']
     dirty = subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain', '--', *source_paths], text=True)
