@@ -734,13 +734,29 @@ fn resolve_callee(
     // A Rust associated consumer carries its explicit owner. Never replace
     // an unknown owner with an unrelated same-name method in this file.
     if let Some((owner, method)) = callee_name.rsplit_once("::") {
+        let enclosing_owner = if owner == "Self" {
+            graph
+                .get_symbol(*from_id)
+                .filter(|s| s.kind == SymbolKind::Method)
+                .and_then(|s| {
+                    s.qualified_name
+                        .rsplit_once("::")
+                        .map(|(owner, _)| owner.to_string())
+                })
+        } else {
+            None
+        };
         let owners: Vec<_> = symbols
             .iter()
             .filter(|s| {
                 matches!(
                     s.kind,
                     SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait
-                ) && (s.name == owner || s.qualified_name.ends_with(&format!("::{owner}")))
+                ) && if owner == "Self" {
+                    enclosing_owner.as_ref() == Some(&s.qualified_name)
+                } else {
+                    s.name == owner || s.qualified_name.ends_with(&format!("::{owner}"))
+                }
             })
             .collect();
         if owners.len() != 1 {

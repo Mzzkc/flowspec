@@ -68,6 +68,19 @@ fn rust_self_associated_call_uses_the_enclosing_impl_owner() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("entry.rs"), "struct Storage; impl Storage { fn create() -> Self { Storage } fn forwarded() -> Self { Self::create() } } fn main() { Storage::forwarded(); }").unwrap();
     let result = analyze(dir.path(), &Config::default(), &["rust".into()]).unwrap();
-    let (id, _) = result.graph.all_symbols().find(|(_, s)| s.name == "create" && s.kind == SymbolKind::Method).unwrap();
-    assert!(result.graph.edges_to(id).iter().any(|edge| edge.kind == EdgeKind::Calls && edge.reference_id.and_then(|rid| result.graph.get_reference(rid)).and_then(|r| result.graph.get_symbol(r.from)).is_some_and(|s| s.name == "forwarded")));
+    let (id, _) = result
+        .graph
+        .all_symbols()
+        .find(|(_, s)| s.name == "create" && s.kind == SymbolKind::Method)
+        .unwrap();
+    assert!(result
+        .graph
+        .edges_to(id)
+        .iter()
+        .any(|edge| edge.kind == EdgeKind::Calls
+            && edge
+                .reference_id
+                .and_then(|rid| result.graph.get_reference(rid))
+                .and_then(|r| result.graph.get_symbol(r.from))
+                .is_some_and(|s| s.name == "forwarded")));
 }
