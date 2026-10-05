@@ -72,12 +72,13 @@ fn trace_edges(graph: &Graph, current: SymbolId, backward: bool) -> Vec<(SymbolI
     selected
 }
 
-pub fn trace_report(
-    graph: &Graph,
-    start: SymbolId,
-    max_depth: usize,
-    backward: bool,
-) -> TraceReport {
+struct TraceWalk {
+    paths: Vec<FlowPath>,
+    continuation: Vec<FlowPath>,
+    reached: HashSet<SymbolId>,
+}
+
+fn trace_walk(graph: &Graph, start: SymbolId, max_depth: usize, backward: bool) -> TraceWalk {
     let max_depth = max_depth.min(256);
     let mut paths = Vec::new();
     let mut pending = vec![(start, Vec::<FlowStep>::new(), HashSet::from([start]))];
@@ -152,6 +153,24 @@ pub fn trace_report(
                 .collect::<Vec<_>>(),
         )
     });
+    TraceWalk {
+        paths,
+        continuation,
+        reached,
+    }
+}
+
+pub fn trace_report(
+    graph: &Graph,
+    start: SymbolId,
+    max_depth: usize,
+    backward: bool,
+) -> TraceReport {
+    let TraceWalk {
+        paths,
+        continuation,
+        reached,
+    } = trace_walk(graph, start, max_depth, backward);
     let mut unresolved:Vec<_>=graph.unresolved_calls().iter().chain(graph.prerequisite_losses()).filter(|r| {
         if matches!(&r.resolution,crate::parser::ir::ResolutionStatus::Partial(info) if info.ends_with(":type_flows")) {return false;}
         reached.contains(&r.from) || (r.from==SymbolId::default() && reached.iter().filter_map(|id|graph.get_symbol(*id)).any(|s|
@@ -206,7 +225,9 @@ pub fn trace_all_flows(graph: &Graph) -> Vec<FlowPath> {
     entries.sort_by(|(_, a), (_, b)| a.qualified_name.cmp(&b.qualified_name));
     entries
         .into_iter()
-        .flat_map(|(id, _)| trace_flows_from(graph, id, MAX_FLOW_DEPTH))
+        // The aggregate API returns paths only. Query loss collection belongs
+        // to trace_report; the analysis report independently preserves all losses.
+        .flat_map(|(id, _)| trace_walk(graph, id, MAX_FLOW_DEPTH, false).paths)
         .collect()
 }
 
@@ -252,6 +273,76 @@ mod tests {
             },
             resolution: ResolutionStatus::Resolved,
         });
+    }
+
+    #[test]
+    fn aggregate_paths_equal_full_query_paths_without_discarding_public_losses() {
+        let mut graph = Graph::new();
+        let first = graph.add_symbol(make_symbol("main", SymbolKind::Function, "a.py", 1));
+        let second = graph.add_symbol(make_symbol("__main__", SymbolKind::Function, "b.py", 1));
+        let leaf = graph.add_symbol(make_symbol("leaf", SymbolKind::Function, "a.py", 5));
+        add_call(&mut graph, first, leaf, "a.py");
+        add_call(&mut graph, leaf, first, "a.py");
+        add_call(&mut graph, second, leaf, "b.py");
+        graph.record_unresolved_call(Reference {
+            id: ReferenceId::default(),
+            from: first,
+            to: SymbolId::default(),
+            kind: ReferenceKind::Call,
+            location: Location {
+                file: PathBuf::from("a.py"),
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 2,
+            },
+            resolution: ResolutionStatus::Unresolved,
+        });
+        let mut entries = vec![first, second];
+        entries.sort_by_key(|id| graph.get_symbol(*id).unwrap().qualified_name.clone());
+        let expected: Vec<_> = entries
+            .iter()
+            .flat_map(|id| trace_report(&graph, *id, MAX_FLOW_DEPTH, false).paths)
+            .collect();
+        let signature = |paths: Vec<FlowPath>| {
+            paths
+                .into_iter()
+                .map(|p| (p.entry, p.steps, p.is_cyclic, p.truncated))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(signature(trace_all_flows(&graph)), signature(expected));
+        let public = trace_report(&graph, first, MAX_FLOW_DEPTH, false);
+        assert_eq!(public.unresolved.len(), 1);
+        assert!(public.incomplete);
+        assert!(public.paths.iter().any(|p| p.is_cyclic));
+    }
+
+    #[test]
+    fn aggregate_paths_retain_exact_path_budget_and_continuation_frontier() {
+        let mut graph = Graph::new();
+        let entry = graph.add_symbol(make_symbol("main", SymbolKind::Function, "a.py", 1));
+        for index in 0..MAX_TRACE_PATHS + 5 {
+            let leaf = graph.add_symbol(make_symbol(
+                &format!("leaf_{index:04}"),
+                SymbolKind::Function,
+                "a.py",
+                5 + index as u32,
+            ));
+            add_call(&mut graph, entry, leaf, "a.py");
+        }
+        let public = trace_report(&graph, entry, MAX_FLOW_DEPTH, false);
+        let aggregate = trace_all_flows(&graph);
+        assert_eq!(public.paths.len(), MAX_TRACE_PATHS);
+        assert_eq!(aggregate.len(), MAX_TRACE_PATHS);
+        assert!(public.incomplete);
+        assert_eq!(public.continuation.len(), 1);
+        for (actual, expected) in aggregate.iter().zip(&public.paths) {
+            assert_eq!(actual.entry, expected.entry);
+            assert_eq!(actual.steps, expected.steps);
+            assert_eq!(actual.is_cyclic, expected.is_cyclic);
+            assert_eq!(actual.truncated, expected.truncated);
+        }
+        assert!(aggregate.last().unwrap().truncated);
     }
 
     // T15: Linear path A→B→C
