@@ -73,7 +73,7 @@ impl Workspace {
         }
         Ok(canonical)
     }
-    fn descendants(&self, directory: &Path) -> Result<(), FlowspecError> {
+    fn descendants(directory: &Path) -> Result<(), FlowspecError> {
         for entry in std::fs::read_dir(directory)
             .map_err(|e| refusal(format!("{}: {e}", directory.display())))?
         {
@@ -88,7 +88,7 @@ impl Workspace {
                 )));
             }
             if meta.is_dir() {
-                self.descendants(&entry.path())?;
+                Self::descendants(&entry.path())?;
             }
         }
         Ok(())
@@ -98,7 +98,7 @@ impl Workspace {
         if !path.is_dir() {
             return Err(refusal("analysis target must be a directory"));
         }
-        self.descendants(&path)?;
+        Self::descendants(&path)?;
         // Validate implicit policy even though Config::load would otherwise follow a link.
         let default_config = path.join(".flowspec/config.yaml");
         if std::fs::symlink_metadata(&default_config).is_ok() {

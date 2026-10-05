@@ -328,6 +328,26 @@ impl OutputFormatter for SarifFormatter {
     }
 }
 
+// Report path keys are exact Unix filename bytes encoded as hexadecimal.
+// URI percent encoding retains non-UTF8 paths without lossy replacement.
+fn path_key_uri(key: &str) -> String {
+    let mut uri = String::new();
+    for pair in key.as_bytes().chunks_exact(2) {
+        let Some(byte) = std::str::from_utf8(pair)
+            .ok()
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        else {
+            continue;
+        };
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(byte as char)
+        } else {
+            uri.push_str(&format!("%{byte:02X}"))
+        }
+    }
+    uri
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,24 +632,4 @@ mod tests {
             .unwrap();
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
-}
-
-// Report path keys are exact Unix filename bytes encoded as hexadecimal.
-// URI percent encoding retains non-UTF8 paths without lossy replacement.
-fn path_key_uri(key: &str) -> String {
-    let mut uri = String::new();
-    for pair in key.as_bytes().chunks_exact(2) {
-        let Some(byte) = std::str::from_utf8(pair)
-            .ok()
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-        else {
-            continue;
-        };
-        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
-            uri.push(byte as char)
-        } else {
-            uri.push_str(&format!("%{byte:02X}"))
-        }
-    }
-    uri
 }

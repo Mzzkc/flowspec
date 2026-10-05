@@ -118,7 +118,7 @@ fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::F
     // the test-pollution pain). Only `languages` + `exclude` are read; surface the rest
     // loudly so misconfigured keys (e.g. `analysis.ignore` vs top-level `exclude`) aren't
     // silently ignored.
-    let value = serde_yaml::from_str::<serde_yaml::Value>(&content)
+    let value = serde_yaml::from_str::<serde_yaml::Value>(content)
         .map_err(|e| failure(format!("parse failed: {e}")))?;
     if value.is_null() {
         return Ok((ConfigFile::default(), source_sha256));
@@ -135,7 +135,7 @@ fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::F
         }
     }
 
-    let config = serde_yaml::from_str::<ConfigFile>(&content)
+    let config = serde_yaml::from_str::<ConfigFile>(content)
         .map_err(|e| failure(format!("parse failed: {e}")))?;
     for pattern in &config.exclude {
         if Path::new(pattern)

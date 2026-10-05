@@ -139,8 +139,6 @@ pub(crate) fn prepare_report(
     let checks = &options.checks;
     let severity = options.severity;
     let confidence = options.confidence;
-    let gate_severity = Some(options.gate_severity);
-    let gate_confidence = Some(options.gate_confidence);
     validate_check_patterns(checks)?;
     let mut result = crate::analyze(path, config, languages)?;
 
@@ -148,12 +146,8 @@ pub(crate) fn prepare_report(
     if let Some(authority) = result.manifest.authority.as_mut() {
         crate::report_authority::set_gate(
             authority,
-            &gate_severity
-                .unwrap_or(crate::Severity::Critical)
-                .to_string(),
-            &gate_confidence
-                .unwrap_or(crate::Confidence::Low)
-                .to_string(),
+            &options.gate_severity.to_string(),
+            &options.gate_confidence.to_string(),
         );
     }
 
@@ -373,7 +367,24 @@ fn analyze_yaml(manifest: &Manifest) -> Result<String, FlowspecError> {
         reason: e.to_string(),
     })?;
     let mut output = String::new();
-    for (key, value) in value.as_object().expect("manifest object") {
+    let fields = value.as_object().expect("manifest object");
+    let legacy_sections = [
+        "metadata",
+        "summary",
+        "diagnostics",
+        "entities",
+        "flows",
+        "boundaries",
+        "dependency_graph",
+        "type_flows",
+    ];
+    let keys = fields
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !legacy_sections.contains(key))
+        .chain(legacy_sections);
+    for key in keys {
+        let value = &fields[key];
         let flow = serde_json::to_string(value).map_err(|e| FlowspecError::Manifest {
             reason: e.to_string(),
         })?;
@@ -433,8 +444,8 @@ fn bound_analyze_report(manifest: &mut Manifest) {
         })
         .collect();
     manifest.diagnostics.clear();
-    manifest.entities.clear();
-    manifest.metadata.entity_count = 0;
+    // Ordinary entities remain the original symbol inventory even when
+    // auxiliary graph evidence and diagnostic display are explicitly omitted.
     manifest.flows.clear();
     manifest.boundaries.clear();
     manifest.dependency_graph.clear();
@@ -1569,6 +1580,186 @@ pub fn normalize_languages(languages: &[String]) -> Vec<String> {
     languages.iter().map(|l| normalize_language(l)).collect()
 }
 
+/// Lossless normal form for graph records. Stable keys are derived from their
+/// unchanged subjects and edge tuples rather than repeated in every record.
+fn graph_tables(graph: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    fn intern(tables: &mut BTreeMap<String, Vec<Value>>, name: &str, value: Value) -> usize {
+        let rows = tables.entry(name.into()).or_default();
+        if let Some(index) = rows.iter().position(|row| row == &value) {
+            index
+        } else {
+            rows.push(value);
+            rows.len() - 1
+        }
+    }
+    let mut tables = BTreeMap::new();
+    let mut entities = Vec::new();
+    let mut ids = BTreeMap::new();
+    for entity in graph["entities"].as_array()? {
+        let subject = &entity["subject"];
+        let path = subject["path_key"].as_str()?;
+        let name = subject["qualified_name"].as_str()?;
+        let decoded: Vec<u8> = (0..path.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&path[i..i + 2], 16).ok())
+            .collect::<Option<_>>()?;
+        let prefix = format!("{}::", std::str::from_utf8(&decoded).ok()?);
+        let short = name.strip_prefix(&prefix);
+        let range: Vec<Value> = [
+            "start_byte",
+            "end_byte",
+            "start_line",
+            "start_column",
+            "end_line",
+            "end_column",
+        ]
+        .iter()
+        .map(|key| entity["range"][*key].clone())
+        .collect();
+        ids.insert(entity["key"].as_str()?.to_string(), entities.len());
+        entities.push(json!([
+            intern(&mut tables, "paths", json!(path)),
+            intern(&mut tables, "languages", subject["language"].clone()),
+            intern(
+                &mut tables,
+                "names",
+                json!([short.is_some(), short.unwrap_or(name)])
+            ),
+            intern(&mut tables, "kinds", entity["kind"].clone()),
+            intern(&mut tables, "ranges", json!(range))
+        ]));
+    }
+    let mut edges = Vec::new();
+    let mut edge_ids = BTreeMap::new();
+    for edge in graph["dependency_graph"].as_array()? {
+        if edge["evidence"] != json!([]) {
+            return None;
+        }
+        edge_ids.insert(edge["key"].as_str()?.to_string(), edges.len());
+        edges.push(json!([
+            intern(&mut tables, "kinds", edge["kind"].clone()),
+            ids.get(edge["source_key"].as_str()?)?,
+            ids.get(edge["target_key"].as_str()?)?
+        ]));
+    }
+    let boundaries: Vec<usize> = graph["boundaries"]
+        .as_array()?
+        .iter()
+        .map(|edge| edge_ids.get(edge["key"].as_str()?).copied())
+        .collect::<Option<_>>()?;
+    let mut flows = Vec::new();
+    for flow in graph["flows"].as_array()? {
+        if flow["kind"] != "call" || flow["evidence"] != json!([]) {
+            return None;
+        }
+        let nodes: Vec<usize> = flow["node_keys"]
+            .as_array()?
+            .iter()
+            .map(|key| ids.get(key.as_str()?).copied())
+            .collect::<Option<_>>()?;
+        let edges: Vec<usize> = flow["edge_keys"]
+            .as_array()?
+            .iter()
+            .map(|key| edge_ids.get(key.as_str()?).copied())
+            .collect::<Option<_>>()?;
+        flows.push(json!([nodes, edges]));
+    }
+    let packed = json!({"encoding":"flowspec.graph.tables.v1","tables":tables,
+        "entities":entities,"dependency_graph":edges,"boundaries":boundaries,
+        "flows":flows,"type_flows":graph["type_flows"],
+        "compatibility_losses":"/authority/losses",
+        "compatibility_pattern_state":"/authority/pattern_state"});
+    // Never silently accept an encoding that fails to preserve every record.
+    (expand_graph_tables(&packed).as_ref() == Some(graph)).then_some(packed)
+}
+
+/// Expand the lossless graph normal form used by bounded reports.
+pub fn expand_graph_tables(packed: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::{json, Value};
+    if packed["encoding"] != "flowspec.graph.tables.v1" {
+        return None;
+    }
+    let tables = &packed["tables"];
+    let lookup = |table: &str, index: &Value| {
+        tables[table]
+            .as_array()?
+            .get(index.as_u64()? as usize)
+            .cloned()
+    };
+    let mut entities = Vec::new();
+    for row in packed["entities"].as_array()? {
+        let path = lookup("paths", &row[0])?;
+        let name = lookup("names", &row[2])?;
+        let path_str = path.as_str()?;
+        if path_str.len() % 2 != 0 || !path_str.is_ascii() {
+            return None;
+        }
+        let bytes: Vec<u8> = (0..path_str.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&path.as_str().unwrap()[i..i + 2], 16).ok())
+            .collect::<Option<_>>()?;
+        let qualified = if name[0].as_bool()? {
+            format!(
+                "{}::{}",
+                std::str::from_utf8(&bytes).ok()?,
+                name[1].as_str()?
+            )
+        } else {
+            name[1].as_str()?.into()
+        };
+        let kind = lookup("kinds", &row[3])?;
+        let mut subject = json!({"path_key":path,"language":lookup("languages",&row[1])?,"qualified_name":qualified,"construct_kind":kind});
+        let key = crate::report_authority::hash("binding", &subject);
+        subject["binding_id"] = json!(key);
+        let r = lookup("ranges", &row[4])?;
+        let range = json!({"path_key":path,"start_byte":r[0],"end_byte":r[1],"start_line":r[2],"start_column":r[3],"end_line":r[4],"end_column":r[5]});
+        entities.push(json!({"key":key,"kind":kind,"subject":subject,"range":range}));
+    }
+    let mut edges = Vec::new();
+    for row in packed["dependency_graph"].as_array()? {
+        let source = entities.get(row[1].as_u64()? as usize)?["key"].clone();
+        let target = entities.get(row[2].as_u64()? as usize)?["key"].clone();
+        let kind = lookup("kinds", &row[0])?;
+        let key = crate::report_authority::hash(
+            "binding",
+            &json!({"kind":kind,"source_key":source,"target_key":target}),
+        );
+        edges.push(
+            json!({"key":key,"kind":kind,"source_key":source,"target_key":target,"evidence":[]}),
+        );
+    }
+    let boundaries: Vec<Value> = packed["boundaries"]
+        .as_array()?
+        .iter()
+        .map(|i| edges.get(i.as_u64()? as usize).cloned())
+        .collect::<Option<_>>()?;
+    let mut flows = Vec::new();
+    for row in packed["flows"].as_array()? {
+        let nodes: Vec<Value> = row[0]
+            .as_array()?
+            .iter()
+            .map(|i| entities.get(i.as_u64()? as usize).map(|e| e["key"].clone()))
+            .collect::<Option<_>>()?;
+        let edge_keys: Vec<Value> = row[1]
+            .as_array()?
+            .iter()
+            .map(|i| edges.get(i.as_u64()? as usize).map(|e| e["key"].clone()))
+            .collect::<Option<_>>()?;
+        let key = crate::report_authority::hash(
+            "binding",
+            &json!({"kind":"call","node_keys":nodes,"edge_keys":edge_keys}),
+        );
+        flows.push(
+            json!({"key":key,"kind":"call","node_keys":nodes,"edge_keys":edge_keys,"evidence":[]}),
+        );
+    }
+    Some(
+        json!({"entities":entities,"dependency_graph":edges,"boundaries":boundaries,"flows":flows,"type_flows":packed["type_flows"]}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2388,184 +2579,4 @@ mod tests {
         assert!(field_names.contains(&"sig"));
         assert!(field_names.contains(&"loc"));
     }
-}
-
-/// Lossless normal form for graph records. Stable keys are derived from their
-/// unchanged subjects and edge tuples rather than repeated in every record.
-fn graph_tables(graph: &serde_json::Value) -> Option<serde_json::Value> {
-    use serde_json::{json, Value};
-    use std::collections::BTreeMap;
-    fn intern(tables: &mut BTreeMap<String, Vec<Value>>, name: &str, value: Value) -> usize {
-        let rows = tables.entry(name.into()).or_default();
-        if let Some(index) = rows.iter().position(|row| row == &value) {
-            index
-        } else {
-            rows.push(value);
-            rows.len() - 1
-        }
-    }
-    let mut tables = BTreeMap::new();
-    let mut entities = Vec::new();
-    let mut ids = BTreeMap::new();
-    for entity in graph["entities"].as_array()? {
-        let subject = &entity["subject"];
-        let path = subject["path_key"].as_str()?;
-        let name = subject["qualified_name"].as_str()?;
-        let decoded: Vec<u8> = (0..path.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&path[i..i + 2], 16).ok())
-            .collect::<Option<_>>()?;
-        let prefix = format!("{}::", std::str::from_utf8(&decoded).ok()?);
-        let short = name.strip_prefix(&prefix);
-        let range: Vec<Value> = [
-            "start_byte",
-            "end_byte",
-            "start_line",
-            "start_column",
-            "end_line",
-            "end_column",
-        ]
-        .iter()
-        .map(|key| entity["range"][*key].clone())
-        .collect();
-        ids.insert(entity["key"].as_str()?.to_string(), entities.len());
-        entities.push(json!([
-            intern(&mut tables, "paths", json!(path)),
-            intern(&mut tables, "languages", subject["language"].clone()),
-            intern(
-                &mut tables,
-                "names",
-                json!([short.is_some(), short.unwrap_or(name)])
-            ),
-            intern(&mut tables, "kinds", entity["kind"].clone()),
-            intern(&mut tables, "ranges", json!(range))
-        ]));
-    }
-    let mut edges = Vec::new();
-    let mut edge_ids = BTreeMap::new();
-    for edge in graph["dependency_graph"].as_array()? {
-        if edge["evidence"] != json!([]) {
-            return None;
-        }
-        edge_ids.insert(edge["key"].as_str()?.to_string(), edges.len());
-        edges.push(json!([
-            intern(&mut tables, "kinds", edge["kind"].clone()),
-            ids.get(edge["source_key"].as_str()?)?,
-            ids.get(edge["target_key"].as_str()?)?
-        ]));
-    }
-    let boundaries: Vec<usize> = graph["boundaries"]
-        .as_array()?
-        .iter()
-        .map(|edge| edge_ids.get(edge["key"].as_str()?).copied())
-        .collect::<Option<_>>()?;
-    let mut flows = Vec::new();
-    for flow in graph["flows"].as_array()? {
-        if flow["kind"] != "call" || flow["evidence"] != json!([]) {
-            return None;
-        }
-        let nodes: Vec<usize> = flow["node_keys"]
-            .as_array()?
-            .iter()
-            .map(|key| ids.get(key.as_str()?).copied())
-            .collect::<Option<_>>()?;
-        let edges: Vec<usize> = flow["edge_keys"]
-            .as_array()?
-            .iter()
-            .map(|key| edge_ids.get(key.as_str()?).copied())
-            .collect::<Option<_>>()?;
-        flows.push(json!([nodes, edges]));
-    }
-    let packed = json!({"encoding":"flowspec.graph.tables.v1","tables":tables,
-        "entities":entities,"dependency_graph":edges,"boundaries":boundaries,
-        "flows":flows,"type_flows":graph["type_flows"],
-        "compatibility_losses":"/authority/losses",
-        "compatibility_pattern_state":"/authority/pattern_state"});
-    // Never silently accept an encoding that fails to preserve every record.
-    (expand_graph_tables(&packed).as_ref() == Some(graph)).then_some(packed)
-}
-
-/// Expand the lossless graph normal form used by bounded reports.
-pub fn expand_graph_tables(packed: &serde_json::Value) -> Option<serde_json::Value> {
-    use serde_json::{json, Value};
-    if packed["encoding"] != "flowspec.graph.tables.v1" {
-        return None;
-    }
-    let tables = &packed["tables"];
-    let lookup = |table: &str, index: &Value| {
-        tables[table]
-            .as_array()?
-            .get(index.as_u64()? as usize)
-            .cloned()
-    };
-    let mut entities = Vec::new();
-    for row in packed["entities"].as_array()? {
-        let path = lookup("paths", &row[0])?;
-        let name = lookup("names", &row[2])?;
-        let path_str = path.as_str()?;
-        if path_str.len() % 2 != 0 || !path_str.is_ascii() {
-            return None;
-        }
-        let bytes: Vec<u8> = (0..path_str.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&path.as_str().unwrap()[i..i + 2], 16).ok())
-            .collect::<Option<_>>()?;
-        let qualified = if name[0].as_bool()? {
-            format!(
-                "{}::{}",
-                std::str::from_utf8(&bytes).ok()?,
-                name[1].as_str()?
-            )
-        } else {
-            name[1].as_str()?.into()
-        };
-        let kind = lookup("kinds", &row[3])?;
-        let mut subject = json!({"path_key":path,"language":lookup("languages",&row[1])?,"qualified_name":qualified,"construct_kind":kind});
-        let key = crate::report_authority::hash("binding", &subject);
-        subject["binding_id"] = json!(key);
-        let r = lookup("ranges", &row[4])?;
-        let range = json!({"path_key":path,"start_byte":r[0],"end_byte":r[1],"start_line":r[2],"start_column":r[3],"end_line":r[4],"end_column":r[5]});
-        entities.push(json!({"key":key,"kind":kind,"subject":subject,"range":range}));
-    }
-    let mut edges = Vec::new();
-    for row in packed["dependency_graph"].as_array()? {
-        let source = entities.get(row[1].as_u64()? as usize)?["key"].clone();
-        let target = entities.get(row[2].as_u64()? as usize)?["key"].clone();
-        let kind = lookup("kinds", &row[0])?;
-        let key = crate::report_authority::hash(
-            "binding",
-            &json!({"kind":kind,"source_key":source,"target_key":target}),
-        );
-        edges.push(
-            json!({"key":key,"kind":kind,"source_key":source,"target_key":target,"evidence":[]}),
-        );
-    }
-    let boundaries: Vec<Value> = packed["boundaries"]
-        .as_array()?
-        .iter()
-        .map(|i| edges.get(i.as_u64()? as usize).cloned())
-        .collect::<Option<_>>()?;
-    let mut flows = Vec::new();
-    for row in packed["flows"].as_array()? {
-        let nodes: Vec<Value> = row[0]
-            .as_array()?
-            .iter()
-            .map(|i| entities.get(i.as_u64()? as usize).map(|e| e["key"].clone()))
-            .collect::<Option<_>>()?;
-        let edge_keys: Vec<Value> = row[1]
-            .as_array()?
-            .iter()
-            .map(|i| edges.get(i.as_u64()? as usize).map(|e| e["key"].clone()))
-            .collect::<Option<_>>()?;
-        let key = crate::report_authority::hash(
-            "binding",
-            &json!({"kind":"call","node_keys":nodes,"edge_keys":edge_keys}),
-        );
-        flows.push(
-            json!({"key":key,"kind":"call","node_keys":nodes,"edge_keys":edge_keys,"evidence":[]}),
-        );
-    }
-    Some(
-        json!({"entities":entities,"dependency_graph":edges,"boundaries":boundaries,"flows":flows,"type_flows":packed["type_flows"]}),
-    )
 }

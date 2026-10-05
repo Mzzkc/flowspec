@@ -1698,15 +1698,10 @@ fn strip_type_annotations(line: &str) -> String {
                     }
                 }
             }
-            b':' if pd > 0 => {
-                if is_param_type_colon(bytes, i) {
-                    let ep = find_annotation_end(&bytes[i..], true);
-                    out.extend(std::iter::repeat_n(b' ', ep));
-                    i += ep;
-                } else {
-                    out.push(c);
-                    i += 1;
-                }
+            b':' if pd > 0 && is_param_type_colon(bytes, i) => {
+                let ep = find_annotation_end(&bytes[i..], true);
+                out.extend(std::iter::repeat_n(b' ', ep));
+                i += ep;
             }
             _ => {
                 out.push(c);

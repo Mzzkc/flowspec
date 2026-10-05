@@ -740,13 +740,10 @@ fn extract_use_tree(
                     );
                 }
             }
-            "identifier" => {
-                // Simple import: `use something;`
-                // But only if this is a direct child of use_declaration, not a path segment
-                if node.kind() == "use_declaration" {
-                    let name = node_text(content, child).to_string();
-                    add_import_symbol(result, &name, visibility, path, child, module_path);
-                }
+            "identifier" if node.kind() == "use_declaration" => {
+                // Simple import: `use something;`, not a path segment.
+                let name = node_text(content, child).to_string();
+                add_import_symbol(result, &name, visibility, path, child, module_path);
             }
             _ => {}
         }

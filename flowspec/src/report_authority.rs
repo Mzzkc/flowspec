@@ -412,8 +412,7 @@ pub(crate) fn set_gate(authority: &mut Value, severity: &str, confidence: &str) 
 }
 
 pub(crate) fn build(
-    root: &Path,
-    config: &Config,
+    context: (&Path, &Config),
     languages: &[String],
     inputs: &[InputRecord],
     diagnostics: &[DiagnosticEntry],
@@ -421,6 +420,7 @@ pub(crate) fn build(
     mut losses: Vec<Value>,
     registry: &crate::registry::Registry,
 ) -> Value {
+    let (root, config) = context;
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
