@@ -103,11 +103,10 @@ impl ModuleIndex {
             .collect();
         if matches!(language.as_str(), "javascript" | "typescript") {
             // Preserve all actual source paths for relative binding resolution,
-            // including same-stem JS/TS rivals. These keys are never module names.
-            for (path, (target_language, target_package)) in &self.files {
-                if target_package == package
-                    && matches!(target_language.as_str(), "javascript" | "typescript")
-                {
+            // including cross-package targets and same-stem JS/TS rivals. These
+            // keys are never module names; the relative resolver matches actual paths.
+            for (path, (target_language, _)) in &self.files {
+                if matches!(target_language.as_str(), "javascript" | "typescript") {
                     view.insert(format!("@source-path:{}", path.display()), path.clone());
                 }
             }

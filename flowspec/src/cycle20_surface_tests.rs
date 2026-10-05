@@ -817,14 +817,14 @@ fn t32_config_languages_invalid_handled_gracefully() {
     .unwrap();
 
     let config = Config::load(tmp.path(), None).unwrap();
-    // Config has invalid "cobol" — analyze should handle gracefully.
-    // Since config languages feed into active_languages which then
-    // filter adapters (not validate), invalid names are silently skipped
-    // (no adapter matches "cobol"). No crash.
+    // The validated registry rejects unsupported config languages before analysis.
     let result = crate::analyze(tmp.path(), &config, &[]);
     assert!(
-        result.is_ok(),
-        "Invalid language in config must not crash — got: {:?}",
+        matches!(
+            &result,
+            Err(crate::error::FlowspecError::UnsupportedLanguage { language }) if language == "cobol"
+        ),
+        "Unsupported config language must be rejected before analysis — got: {:?}",
         result.err()
     );
 }

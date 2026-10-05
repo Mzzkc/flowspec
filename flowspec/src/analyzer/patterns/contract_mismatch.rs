@@ -1858,8 +1858,8 @@ mod tests {
     fn test_language_from_path_javascript_variants() {
         assert_eq!(language_from_path(Path::new("app.js")), "javascript");
         assert_eq!(language_from_path(Path::new("app.jsx")), "javascript");
-        assert_eq!(language_from_path(Path::new("app.ts")), "javascript");
-        assert_eq!(language_from_path(Path::new("app.tsx")), "javascript");
+        assert_eq!(language_from_path(Path::new("app.ts")), "typescript");
+        assert_eq!(language_from_path(Path::new("app.tsx")), "typescript");
         assert_eq!(language_from_path(Path::new("app.mjs")), "javascript");
         assert_eq!(language_from_path(Path::new("app.cjs")), "javascript");
     }
