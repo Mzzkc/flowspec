@@ -137,3 +137,15 @@ fn unsupported_subject_keeps_a_complete_pair_and_locates_its_loss() {
         .any(|l| l["reason"] == "DUP_UNSUPPORTED_CONSTRUCT"
             && !l["ranges"].as_array().unwrap().is_empty()));
 }
+#[test]
+fn repeated_declaration_names_receive_distinct_source_ordinals() {
+ let source=[js("a","x","t",1),js("a","y","u",1),js("b","z","v",1)].join("\n");
+ let r=report(&source,"javascript","js");let pairs=duplicates(&r);
+ assert_eq!(pairs.len(),3);
+ let ids:std::collections::BTreeSet<_>=pairs.iter().map(|f|f["semantic_id"].as_str().unwrap()).collect();assert_eq!(ids.len(),3,"same-name declarations need exact source ordinals");
+}
+#[test]
+fn unknown_environment_does_not_manufacture_protocol_equivalence() {
+ let root=tempfile::tempdir().unwrap();std::fs::write(root.path().join("source.js"),format!("{}\n{}",js("a","x","t",1),js("b","y","u",1))).unwrap();
+ let path=root.path().join("policy.yaml");std::fs::write(&path,"semantic_policy:\n  version: 1\n  environments:\n    javascript:\n      version: invented-protocol\n      target: ECMAScript\n").unwrap();let config=Config::load(root.path(),Some(&path)).unwrap();let r=analyze(root.path(),&config,&[]).unwrap().manifest.authority.unwrap();assert!(duplicates(&r).is_empty());assert_eq!(r["execution"],"incomplete");
+}
