@@ -24,6 +24,7 @@ pub use populate::resolve_qualified_imports;
 
 pub use cache::{compute_file_hashes, load_file_hashes, save_file_hashes, CacheMetadata};
 pub use populate::populate_graph;
+pub(crate) use populate::populate_semantic_import_uses;
 pub use populate::resolve_cross_file_imports;
 #[allow(unused_imports)]
 // Used by cycle14_surface_tests via crate::graph::resolve_import_by_name

@@ -34,6 +34,8 @@ pub struct SemanticFile {
     pub functions: Vec<super::normalization::NormalizedFunction>,
     #[serde(default)]
     pub executables: Vec<ExecutableBinding>,
+    #[serde(default)]
+    pub import_uses: Vec<ImportUse>,
 }
 
 fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
@@ -63,6 +65,7 @@ struct Binder {
     scope: usize,
     initialized_at: usize,
     value: Option<usize>,
+    import_binding: bool,
 }
 struct Scope {
     parent: Option<usize>,
@@ -127,10 +130,55 @@ impl Collector<'_> {
                                 scope,
                                 initialized_at: node.start_byte(),
                                 value: None,
+                                import_binding: false,
                             });
                         }
                     }
                 }
+            }
+        }
+        if node.kind() == "import_statement" {
+            fn imports<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+                if node.kind() == "import_specifier" {
+                    if let Some(name) = node
+                        .child_by_field_name("alias")
+                        .or_else(|| node.child_by_field_name("name"))
+                    {
+                        out.push(name);
+                    }
+                    return;
+                }
+                if node.kind() == "namespace_import" {
+                    if let Some(name) = children(node).last() {
+                        out.push(*name);
+                    }
+                    return;
+                }
+                for child in children(node) {
+                    if node.kind() == "import_clause" && child.kind() == "identifier" {
+                        out.push(child);
+                    } else {
+                        imports(child, out);
+                    }
+                }
+            }
+            let mut names = Vec::new();
+            imports(node, &mut names);
+            for name in names {
+                self.binders.push(Binder {
+                    name: text(self.source, name).to_string(),
+                    scope,
+                    initialized_at: 0,
+                    value: None,
+                    import_binding: true,
+                });
+            }
+            let mut pending = vec![node];
+            while let Some(n) = pending.pop() {
+                if n.kind() == "identifier" {
+                    self.declarations.insert(n.start_byte());
+                }
+                pending.extend(children(n));
             }
         }
         self.node_scopes.insert(node.start_byte(), scope);
@@ -166,6 +214,7 @@ impl Collector<'_> {
                         scope,
                         initialized_at: init.end_byte(),
                         value: Some(value),
+                        import_binding: false,
                     });
                     if !is_lexical {
                         self.issue(
@@ -200,11 +249,35 @@ impl Collector<'_> {
             .get(&node.start_byte())
             .copied()
             .unwrap_or(scope);
-        if matches!(node.kind(), "identifier" | "shorthand_property_identifier")
-            && !self.declarations.contains(&node.start_byte())
+        if matches!(
+            node.kind(),
+            "identifier" | "shorthand_property_identifier" | "type_identifier"
+        ) && !self.declarations.contains(&node.start_byte())
         {
             let name = text(self.source, node);
-            if let Some(b) = self.lookup(name, scope) {
+            if let Some(b) = self.lookup(name, scope).cloned() {
+                if b.import_binding
+                    && !node.parent().is_some_and(|p| {
+                        p.kind() == "export_specifier"
+                            && p.child_by_field_name("alias") == Some(node)
+                    })
+                {
+                    let kind = if node.kind() == "type_identifier" {
+                        super::ir::ReferenceKind::Annotation
+                    } else if node
+                        .parent()
+                        .is_some_and(|p| p.kind() == "export_specifier")
+                    {
+                        super::ir::ReferenceKind::Export
+                    } else {
+                        super::ir::ReferenceKind::Read
+                    };
+                    self.file.import_uses.push(ImportUse {
+                        name: name.to_string(),
+                        range: range(node),
+                        kind,
+                    });
+                }
                 if let Some(value) = b.value {
                     let initialized_at = b.initialized_at;
                     let is_write = node.parent().is_some_and(|p| {
@@ -484,4 +557,11 @@ fn collect_rust_executables(source: &str, path: &Path, root: Node<'_>) -> Vec<Ex
             .collect();
     }
     bindings
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportUse {
+    pub name: String,
+    pub range: (usize, usize),
+    pub kind: super::ir::ReferenceKind,
 }

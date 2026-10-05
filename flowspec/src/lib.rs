@@ -448,7 +448,9 @@ pub fn analyze_with_registry(
             match adapter.parse_file(file, &content) {
                 Ok(result) => {
                     populate_graph(&mut graph, &result);
-                    graph.record_semantic_file(parser::semantic::collect(file, &content));
+                    let semantic_file = parser::semantic::collect(file, &content);
+                    graph::populate_semantic_import_uses(&mut graph, &semantic_file, &content);
+                    graph.record_semantic_file(semantic_file);
                     if parse_loss {
                         tracing::warn!("Parse recovery in {}", file.display());
                         completeness.reject(file.display().to_string(), "parse_error");
