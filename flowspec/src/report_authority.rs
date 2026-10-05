@@ -488,6 +488,7 @@ pub(crate) fn build(
         ));
     }
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
+    append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();
     let mut by_severity: BTreeMap<&str, u64> = ["critical", "warning", "info"]
@@ -721,6 +722,128 @@ fn append_semantic_proofs(
                 &json!({"semantic_id":semantic_id,"source_sha256":digest(content.as_bytes()),"range":range,"evidence":evidence}),
             );
             findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"data_dead_end","severity":"warning","confidence":"high","subject":subject,"cause":cause,"range":range,"evidence":evidence,"suggestion":"Remove the unused local value or connect it to its intended consumer."}));
+        }
+    }
+}
+
+fn append_duplication_proofs(
+    root: &Path,
+    config: &Config,
+    inputs: &[InputRecord],
+    graph: &Graph,
+    findings: &mut Vec<Value>,
+    losses: &mut Vec<Value>,
+) {
+    use crate::parser::normalization::{RULE_SHA256, RULE_VERSION};
+    let mut supported = Vec::new();
+    for file in graph.semantic_files() {
+        let key = path_key(root, &file.path);
+        let Some(input) = inputs
+            .iter()
+            .find(|i| i.path == file.path && i.parsed && !i.changed_during_run)
+        else {
+            continue;
+        };
+        let Some(content) = input.content.as_deref() else {
+            continue;
+        };
+        let language = input.language.as_deref().unwrap_or("unknown");
+        for function in &file.functions {
+            for issue in &function.issues {
+                let mut item = loss(
+                    &issue.reason,
+                    key.clone(),
+                    Some(offset_range(
+                        &key,
+                        content,
+                        issue.range.0 as u64,
+                        issue.range.1 as u64,
+                    )),
+                    "duplication_normalization",
+                );
+                item["affected_patterns"] = json!(["duplication"]);
+                item["required_capabilities"] = json!([issue.operation]);
+                losses.push(item);
+            }
+            let environment = config
+                .semantic_policy
+                .as_ref()
+                .and_then(|p| p.environments.get(language));
+            if environment.is_none() {
+                let mut item = loss(
+                    "DUP_ENVIRONMENT_UNRESOLVED",
+                    key.clone(),
+                    Some(offset_range(
+                        &key,
+                        content,
+                        function.range.0 as u64,
+                        function.range.1 as u64,
+                    )),
+                    "duplication_environment",
+                );
+                item["affected_patterns"] = json!(["duplication"]);
+                item["required_capabilities"] =
+                    json!(["explicit language/runtime/target environment"]);
+                losses.push(item);
+                continue;
+            }
+            if let Some(normal) = &function.normal_form {
+                if function.weight >= 8
+                    && ((function.control_shape && function.operations >= 3)
+                        || function.max_operation_chain >= 3)
+                {
+                    let env = environment.unwrap();
+                    let mut normal = normal.clone();
+                    normal[1][1][4] = json!([language, env.version, env.target, env.overflow]);
+                    supported.push((file, input, content, function, normal));
+                }
+            }
+        }
+    }
+    for i in 0..supported.len() {
+        for j in i + 1..supported.len() {
+            let (file_a, input_a, content_a, a, normal_a) = &supported[i];
+            let (file_b, input_b, content_b, b, normal_b) = &supported[j];
+            if input_a.language != input_b.language || normal_a != normal_b {
+                continue;
+            }
+            let locator =
+                |file: &crate::parser::semantic::SemanticFile,
+                 f: &crate::parser::normalization::NormalizedFunction| {
+                    json!([
+                        input_a.language,
+                        file.path
+                            .strip_prefix(root)
+                            .unwrap_or(&file.path)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        f.declaration_path,
+                        0
+                    ])
+                };
+            let mut locators = [locator(file_a, a), locator(file_b, b)];
+            locators.sort_by_key(crate::parser::normalization::canonical_bytes);
+            let identity = json!([
+                "duplication",
+                RULE_VERSION,
+                "binding-aware-whole-body-equivalence",
+                locators[0],
+                locators[1]
+            ]);
+            let semantic_id = format!(
+                "duplication:{:x}",
+                Sha256::digest(crate::parser::normalization::canonical_bytes(&identity))
+            );
+            let key_a = path_key(root, &file_a.path);
+            let key_b = path_key(root, &file_b.path);
+            let range_a = offset_range(&key_a, content_a, a.range.0 as u64, a.range.1 as u64);
+            let range_b = offset_range(&key_b, content_b, b.range.0 as u64, b.range.1 as u64);
+            let evidence = json!([{"rule_version":RULE_VERSION,"rule_sha256":RULE_SHA256,"relation":"binding-aware-whole-body-equivalence","weight":a.weight,"operations":a.operations,"control_shape":a.control_shape,"max_operation_chain":a.max_operation_chain,"normal_form":normal_a,"normal_form_digest":digest(&crate::parser::normalization::canonical_bytes(normal_a)),"binder_bijection":a.binder_names.iter().zip(&b.binder_names).collect::<Vec<_>>(),"ignored_ranges":[a.ignored,b.ignored],"ranges":[range_a,range_b],"body_ranges":[offset_range(&key_a,content_a,a.body_range.0 as u64,a.body_range.1 as u64),offset_range(&key_b,content_b,b.body_range.0 as u64,b.body_range.1 as u64)],"input_digests":[digest(content_a.as_bytes()),digest(content_b.as_bytes())]}]);
+            let observation_id = hash(
+                "finding.observation",
+                &json!({"semantic_id":semantic_id,"evidence":evidence}),
+            );
+            findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"duplication","severity":"warning","confidence":"high","subject":{"path_key":key_a,"language":input_a.language,"qualified_name":a.name,"construct_kind":"function_pair","locators":locators},"cause":{"key_version":1,"parts":{"relation":"binding-aware-whole-body-equivalence","rule_version":RULE_VERSION,"function_locators":locators}},"range":range_a,"evidence":evidence,"suggestion":"Consider consolidating the exactly equivalent function bodies while preserving their public contracts."}));
         }
     }
 }

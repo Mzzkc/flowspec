@@ -17,6 +17,8 @@
 pub mod ir;
 /// JavaScript/TypeScript language adapter (ES modules, CommonJS, JSX/TSX).
 pub mod javascript;
+/// Exact published duplication normal forms and located unresolved obligations.
+pub mod normalization;
 /// Python language adapter (imports, decorators, class hierarchy, attribute access).
 pub mod python;
 /// Rust language adapter (modules, traits, impls, use declarations).

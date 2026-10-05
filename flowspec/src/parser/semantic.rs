@@ -30,6 +30,8 @@ pub struct SemanticFile {
     pub path: PathBuf,
     pub values: Vec<SemanticValue>,
     pub issues: Vec<SemanticIssue>,
+    #[serde(default)]
+    pub functions: Vec<super::normalization::NormalizedFunction>,
 }
 
 fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
@@ -336,6 +338,9 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
             "original-byte grammar/recovery",
         );
         return collector.file;
+    }
+    if let Some(language) = crate::registry::language_id_for_path(path) {
+        collector.file.functions = super::normalization::collect(source, language, root);
     }
     // Value protocols currently cover ECMAScript lexical declarations only.
     // Other languages are handled by their executable graph prerequisites.
