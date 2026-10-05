@@ -310,7 +310,12 @@ impl OutputFormatter for SarifFormatter {
             }
             value["runs"][0]["properties"] = serde_json::json!({"flowspec":authority});
         }
-        serde_json::to_string_pretty(&value).map_err(|e| ManifestError::Serialization {
+        let serialized = if manifest.authority.is_some() {
+            serde_json::to_string(&value)
+        } else {
+            serde_json::to_string_pretty(&value)
+        };
+        serialized.map_err(|e| ManifestError::Serialization {
             reason: e.to_string(),
         })
     }

@@ -1376,6 +1376,7 @@ fn format_symbol_kind(kind: SymbolKind) -> String {
 pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     let mut ambiguous = HashSet::new();
+    let mut ambiguous_files = HashSet::new();
 
     // Phase 1: Python files (dotted module names)
     let py_files: Vec<&PathBuf> = files
@@ -1389,8 +1390,10 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
             let rel = file.strip_prefix(&common_prefix).unwrap_or(file);
             let module_name = path_to_module_name(rel);
             if !module_name.is_empty() {
-                if map.insert(module_name.clone(), (*file).clone()).is_some() {
+                if let Some(previous) = map.insert(module_name.clone(), (*file).clone()) {
                     ambiguous.insert(module_name);
+                    ambiguous_files.insert(previous);
+                    ambiguous_files.insert((*file).clone());
                 }
             }
         }
@@ -1418,8 +1421,10 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
             let rel = file.strip_prefix(&js_prefix).unwrap_or(file);
             let key = js_path_to_module_key(rel);
             if !key.is_empty() {
-                if map.insert(key.clone(), (*file).clone()).is_some() {
+                if let Some(previous) = map.insert(key.clone(), (*file).clone()) {
                     ambiguous.insert(key);
+                    ambiguous_files.insert(previous);
+                    ambiguous_files.insert((*file).clone());
                 }
             }
         }
@@ -1440,8 +1445,10 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
                 if let Ok(rel) = file.strip_prefix(&common) {
                     let key = rust_path_to_module_key(rel);
                     if !key.is_empty() {
-                        if map.insert(key.clone(), (*file).clone()).is_some() {
+                        if let Some(previous) = map.insert(key.clone(), (*file).clone()) {
                             ambiguous.insert(key);
+                            ambiguous_files.insert(previous);
+                            ambiguous_files.insert((*file).clone());
                         }
                     }
                 }
@@ -1452,8 +1459,10 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
                     if let Ok(rel) = file.strip_prefix(root_dir) {
                         let key = rust_path_to_module_key(rel);
                         if !key.is_empty() {
-                            if map.insert(key.clone(), (*file).clone()).is_some() {
+                            if let Some(previous) = map.insert(key.clone(), (*file).clone()) {
                                 ambiguous.insert(key);
+                                ambiguous_files.insert(previous);
+                                ambiguous_files.insert((*file).clone());
                             }
                         }
                     }
@@ -1463,7 +1472,7 @@ pub fn build_module_map(files: &[PathBuf]) -> HashMap<String, PathBuf> {
     }
 
     if !ambiguous.is_empty() {
-        for file in files {
+        for file in &ambiguous_files {
             let language = registry::language_id_for_path(file).unwrap_or("unknown");
             map.insert(format!("{language}:{}", file.display()), file.clone());
         }
