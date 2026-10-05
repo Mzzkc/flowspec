@@ -712,7 +712,7 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                     "ordinary named function required",
                 );
             }
-            if language == "rust" || language == "typescript" {
+            if ordinary && (language == "rust" || language == "typescript") {
                 cx.issue(
                     n,
                     "DUP_TYPE_UNRESOLVED",
@@ -798,6 +798,12 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                 effects,
                 control_edges
             ]);
+            if language == "rust" || language == "typescript" {
+                cx.issues.retain(|issue| {
+                    issue.reason == "DUP_TYPE_UNRESOLVED"
+                        || issue.reason == "DUP_UNSUPPORTED_SUBJECT"
+                });
+            }
             let declaration_ordinal = output
                 .iter()
                 .filter(|f: &&NormalizedFunction| f.declaration_path == next)

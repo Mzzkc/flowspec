@@ -248,12 +248,19 @@ pub(crate) fn normalize_report(result: &mut crate::AnalysisResult) -> Result<(),
             }
         }
     }
+    // Re-measure the actual packed representation before choosing omission.
+    // Earlier raw lengths no longer describe the report after graph packing.
+    let full_json =
+        serde_json::to_string(&result.manifest).map_err(|error| FlowspecError::Manifest {
+            reason: error.to_string(),
+        })?;
+    let full_yaml = analyze_yaml(&result.manifest)?;
     // An already incomplete report can omit auxiliary graph evidence while
     // retaining the full finding catalog and the legacy consumer projection.
     // Choose this once, before display filters, for both structured formats.
-    let compact_budget = result.source_bytes.max(1024).saturating_mul(10);
     if result.manifest.execution == Some(crate::Execution::Incomplete)
-        && (full_json.len() as u64 > compact_budget || full_yaml.len() as u64 > compact_budget)
+        && (validate_manifest_size(&full_json, result.source_bytes, "json").is_err()
+            || validate_manifest_size(&full_yaml, result.source_bytes, "yaml").is_err())
     {
         compact_incomplete_report(&mut result.manifest);
     }

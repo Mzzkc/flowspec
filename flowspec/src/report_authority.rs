@@ -502,6 +502,7 @@ pub(crate) fn build(
     }
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
     append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);
+    coalesce_semantic_losses(&mut losses);
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();
     let mut by_severity: BTreeMap<&str, u64> = ["critical", "warning", "info"]
@@ -769,14 +770,25 @@ fn append_duplication_proofs(
                     Some(offset_range(
                         &key,
                         content,
-                        issue.range.0 as u64,
-                        issue.range.1 as u64,
+                        if issue.reason == "DUP_TYPE_UNRESOLVED" {
+                            0
+                        } else {
+                            issue.range.0 as u64
+                        },
+                        if issue.reason == "DUP_TYPE_UNRESOLVED" {
+                            content.len() as u64
+                        } else {
+                            issue.range.1 as u64
+                        },
                     )),
                     "duplication_normalization",
                 );
                 item["affected_patterns"] = json!(["duplication"]);
                 item["required_capabilities"] = json!([issue.operation]);
                 losses.push(item);
+            }
+            if function.normal_form.is_none() {
+                continue;
             }
             let environment = config
                 .semantic_policy
@@ -866,4 +878,66 @@ fn append_duplication_proofs(
             findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"duplication","severity":"warning","confidence":"high","subject":{"path_key":key_a,"language":input_a.language,"qualified_name":a.name,"construct_kind":"function_pair","locators":locators},"cause":{"key_version":1,"parts":{"relation":"binding-aware-whole-body-equivalence","rule_version":RULE_VERSION,"function_locators":locators}},"range":range_a,"evidence":evidence,"suggestion":"Consider consolidating the exactly equivalent function bodies while preserving their public contracts."}));
         }
     }
+}
+
+/// Sharing event metadata preserves every range and affected path while keeping
+/// bounded ordinary reports useful. Parser/fault records keep their exact form.
+fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
+    let mut groups: BTreeMap<String, Value> = BTreeMap::new();
+    let mut retained = Vec::new();
+    for item in losses.drain(..) {
+        if !matches!(
+            item["stage"].as_str(),
+            Some("semantic_prerequisite" | "duplication_normalization" | "duplication_environment")
+        ) {
+            retained.push(item);
+            continue;
+        }
+        let key = serde_json::to_string(&json!([
+            item["stage"],
+            item["reason"],
+            item["affected_patterns"],
+            item["required_capabilities"]
+        ]))
+        .unwrap();
+        if let Some(group) = groups.get_mut(&key) {
+            for field in ["scope_paths", "ranges"] {
+                let items = item[field].as_array().unwrap();
+                let entries = group[field].as_array_mut().unwrap();
+                for value in items {
+                    if !entries.contains(value) {
+                        entries.push(value.clone());
+                    }
+                }
+            }
+        } else {
+            groups.insert(key, item);
+        }
+    }
+    for mut group in groups.into_values() {
+        // These new parser semantic prerequisites use exact half-open UTF-8
+        // ranges; repeated derived line/column coordinates are unnecessary.
+        // Existing parser/fault records retain their original schema verbatim.
+        if let Some(ranges) = group["ranges"].as_array_mut() {
+            for range in ranges {
+                *range = json!({"path_key":range["path_key"],"start_byte":range["start_byte"],"end_byte":range["end_byte"]});
+            }
+        }
+        group["scope_paths"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_key(|v| v.as_str().unwrap_or("").to_string());
+        group["id"] = json!(hash(
+            "loss",
+            &json!([
+                group["stage"],
+                group["reason"],
+                group["scope_paths"],
+                group["ranges"],
+                group["required_capabilities"]
+            ])
+        ));
+        retained.push(group);
+    }
+    *losses = retained;
 }
