@@ -298,7 +298,7 @@ mod tests {
             },
             resolution: ResolutionStatus::Unresolved,
         });
-        let mut entries = vec![first, second];
+        let mut entries = [first, second];
         entries.sort_by_key(|id| graph.get_symbol(*id).unwrap().qualified_name.clone());
         let expected: Vec<_> = entries
             .iter()
