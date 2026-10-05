@@ -1616,7 +1616,7 @@ fn extract_native_references(result: &mut ParseOutput, content: &[u8], path: &Pa
                 && !annotation
                 && !type_only_import(node)
                 && imported
-                && !lexical_parameter_shadows(node, &name, content)
+                && !lexical_parameter_shadows(node, name, content)
             {
                 result.references.push(Reference {
                     id: ReferenceId::default(),

@@ -1130,6 +1130,17 @@ fn parse_json_manifest(content: &str, path: &Path) -> Result<Manifest, FlowspecE
 
 /// Compute structural differences between two manifests.
 pub fn compute_diff(old: &Manifest, new: &Manifest) -> DiffResult {
+    if let Some(reason) = diff_noncomparability(old, new) {
+        return DiffResult {
+            entities_added: Vec::new(),
+            entities_removed: Vec::new(),
+            entities_changed: Vec::new(),
+            diagnostics_new: Vec::new(),
+            diagnostics_resolved: Vec::new(),
+            has_regressions: false,
+            summary: vec![format!("incomparable reports: {reason}")],
+        };
+    }
     // Entity diffing by ID
     let old_ids: HashSet<&str> = old.entities.iter().map(|e| e.id.as_str()).collect();
     let new_ids: HashSet<&str> = new.entities.iter().map(|e| e.id.as_str()).collect();

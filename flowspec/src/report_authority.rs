@@ -1022,7 +1022,14 @@ fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
     for item in losses.drain(..) {
         if !matches!(
             item["stage"].as_str(),
-            Some("semantic_prerequisite" | "duplication_normalization" | "duplication_environment" | "adapter_capability" | "resolution" | "parse")
+            Some(
+                "semantic_prerequisite"
+                    | "duplication_normalization"
+                    | "duplication_environment"
+                    | "adapter_capability"
+                    | "resolution"
+                    | "parse"
+            )
         ) {
             retained.push(item);
             continue;
@@ -1031,7 +1038,8 @@ fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
             item["stage"],
             item["reason"],
             item["affected_patterns"],
-            item["required_capabilities"], item["origin"]
+            item["required_capabilities"],
+            item["origin"]
         ]))
         .unwrap();
         if let Some(group) = groups.get_mut(&key) {
@@ -1052,12 +1060,15 @@ fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
         // These new parser semantic prerequisites use exact half-open UTF-8
         // ranges; repeated derived line/column coordinates are unnecessary.
         // Existing parser/fault records retain their original schema verbatim.
-        if matches!(group["stage"].as_str(), Some("semantic_prerequisite" | "duplication_normalization" | "duplication_environment")) {
-        if let Some(ranges) = group["ranges"].as_array_mut() {
-            for range in ranges {
-                *range = json!({"path_key":range["path_key"],"start_byte":range["start_byte"],"end_byte":range["end_byte"]});
+        if matches!(
+            group["stage"].as_str(),
+            Some("semantic_prerequisite" | "duplication_normalization" | "duplication_environment")
+        ) {
+            if let Some(ranges) = group["ranges"].as_array_mut() {
+                for range in ranges {
+                    *range = json!({"path_key":range["path_key"],"start_byte":range["start_byte"],"end_byte":range["end_byte"]});
+                }
             }
-        }
         }
         group["scope_paths"]
             .as_array_mut()
