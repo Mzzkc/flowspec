@@ -39,7 +39,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
 
     for (id, symbol) in graph.all_symbols() {
         // Only target Method symbols — Function is data_dead_end's domain
-        if symbol.kind != SymbolKind::Method {
+        if symbol.kind != SymbolKind::Method || graph.private_implementation(id).is_none() {
             continue;
         }
 

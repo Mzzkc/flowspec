@@ -109,6 +109,7 @@ pub(crate) fn append(
     findings: &mut Vec<Value>,
     losses: &mut Vec<Value>,
 ) {
+    append_private_implementations(root, inputs, graph, findings, losses);
     let Some(policy) = &config.semantic_policy else {
         return;
     };
@@ -184,6 +185,69 @@ pub(crate) fn append(
             let mut subject = base;
             subject["name"] = json!(graph.get_symbol(id.unwrap()).unwrap().name);
             findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"partial_wiring","severity":"warning","confidence":"high","subject":subject,"cause":cause,"range":range,"evidence":evidence,"suggestion":"Connect the declared operation on every normal-return peer path."}));
+        }
+    }
+}
+
+fn append_private_implementations(
+    root: &Path,
+    inputs: &[InputRecord],
+    graph: &Graph,
+    findings: &mut Vec<Value>,
+    losses: &mut Vec<Value>,
+) {
+    for (id, symbol) in graph
+        .all_symbols()
+        .filter(|(_, s)| s.kind == SymbolKind::Method)
+    {
+        let Some(input) = inputs
+            .iter()
+            .find(|i| i.path == symbol.location.file && i.parsed && !i.changed_during_run)
+        else {
+            continue;
+        };
+        let Some(content) = input.content.as_deref() else {
+            continue;
+        };
+        let key = path_key(root, &input.path);
+        let range = location_range(&key, content, &symbol.location);
+        // An actual bound call/reference defeats absence, including an unrelated
+        // spelling on a different owner. Type annotations alone are not consumers.
+        if graph.edges_to(id).iter().any(|e| {
+            matches!(e.kind, EdgeKind::Calls | EdgeKind::References)
+                && e.reference_id
+                    .and_then(|i| graph.get_reference(i))
+                    .is_none_or(|r| r.kind != crate::parser::ir::ReferenceKind::Annotation)
+        }) {
+            continue;
+        }
+        let Some(proof) = graph.private_implementation(id) else {
+            let mut item = loss(
+                "implementation_dispatch_unresolved",
+                key,
+                Some(range),
+                "semantic_prerequisite",
+            );
+            item["affected_patterns"] = json!(["data_dead_end", "orphaned_impl"]);
+            item["required_capabilities"] = json!([
+                "private owner escape/export and implementation dispatch/registration closure"
+            ]);
+            losses.push(item);
+            continue;
+        };
+        let subject = json!({"path_key":key,"language":input.language,"qualified_name":symbol.qualified_name,"name":symbol.name,"construct_kind":"method"});
+        let evidence = json!([{"kind":"private_nominal_implementation_closure","owner":proof.owner,"owner_escape":"none","owner_range":offset_range(&key,content,proof.owner_range.0 as u64,proof.owner_range.1 as u64),"implementation_range":offset_range(&key,content,proof.implementation_range.0 as u64,proof.implementation_range.1 as u64),"implementation_obligation":"private_inherent_implementation","dispatch_paths":[],"registration_paths":[],"selected_file_consumer_universe":"complete-single-file-original-bytes"}]);
+        for pattern in ["data_dead_end", "orphaned_impl"] {
+            let cause = json!({"key_version":1,"parts":{"owner":proof.owner,"relation":if pattern=="data_dead_end"{"unconsumed_private_executable"}else{"unregistered_private_implementation"}}});
+            let semantic_id = hash(
+                "finding.semantic",
+                &json!({"pattern_id":pattern,"subject":subject,"cause":cause}),
+            );
+            let observation_id = hash(
+                "finding.observation",
+                &json!({"semantic_id":semantic_id,"source_sha256":digest(content.as_bytes()),"range":range,"evidence":evidence}),
+            );
+            findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":pattern,"severity":"warning","confidence":"high","subject":subject,"cause":cause,"range":range,"evidence":evidence,"suggestion":"Connect the private implementation to its intended consumer or remove it."}));
         }
     }
 }

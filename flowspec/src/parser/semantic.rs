@@ -38,6 +38,8 @@ pub struct SemanticFile {
     pub import_uses: Vec<ImportUse>,
     #[serde(default)]
     pub normal_control: Vec<super::control::NormalControl>,
+    #[serde(default)]
+    pub private_implementations: Vec<super::private_impl::PrivateImplementation>,
 }
 
 fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
@@ -447,6 +449,11 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
     }
     if crate::registry::language_id_for_path(path) == Some("rust") {
         collector.file.executables = collect_rust_executables(source, path, root);
+        collector.file.private_implementations = super::private_impl::collect(
+            source,
+            &path.file_name().unwrap_or_default().to_string_lossy(),
+            root,
+        );
     }
     if let Some(language) = crate::registry::language_id_for_path(path) {
         collector.file.functions = super::normalization::collect(source, language, root);

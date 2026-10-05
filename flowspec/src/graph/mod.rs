@@ -91,6 +91,21 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// A proof is restricted to the actual selected single-file consumer universe.
+    pub(crate) fn private_implementation(
+        &self,
+        id: SymbolId,
+    ) -> Option<&crate::parser::private_impl::PrivateImplementation> {
+        if self.semantic_files.len() != 1 {
+            return None;
+        }
+        let symbol = self.get_symbol(id)?;
+        self.semantic_files[0]
+            .private_implementations
+            .iter()
+            .find(|p| p.qualified_name == symbol.qualified_name && p.closure)
+    }
+
     /// Creates a new empty graph.
     pub fn new() -> Self {
         Self::default()

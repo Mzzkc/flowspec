@@ -47,7 +47,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         if symbol.kind == SymbolKind::Module
             || symbol.kind == SymbolKind::Class
             || symbol.kind == SymbolKind::Struct
-            || symbol.kind == SymbolKind::Method
+            || (symbol.kind == SymbolKind::Method && graph.private_implementation(id).is_none())
         {
             continue;
         }

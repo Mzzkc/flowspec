@@ -21,6 +21,8 @@ pub mod ir;
 pub mod javascript;
 /// Exact published duplication normal forms and located unresolved obligations.
 pub mod normalization;
+/// Actual private nominal owner and implementation closure.
+pub mod private_impl;
 /// Python language adapter (imports, decorators, class hierarchy, attribute access).
 pub mod python;
 /// Structured per-file parser evidence.
