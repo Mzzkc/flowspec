@@ -18,8 +18,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lease', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--source-root', type=Path, help='Optional clean sibling checkout using the same seal-aware build.rs')
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
+    root = args.source_root.resolve() if args.source_root else Path(__file__).resolve().parents[1]
     def git(*words):
         return subprocess.check_output(['git', *words], cwd=root, text=True).strip()
     if git('status', '--porcelain'):
