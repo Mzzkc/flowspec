@@ -47,7 +47,7 @@ impl OutputFormatter for YamlFormatter {
                 reason: e.to_string(),
             });
         }
-        serde_yaml::to_string(manifest).map_err(|e| ManifestError::Serialization {
+        crate::commands::analyze_yaml(manifest).map_err(|e| ManifestError::Serialization {
             reason: e.to_string(),
         })
     }
