@@ -1,344 +1,93 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later AND LicenseRef-Commercial
-
-//! Flow tracing engine — DFS-based path tracing through the analysis graph.
-//!
-//! Traces data flow paths from entry points (or any symbol) through the call
-//! graph. Walks outgoing `EdgeKind::Calls` edges, records each step, detects
-//! cycles via per-path visited sets, and respects a maximum path depth to
-//! bound computation on large graphs.
-//!
-//! The graph is treated as read-only — tracing is a pure query with no side
-//! effects.
-
+//! Exact, bounded traversal of real call and import-reference graph edges.
 use std::collections::HashSet;
-
 use crate::graph::Graph;
 use crate::parser::ir::{EdgeKind, SymbolId, SymbolKind};
-
-/// Maximum flow path depth before stopping traversal.
-///
-/// Prevents runaway DFS on very deep call chains. When exceeded, the path
-/// is truncated and a `tracing::warn!` is emitted.
 const MAX_FLOW_DEPTH: usize = 64;
+const MAX_TRACE_PATHS: usize = 600;
 
-/// A single step in a traced flow path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowStep {
-    /// The symbol at this step.
-    pub symbol: SymbolId,
-    /// The edge kind that led to this step.
-    pub edge_kind: EdgeKind,
-}
-
-/// A complete traced flow path from an entry point.
+pub struct FlowStep { pub symbol: SymbolId, pub edge_kind: EdgeKind }
 #[derive(Debug, Clone)]
 pub struct FlowPath {
-    /// The entry point symbol where this path begins.
     pub entry: SymbolId,
-    /// The steps in the path (excluding the entry point itself).
     pub steps: Vec<FlowStep>,
-    /// Whether the path contains a cycle.
     pub is_cyclic: bool,
+    /// A real next edge was omitted by the depth or path budget.
+    pub truncated: bool,
+}
+/// Structured loss and continuation belong to the query, including zero-path queries.
+#[derive(Debug, Clone)]
+pub struct TraceReport {
+    pub symbol: SymbolId,
+    pub paths: Vec<FlowPath>,
+    pub unresolved: Vec<crate::parser::ir::Location>,
+    pub continuation: Vec<FlowPath>,
+    pub incomplete: bool,
 }
 
-/// Traces data flow paths from the given symbol through the analysis graph.
-///
-/// Walks outgoing `EdgeKind::Calls` edges from `start_symbol`, recording each
-/// step. Detects cycles via per-path visited sets and stops at terminal symbols
-/// (no outgoing call edges). Returns all discovered flow paths.
-///
-/// Import symbols are transparently resolved to their real targets by following
-/// `EdgeKind::References` edges from cross-file import resolution. This allows
-/// flow paths to cross file boundaries without leaking import proxy names.
-///
-/// `max_depth` limits the maximum path depth. Use `MAX_FLOW_DEPTH` for the
-/// default limit.
-///
-/// Returns an empty `Vec` if the start symbol has no outgoing call edges.
-pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId, max_depth: usize) -> Vec<FlowPath> {
-    let mut paths = Vec::new();
-
-    // Get outgoing call edges from start, resolving imports transparently
-    let call_targets = resolve_call_targets(graph, start_symbol);
-
-    if call_targets.is_empty() {
-        // Terminal node — no outgoing calls, no paths
-        return paths;
-    }
-
-    // DFS: for each outgoing call edge, trace a path
-    for target in &call_targets {
-        let mut visited = HashSet::new();
-        visited.insert(start_symbol);
-        let mut current_steps = Vec::new();
-
-        dfs_trace(
-            graph,
-            *target,
-            start_symbol,
-            &mut visited,
-            &mut current_steps,
-            &mut paths,
-            0,
-            max_depth,
-        );
-    }
-
-    paths
+fn trace_edges(graph: &Graph, current: SymbolId, backward: bool) -> Vec<(SymbolId, EdgeKind)> {
+    let import=graph.get_symbol(current).is_some_and(|s|s.annotations.iter().any(|a|a=="import"));
+    let edges=if backward {graph.edges_to(current)} else {graph.edges_from(current)};
+    let mut selected: Vec<_>=edges.iter().filter(|e| {
+        e.kind == EdgeKind::Calls || (e.kind == EdgeKind::References &&
+            if backward { graph.get_symbol(e.target).is_some_and(|s|s.annotations.iter().any(|a|a=="import")) } else { import })
+    }).filter(|e| e.target != SymbolId::default() && graph.get_symbol(e.target).is_some())
+      .map(|e|(e.target,e.kind)).collect();
+    selected.sort_by(|a,b| {
+        let key=|id|graph.get_symbol(id).map(|s|(&s.qualified_name,&s.location.file,s.location.line,s.location.column));
+        key(a.0).cmp(&key(b.0)).then(format!("{:?}",a.1).cmp(&format!("{:?}",b.1)))
+    });
+    selected.dedup();selected
 }
 
-/// Traces flows from all detected entry points in the graph.
-///
-/// Entry points are symbols named `main` or `__main__`, or symbols annotated
-/// with `entry_point`, matching the detection logic in `infer_module_role`.
-/// Returns all flow paths from all entry points.
-pub fn trace_all_flows(graph: &Graph) -> Vec<FlowPath> {
-    let mut all_paths = Vec::new();
-
-    for (sym_id, symbol) in graph.all_symbols() {
-        let is_entry = (symbol.name == "main"
-            || symbol.name == "__main__"
-            || symbol.annotations.contains(&"entry_point".to_string()))
-            && symbol.kind != SymbolKind::Module;
-        if is_entry {
-            let mut paths = trace_flows_from(graph, sym_id, MAX_FLOW_DEPTH);
-            all_paths.append(&mut paths);
-        }
-    }
-
-    all_paths
-}
-
-/// Resolves call targets for a symbol, transparently following import proxies.
-///
-/// Collects outgoing `EdgeKind::Calls` edges. For each target that is an import
-/// symbol (annotated with `"import"`), follows outgoing `EdgeKind::References`
-/// edges to the resolved definition. This ensures flow paths record real
-/// function targets, not import proxy names.
-///
-/// If an import symbol has no resolved target (unresolved/stdlib), it is kept
-/// as-is — the path will terminate at the import symbol.
-fn resolve_call_targets(graph: &Graph, symbol_id: SymbolId) -> Vec<SymbolId> {
-    graph
-        .edges_from(symbol_id)
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Calls)
-        .map(|e| e.target)
-        .filter(|&t| t != SymbolId::default())
-        .flat_map(|target| {
-            if let Some(sym) = graph.get_symbol(target) {
-                if sym.annotations.contains(&"import".to_string()) {
-                    // This is an import proxy — resolve to the real target
-                    let resolved: Vec<SymbolId> = graph
-                        .edges_from(target)
-                        .iter()
-                        .filter(|e| e.kind == EdgeKind::References)
-                        .map(|e| e.target)
-                        .filter(|&t| t != SymbolId::default())
-                        .collect();
-                    if !resolved.is_empty() {
-                        return resolved;
-                    }
-                }
+pub fn trace_report(graph:&Graph,start:SymbolId,max_depth:usize,backward:bool)->TraceReport {
+    let max_depth=max_depth.min(256);
+    let mut paths=Vec::new();
+    let mut pending=vec![(start,Vec::<FlowStep>::new(),HashSet::from([start]))];
+    let mut reached=HashSet::from([start]);
+    let mut continuation=Vec::new();
+    while let Some((current,steps,visited))=pending.pop() {
+        reached.insert(current);
+        let edges=trace_edges(graph,current,backward);
+        if !edges.is_empty() && (steps.len()>=max_depth || paths.len()>=MAX_TRACE_PATHS) {
+            let path=FlowPath {entry:start,steps,is_cyclic:false,truncated:true};
+            continuation.push(path.clone());paths.push(path);
+            if paths.len()>=MAX_TRACE_PATHS {
+                // Keep bounded frontier metadata without walking the omitted branches.
+                break;
             }
-            vec![target]
-        })
-        .collect()
-}
-
-/// DFS recursive helper for flow tracing.
-///
-/// Explores the call graph from `current`, building up `current_steps`.
-/// When a terminal (no outgoing calls) or cycle is detected, records
-/// the complete path. Import symbols are transparently resolved via
-/// `resolve_call_targets`.
-#[allow(clippy::too_many_arguments)]
-fn dfs_trace(
-    graph: &Graph,
-    current: SymbolId,
-    entry: SymbolId,
-    visited: &mut HashSet<SymbolId>,
-    current_steps: &mut Vec<FlowStep>,
-    paths: &mut Vec<FlowPath>,
-    depth: usize,
-    max_depth: usize,
-) {
-    // Max depth enforcement
-    if depth >= max_depth {
-        tracing::warn!("Flow trace depth limit ({}) reached", max_depth);
-        // Record the path as-is (truncated)
-        paths.push(FlowPath {
-            entry,
-            steps: current_steps.clone(),
-            is_cyclic: false,
-        });
-        return;
-    }
-
-    // Cycle detection
-    if visited.contains(&current) {
-        // Record the cyclic path
-        current_steps.push(FlowStep {
-            symbol: current,
-            edge_kind: EdgeKind::Calls,
-        });
-        paths.push(FlowPath {
-            entry,
-            steps: current_steps.clone(),
-            is_cyclic: true,
-        });
-        current_steps.pop();
-        return;
-    }
-
-    // Add current to path
-    visited.insert(current);
-    current_steps.push(FlowStep {
-        symbol: current,
-        edge_kind: EdgeKind::Calls,
-    });
-
-    // Find outgoing call edges, resolving import proxies transparently
-    let call_targets = resolve_call_targets(graph, current);
-
-    if call_targets.is_empty() {
-        // Terminal node — record the complete path
-        paths.push(FlowPath {
-            entry,
-            steps: current_steps.clone(),
-            is_cyclic: false,
-        });
-    } else {
-        // Continue DFS into each call target
-        for target in &call_targets {
-            dfs_trace(
-                graph,
-                *target,
-                entry,
-                visited,
-                current_steps,
-                paths,
-                depth + 1,
-                max_depth,
-            );
+            continue;
+        }
+        if edges.is_empty() {
+            if !steps.is_empty() {paths.push(FlowPath {entry:start,steps,is_cyclic:false,truncated:false});}
+            continue;
+        }
+        for (target,kind) in edges.into_iter().rev() {
+            let mut next=steps.clone();next.push(FlowStep {symbol:target,edge_kind:kind});
+            if visited.contains(&target) {
+                paths.push(FlowPath {entry:start,steps:next,is_cyclic:true,truncated:false});
+            } else {
+                let mut seen=visited.clone();seen.insert(target);pending.push((target,next,seen));
+            }
         }
     }
-
-    // Backtrack
-    current_steps.pop();
-    visited.remove(&current);
+    let mut identities=HashSet::new();
+    paths.retain(|p|identities.insert(p.steps.iter().map(|s|(s.symbol,s.edge_kind)).collect::<Vec<_>>()));
+    let files:HashSet<_>=reached.iter().filter_map(|id|graph.get_symbol(*id).map(|s|s.location.file.clone())).collect();
+    let mut unresolved:Vec<_>=graph.unresolved_calls().iter().chain(graph.prerequisite_losses()).filter(|r| {
+        reached.contains(&r.from) || (r.from==SymbolId::default() && files.contains(&r.location.file))
+    }).map(|r|r.location.clone()).collect();
+    unresolved.sort_by(|a,b|(&a.file,a.line,a.column,a.end_line,a.end_column).cmp(&(&b.file,b.line,b.column,b.end_line,b.end_column)));
+    unresolved.dedup();
+    let incomplete=!unresolved.is_empty() || !continuation.is_empty();
+    TraceReport {symbol:start,paths,unresolved,continuation,incomplete}
 }
-
-/// Traces data flow paths backward (callers) to the given symbol through the graph.
-///
-/// Walks incoming `EdgeKind::Calls` edges from `target_symbol`, recording each
-/// step. Detects cycles via per-path visited sets and stops at root symbols
-/// (no incoming call edges). Returns all discovered backward flow paths.
-///
-/// `max_depth` limits the maximum path depth. Use `MAX_FLOW_DEPTH` for the
-/// default limit.
-///
-/// Returns an empty `Vec` if the target symbol has no incoming call edges.
-pub fn trace_flows_to(graph: &Graph, target_symbol: SymbolId, max_depth: usize) -> Vec<FlowPath> {
-    let mut paths = Vec::new();
-
-    let caller_ids = graph.callers(target_symbol);
-
-    if caller_ids.is_empty() {
-        return paths;
-    }
-
-    for caller in &caller_ids {
-        let mut visited = HashSet::new();
-        visited.insert(target_symbol);
-        let mut current_steps = Vec::new();
-
-        dfs_trace_backward(
-            graph,
-            *caller,
-            target_symbol,
-            &mut visited,
-            &mut current_steps,
-            &mut paths,
-            0,
-            max_depth,
-        );
-    }
-
-    paths
-}
-
-/// DFS recursive helper for backward flow tracing.
-///
-/// Explores the call graph in reverse from `current`, building up `current_steps`.
-/// When a root symbol (no callers) or cycle is detected, records the complete path.
-#[allow(clippy::too_many_arguments)]
-fn dfs_trace_backward(
-    graph: &Graph,
-    current: SymbolId,
-    target: SymbolId,
-    visited: &mut HashSet<SymbolId>,
-    current_steps: &mut Vec<FlowStep>,
-    paths: &mut Vec<FlowPath>,
-    depth: usize,
-    max_depth: usize,
-) {
-    if depth >= max_depth {
-        tracing::warn!("Backward trace depth limit ({}) reached", max_depth);
-        paths.push(FlowPath {
-            entry: target,
-            steps: current_steps.clone(),
-            is_cyclic: false,
-        });
-        return;
-    }
-
-    if visited.contains(&current) {
-        current_steps.push(FlowStep {
-            symbol: current,
-            edge_kind: EdgeKind::Calls,
-        });
-        paths.push(FlowPath {
-            entry: target,
-            steps: current_steps.clone(),
-            is_cyclic: true,
-        });
-        current_steps.pop();
-        return;
-    }
-
-    visited.insert(current);
-    current_steps.push(FlowStep {
-        symbol: current,
-        edge_kind: EdgeKind::Calls,
-    });
-
-    let caller_ids = graph.callers(current);
-
-    if caller_ids.is_empty() {
-        // Root node — no more callers, record the path
-        paths.push(FlowPath {
-            entry: target,
-            steps: current_steps.clone(),
-            is_cyclic: false,
-        });
-    } else {
-        for caller in &caller_ids {
-            dfs_trace_backward(
-                graph,
-                *caller,
-                target,
-                visited,
-                current_steps,
-                paths,
-                depth + 1,
-                max_depth,
-            );
-        }
-    }
-
-    current_steps.pop();
-    visited.remove(&current);
+pub fn trace_flows_from(graph:&Graph,start:SymbolId,max_depth:usize)->Vec<FlowPath> {trace_report(graph,start,max_depth,false).paths}
+pub fn trace_flows_to(graph:&Graph,start:SymbolId,max_depth:usize)->Vec<FlowPath> {trace_report(graph,start,max_depth,true).paths}
+pub fn trace_all_flows(graph:&Graph)->Vec<FlowPath> {
+    let mut entries:Vec<_>=graph.all_symbols().filter(|(_,s)|s.kind!=SymbolKind::Module && (s.name=="main"||s.name=="__main__"||s.annotations.iter().any(|a|a=="entry_point"))).collect();
+    entries.sort_by(|(_,a),(_,b)|a.qualified_name.cmp(&b.qualified_name));
+    entries.into_iter().flat_map(|(id,_)|trace_flows_from(graph,id,MAX_FLOW_DEPTH)).collect()
 }
 
 #[cfg(test)]

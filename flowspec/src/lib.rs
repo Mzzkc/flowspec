@@ -774,7 +774,7 @@ pub fn analyze_with_registry(
                         .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
                     manifest::types::FlowStep {
                         entity,
-                        action: "call".to_string(),
+                        action: format!("{:?}", step.edge_kind).to_lowercase(),
                         in_type,
                         out_type,
                     }
@@ -946,7 +946,7 @@ pub fn analyze_with_registry(
                 }
             })
             .collect(),
-        type_flows: Vec::new(),
+        type_flows: analyzer::type_flow::derive_type_flows(&graph, input_records.iter().filter_map(|r| r.content.as_deref().map(|s| (r.path.as_path(), s)))),
     };
 
     #[cfg(feature = "fault_probe")]

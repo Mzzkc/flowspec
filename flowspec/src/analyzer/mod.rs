@@ -22,3 +22,6 @@ pub mod extraction;
 pub mod flow;
 /// Pattern detectors — one module per diagnostic pattern, plus the registry that collects them.
 pub mod patterns;
+
+/// Binding-aware type construction and executable operation records.
+pub mod type_flow;
