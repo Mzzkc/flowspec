@@ -988,7 +988,26 @@ fn append_duplication_proofs(
         };
         let language = input.language.as_deref().unwrap_or("unknown");
         for function in &file.functions {
+            // Resolve independent pair disqualifiers before equality obligations.
+            // Unknown signatures/weights keep a pair viable. Singleton unsupported
+            // scope and nonordinary/static-type subjects retain their debt.
+            let peers: Vec<_> = graph.semantic_files().iter()
+                .filter(|peer| inputs.iter().any(|i| i.path == peer.path && i.language.as_deref() == Some(language)))
+                .flat_map(|peer| peer.functions.iter().map(move |f| (peer, f)))
+                .filter(|(peer, f)| peer.path != file.path || f.range != function.range)
+                .collect();
+            let pair_refuted = !peers.is_empty() && peers.iter().all(|(_, peer)| {
+                matches!((function.comparison_arity, peer.comparison_arity), (Some(a), Some(b)) if a != b)
+                    || function.substantive_weight_bound.is_some_and(|w| w < 8)
+                    || peer.substantive_weight_bound.is_some_and(|w| w < 8)
+            });
             for issue in &function.issues {
+                if pair_refuted && function.comparison_arity.is_some()
+                    && matches!(issue.reason.as_str(), "DUP_EFFECT_UNRESOLVED" | "DUP_UNSUPPORTED_CONSTRUCT")
+                    && issue.range.0 >= function.body_range.0
+                    && issue.range.1 <= function.body_range.1 {
+                    continue;
+                }
                 let mut item = loss(
                     &issue.reason,
                     key.clone(),

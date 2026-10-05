@@ -16,6 +16,12 @@ pub struct NormalizedFunction {
     pub body_range: (usize, usize),
     pub normal_form: Option<Value>,
     pub weight: usize,
+    /// Independently proved simple fixed signature; absent is not zero arity.
+    #[serde(default)]
+    pub comparison_arity: Option<usize>,
+    /// A complete syntax count independent of binding/effect normalization.
+    #[serde(default)]
+    pub substantive_weight_bound: Option<usize>,
     pub operations: usize,
     pub control_shape: bool,
     pub max_operation_chain: usize,
@@ -648,6 +654,34 @@ fn weight(n: &Value) -> (usize, usize, bool, usize, usize) {
     maxchain = maxchain.max(current);
     (total, ops, has_control, maxchain, current)
 }
+// Only fully enumerated supported syntax can supply an independent W bound.
+// In particular, an unsupported subtree is not silently assigned zero weight.
+fn syntax_weight(n: Node<'_>, depth: usize) -> Option<usize> {
+    if depth > super::MAX_AST_DEPTH || n.is_error() || n.is_missing() {
+        return None;
+    }
+    let own = match n.kind() {
+        "binary_expression" | "binary_operator" | "boolean_operator"
+        | "unary_expression" | "unary_operator" | "not_operator"
+        | "if_statement" | "while_statement" | "augmented_assignment" => 1,
+        "comparison_operator" => {
+            // Chains require the exact number of comparison links.
+            children(n).len().checked_sub(1)?
+        }
+        "block" | "statement_block" | "expression_statement" | "return_statement"
+        | "assignment" | "identifier" | "integer" | "float" | "number"
+        | "true" | "false" | "none" | "null" | "parenthesized_expression"
+        | "call" | "call_expression" | "argument_list" | "arguments"
+        | "pass_statement" | "empty_statement" | "comment" => 0,
+        // A scalar string cannot hide executable interpolation.
+        "string" if children(n).iter().all(|c| matches!(c.kind(), "string_start" | "string_content" | "string_end" | "escape_sequence")) => return Some(0),
+        _ => return None,
+    };
+    children(n).into_iter().try_fold(own, |sum, c| {
+        Some(sum + syntax_weight(c, depth + 1)?)
+    })
+}
+
 /// Enumerate all function subjects, including explicit unsupported obligations.
 pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<NormalizedFunction> {
     let mut output = Vec::new();
@@ -719,6 +753,11 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                     "native static type/inference/ownership normal-form mapping",
                 );
             }
+            let comparison_arity = n.child_by_field_name("parameters").and_then(|p| {
+                let named = children(p);
+                named.iter().all(|p| matches!(p.kind(), "identifier" | "positional_separator"))
+                    .then(|| named.iter().filter(|p| p.kind() == "identifier").count())
+            });
             let mut slots = Vec::new();
             if let Some(params) = n.child_by_field_name("parameters") {
                 let named = children(params);
@@ -816,6 +855,8 @@ pub(crate) fn collect(source: &str, language: &str, root: Node<'_>) -> Vec<Norma
                 body_range,
                 normal_form: cx.issues.is_empty().then_some(normal),
                 weight: w,
+                comparison_arity: ordinary.then_some(comparison_arity).flatten(),
+                substantive_weight_bound: body.and_then(|b| syntax_weight(b, 0)),
                 operations: ops,
                 control_shape: control,
                 max_operation_chain: maxchain,
