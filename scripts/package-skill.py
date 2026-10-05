@@ -84,7 +84,14 @@ def run_json(binary, args, cwd):
     result = subprocess.run([str(binary), *args], cwd=cwd, env=env, capture_output=True, timeout=30)
     if result.returncode != 0:
         raise ValueError(f'binary preflight failed: {args[0]} exit {result.returncode}')
-    return json.loads(result.stdout)
+    value = json.loads(result.stdout)
+    if args[0] in ('analyze', 'diagnose'):
+        decoded = subprocess.run([str(binary), 'expand-report', '--quiet'], input=result.stdout,
+                                 cwd=cwd, env=env, capture_output=True, timeout=30)
+        if decoded.returncode != 0:
+            raise ValueError('public report expansion failed')
+        value = json.loads(decoded.stdout)
+    return value
 
 
 def build_package(root, binary, out, expected_sha256):
@@ -112,6 +119,10 @@ def build_package(root, binary, out, expected_sha256):
         raise ValueError('candidate failed empty-source provenance preflight')
     head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     tree = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+    if a['producer'].get('build_sha') != head or a['producer'].get('source_tree_sha') != tree:
+        raise ValueError('candidate producer does not match package source')
+    if a['provenance']['registry_digest'] != catalog['digest']:
+        raise ValueError('candidate registry differs from public catalog')
     source_paths = ['skills/flowspec', 'scripts/package-skill.py', 'LICENSE', 'LICENSE-AGPL']
     dirty = subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain', '--', *source_paths], text=True)
     if dirty:

@@ -56,6 +56,8 @@ struct Cli {
 enum Commands {
     /// Print the actual language and diagnostic registry, including its digest.
     Registry,
+    /// Expand JSON report records from stdin using the public lossless reader.
+    ExpandReport,
     /// Full analysis — parse, build graph, produce manifest.
     Analyze {
         /// Project root to analyze.
@@ -427,6 +429,26 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
         )?,
         Commands::Diff { old, new, section } => {
             commands::run_diff(&old, &new, &section, format, output_path)?
+        }
+        Commands::ExpandReport => {
+            use std::io::Read;
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|e| FlowspecError::Manifest {
+                    reason: e.to_string(),
+                })?;
+            let value: serde_json::Value =
+                serde_json::from_str(&input).map_err(|e| FlowspecError::Manifest {
+                    reason: e.to_string(),
+                })?;
+            let expanded = commands::expand_report_records(&value)
+                .map_err(|reason| FlowspecError::Manifest { reason })?;
+            let text = serde_json::to_string(&expanded).map_err(|e| FlowspecError::Manifest {
+                reason: e.to_string(),
+            })?;
+            commands::write_output(&text, output_path)?;
+            0
         }
         Commands::Registry => {
             let registry = flowspec::registry::Registry::default();

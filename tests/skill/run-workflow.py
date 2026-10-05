@@ -76,6 +76,12 @@ def run_workflow(archive,out):
             result['commands'].append({'label':label,'argv':[str(binary),*map(str,args)],'exit':r.returncode,'stdout':str(stdout),'stderr':str(stderr),'stdout_sha256':digest(r.stdout),'stderr_sha256':digest(r.stderr)})
             try:value=json.loads(r.stdout)
             except (ValueError,UnicodeError):value=None
+            if value is not None and args[0] in ('analyze','diagnose'):
+                decoded=subprocess.run([str(binary),'expand-report','--quiet'],input=r.stdout,cwd=sandbox,env=env,capture_output=True,timeout=30)
+                (out/(label+'.decoded.stdout')).write_bytes(decoded.stdout)
+                (out/(label+'.decoded.stderr')).write_bytes(decoded.stderr)
+                if decoded.returncode!=0:raise ValueError('public report expansion failed: '+label)
+                value=json.loads(decoded.stdout)
             return r.returncode,value,r.stdout.decode(errors='replace')
         version=invoke('version',['--version'])
         result['version']=version[2].strip()
