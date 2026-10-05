@@ -128,6 +128,24 @@ impl Graph {
         self.unresolved_calls.push(reference);
     }
 
+    pub(crate) fn take_unresolved_calls(&mut self) -> Vec<Reference> {
+        std::mem::take(&mut self.unresolved_calls)
+    }
+
+    pub(crate) fn declares_file_module(&self, path: &Path, name: &str) -> bool {
+        self.file_scopes.get(path).is_some_and(|ids| {
+            ids.iter().any(|id| {
+                let scope = &self.scopes[*id];
+                scope.kind == ScopeKind::Module
+                    && scope.name == name
+                    && scope
+                        .parent
+                        .and_then(|parent| self.scopes.get(parent))
+                        .is_some_and(|parent| parent.kind == ScopeKind::File)
+            })
+        })
+    }
+
     pub(crate) fn record_dynamic_export(&mut self, path: PathBuf) {
         self.dynamic_exports.insert(path);
     }

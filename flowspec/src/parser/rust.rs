@@ -976,18 +976,9 @@ fn extract_call(result: &mut ParseOutput, content: &[u8], path: &Path, node: Nod
                         )),
                     });
                 }
-                let leaf = last_identifier_segment(content, func_node);
-                let associated = leaf.as_ref().is_some_and(|leaf| {
-                    result
-                        .symbols
-                        .iter()
-                        .any(|s| s.kind == SymbolKind::Method && s.name == *leaf)
-                });
-                if associated {
-                    Some(build_scoped_path(content, func_node))
-                } else {
-                    leaf
-                }
+                // Retain the full authority path. A last-segment spelling cannot
+                // establish either an associated owner or a module binding.
+                Some(build_scoped_path(content, func_node))
             }
             "field_expression" => {
                 // object.method() — extract field name, detect self.method() pattern

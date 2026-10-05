@@ -1265,6 +1265,57 @@ pub fn resolve_cross_file_imports(
 /// Resolve imports using language/package-qualified source identities.
 pub fn resolve_qualified_imports(graph: &mut Graph, index: &super::ModuleIndex) {
     resolve_imports_impl(graph, &std::collections::HashMap::new(), Some(index));
+    // A qualified Rust module call is resolved only after the selected package
+    // index and every actual module declaration are available. Missing files,
+    // undeclared modules and ambiguous authorities retain the original call loss.
+    for mut call in graph.take_unresolved_calls() {
+        let target = (|| {
+            if call.location.file.extension().is_none_or(|ext| ext != "rs") {
+                return None;
+            }
+            let ResolutionStatus::Partial(info) = &call.resolution else {
+                return None;
+            };
+            let name = info.strip_prefix("call:")?;
+            let (module, leaf) = name.rsplit_once("::")?;
+            let view = index.binding_view(&call.location.file);
+            let current = find_module_key_for_file(&call.location.file, &view)?;
+            let absolute = if module.starts_with("crate::") {
+                module.to_string()
+            } else if module.starts_with("self::") || module.starts_with("super::") {
+                resolve_relative_rust_path(module, &current)
+            } else {
+                format!("{current}::{module}")
+            };
+            let target_file = view.get(&absolute)?;
+            let parts: Vec<_> = absolute.split("::").collect();
+            for n in 1..parts.len() {
+                let parent = view.get(&parts[..n].join("::"))?;
+                if !graph.declares_file_module(parent, parts[n]) {
+                    return None;
+                }
+            }
+            let expected_name = format!("{}::{leaf}", target_file.file_name()?.to_string_lossy());
+            let candidates: Vec<_> = graph
+                .all_symbols()
+                .filter(|(_, symbol)| {
+                    symbol.location.file == *target_file
+                        && symbol.kind == SymbolKind::Function
+                        && symbol.name == leaf
+                        && symbol.qualified_name == expected_name
+                })
+                .map(|(id, _)| id)
+                .collect();
+            (candidates.len() == 1).then(|| candidates[0])
+        })();
+        if let Some(target) = target {
+            call.to = target;
+            call.resolution = ResolutionStatus::Resolved;
+            graph.add_reference(call);
+        } else {
+            graph.record_unresolved_call(call);
+        }
+    }
 }
 
 fn resolve_imports_impl(
