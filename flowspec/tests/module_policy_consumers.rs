@@ -25,6 +25,13 @@ fn run(files: &[(&str, &str)], policy: Value) -> Value {
         13
     );
     eprintln!("MODULE_POLICY_PRODUCER {}", authority["producer"]);
+    if let Some(output) = std::env::var_os("FLOWSPEC_MODULE_CONTROL_REPORT_DIR") {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let output = std::path::PathBuf::from(output);
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join(format!("control-{number:03}.json")), serde_json::to_vec_pretty(&json!({"authority":authority,"source_files":files,"semantic_policy":config.semantic_policy})).unwrap()).unwrap();
+    }
     authority
 }
 fn state(a: &Value, pattern: &str) -> String {
@@ -193,47 +200,99 @@ fn public_surface_absence_and_actual_alias_star_exports_in_four_languages() {
 
 #[test]
 fn migration_shadowed_names_unused_and_unrelated_declarations_are_clean() {
-    for (ext,declarations,_,_,_) in languages() {
-        let path=format!("subject.{ext}");
-        let shadow=match ext {"py"=>"def consumer(old):\n    return old()\n", "rs"=>"pub fn consumer(old:fn()->i32)->i32{old()}\n", _=>"export function consumer(old){return old();}\n"};
-        let source=format!("{declarations}{shadow}");
-        let policy=json!({"version":1,"migrations":[{"old":format!("{path}::old"),"new":format!("{path}::upgraded")}]});
-        let a=run(&[(&path,&source)],policy.clone());
-        assert!(findings(&a,"incomplete_migration").is_empty(),"{ext}: shadow must not target declaration: {a}");
-        assert_eq!(state(&a,"incomplete_migration"),"complete","{ext}");
-        let a=run(&[(&path,declarations)],policy);
-        assert!(findings(&a,"incomplete_migration").is_empty());
-        assert_eq!(state(&a,"incomplete_migration"),"complete");
+    for (ext, declarations, _, _, _) in languages() {
+        let path = format!("subject.{ext}");
+        let shadow = match ext {
+            "py" => "def consumer(old):\n    return old()\n",
+            "rs" => "pub fn consumer(old:fn()->i32)->i32{old()}\n",
+            _ => "export function consumer(old){return old();}\n",
+        };
+        let source = format!("{declarations}{shadow}");
+        let policy = json!({"version":1,"migrations":[{"old":format!("{path}::old"),"new":format!("{path}::upgraded")}]});
+        let a = run(&[(&path, &source)], policy.clone());
+        assert!(
+            findings(&a, "incomplete_migration").is_empty(),
+            "{ext}: shadow must not target declaration: {a}"
+        );
+        assert_eq!(state(&a, "incomplete_migration"), "complete", "{ext}");
+        let a = run(&[(&path, declarations)], policy);
+        assert!(findings(&a, "incomplete_migration").is_empty());
+        assert_eq!(state(&a, "incomplete_migration"), "complete");
     }
 }
 #[test]
 fn migration_multifile_alias_live_call_has_exact_call_span() {
-    for (ext,declarations,_,_,_) in languages() {
-        let child=format!("child.{ext}");let parent=format!("parent.{ext}");
+    for (ext, declarations, _, _, _) in languages() {
+        let child = format!("child.{ext}");
+        let parent = format!("parent.{ext}");
         let source=match ext {"py"=>"from child import old as legacy\ndef consumer():\n    return legacy()\n", "rs"=>"use crate::child::old as legacy;\npub fn consumer()->i32{legacy()}\n", _=>"import {old as legacy} from './child';\nexport function consumer(){return legacy();}\n"};
-        let a=run(&[(&child,declarations),(&parent,source)],json!({"version":1,"migrations":[{"old":format!("{child}::old"),"new":format!("{child}::upgraded") }]}));
-        let f=findings(&a,"incomplete_migration");assert_eq!(f.len(),1,"{ext}: {a}");
-        let consumers=f[0]["evidence"][0]["live_old_consumers"].as_array().unwrap();
-        assert_eq!(consumers.len(),1,"{ext}: {consumers:?}");
-        let r=&consumers[0]["range"];let start=r["start_byte"].as_u64().unwrap() as usize;let end=r["end_byte"].as_u64().unwrap() as usize;
-        assert_eq!(&source[start..end],"legacy()","{ext}");
-        assert_eq!(state(&a,"incomplete_migration"),"complete","{ext}: {}",a["losses"]);
+        let a = run(
+            &[(&child, declarations), (&parent, source)],
+            json!({"version":1,"migrations":[{"old":format!("{child}::old"),"new":format!("{child}::upgraded") }]}),
+        );
+        let f = findings(&a, "incomplete_migration");
+        assert_eq!(f.len(), 1, "{ext}: {a}");
+        let consumers = f[0]["evidence"][0]["live_old_consumers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(consumers.len(), 1, "{ext}: {consumers:?}");
+        let r = &consumers[0]["range"];
+        let start = r["start_byte"].as_u64().unwrap() as usize;
+        let end = r["end_byte"].as_u64().unwrap() as usize;
+        assert_eq!(&source[start..end], "legacy()", "{ext}");
+        assert_eq!(
+            state(&a, "incomplete_migration"),
+            "complete",
+            "{ext}: {}",
+            a["losses"]
+        );
     }
 }
 #[test]
 fn export_unknown_dynamic_private_and_unrelated_binding_rivals_fail_closed() {
-    for (ext,_,_,_,api) in languages() {
-        let child=format!("child.{ext}");let parent=format!("parent.{ext}");
-        let unknown=json!({"version":1,"exports":[{"module":parent,"symbols":[format!("{child}::absent")]}]});
-        let empty=if ext=="py" {"# surface\n"} else {"// surface\n"};
-        let a=run(&[(&child,api),(&parent,empty)],unknown);
-        assert!(findings(&a,"missing_reexport").is_empty());assert_eq!(state(&a,"missing_reexport"),"incomplete");
-        let private=match ext {"py"=>"def _private():\n    return 1\n", "rs"=>"fn _private()->i32{1}\n", _=>"function _private(){return 1;}\n"};
-        let a=run(&[(&child,private),(&parent,empty)],json!({"version":1,"exports":[{"module":parent,"symbols":[format!("{child}::_private")]}]}));
-        assert!(findings(&a,"missing_reexport").is_empty());assert_eq!(state(&a,"missing_reexport"),"incomplete");
-        let a=run(&[(&child,api),(&parent,api)],json!({"version":1,"exports":[{"module":parent,"symbols":[format!("{child}::api")]}]}));
-        assert_eq!(findings(&a,"missing_reexport").len(),1,"{ext}: unrelated same spelling is not child export");
+    for (ext, _, _, _, api) in languages() {
+        let child = format!("child.{ext}");
+        let parent = format!("parent.{ext}");
+        let unknown = json!({"version":1,"exports":[{"module":parent,"symbols":[format!("{child}::absent")]}]});
+        let empty = if ext == "py" {
+            "# surface\n"
+        } else {
+            "// surface\n"
+        };
+        let a = run(&[(&child, api), (&parent, empty)], unknown);
+        assert!(findings(&a, "missing_reexport").is_empty());
+        assert_eq!(state(&a, "missing_reexport"), "incomplete");
+        let private = match ext {
+            "py" => "def _private():\n    return 1\n",
+            "rs" => "fn _private()->i32{1}\n",
+            _ => "function _private(){return 1;}\n",
+        };
+        let a = run(
+            &[(&child, private), (&parent, empty)],
+            json!({"version":1,"exports":[{"module":parent,"symbols":[format!("{child}::_private")]}]}),
+        );
+        assert!(findings(&a, "missing_reexport").is_empty());
+        assert_eq!(state(&a, "missing_reexport"), "incomplete");
+        let a = run(
+            &[(&child, api), (&parent, api)],
+            json!({"version":1,"exports":[{"module":parent,"symbols":[format!("{child}::api")]}]}),
+        );
+        assert_eq!(
+            findings(&a, "missing_reexport").len(),
+            1,
+            "{ext}: unrelated same spelling is not child export"
+        );
     }
-    let a=run(&[("child.py","def api():\n    return 1\n"),("parent.py","from child import api\n__all__ = build_surface()\n")],json!({"version":1,"exports":[{"module":"parent.py","symbols":["child.py::api"]}]}));
-    assert!(findings(&a,"missing_reexport").is_empty());assert_eq!(state(&a,"missing_reexport"),"incomplete");
+    let a = run(
+        &[
+            ("child.py", "def api():\n    return 1\n"),
+            (
+                "parent.py",
+                "from child import api\n__all__ = build_surface()\n",
+            ),
+        ],
+        json!({"version":1,"exports":[{"module":"parent.py","symbols":["child.py::api"]}]}),
+    );
+    assert!(findings(&a, "missing_reexport").is_empty());
+    assert_eq!(state(&a, "missing_reexport"), "incomplete");
 }
