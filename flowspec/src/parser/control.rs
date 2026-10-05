@@ -64,6 +64,7 @@ fn expression(n: Node<'_>, path: &mut Path, unknown: &mut Vec<(usize, usize)>, d
     }
 }
 fn statement(
+    source: &str,
     n: Node<'_>,
     paths: Vec<Path>,
     unknown: &mut Vec<(usize, usize)>,
@@ -77,7 +78,7 @@ fn statement(
         "block" | "statement_block" => {
             let mut result = paths;
             for child in children(n) {
-                result = statement(child, result, unknown, depth + 1);
+                result = statement(source, child, result, unknown, depth + 1);
             }
             result
         }
@@ -85,7 +86,7 @@ fn statement(
             if n.named_child(0)
                 .is_some_and(|c| matches!(c.kind(), "if_expression" | "return_expression")) =>
         {
-            statement(n.named_child(0).unwrap(), paths, unknown, depth + 1)
+            statement(source, n.named_child(0).unwrap(), paths, unknown, depth + 1)
         }
         "if_statement" | "if_expression" => {
             let mut result = Vec::new();
@@ -97,24 +98,47 @@ fn statement(
                 if let Some(condition) = n.child_by_field_name("condition") {
                     expression(condition, &mut path, unknown, depth + 1);
                 }
+                let condition = n.child_by_field_name("condition");
+                let known = condition.and_then(|c| {
+                    match source[c.byte_range()]
+                        .trim()
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .trim()
+                    {
+                        "true" | "True" => Some(true),
+                        "false" | "False" => Some(false),
+                        _ => None,
+                    }
+                });
                 let yes = n.child_by_field_name("consequence");
                 let no = n.child_by_field_name("alternative");
-                if let Some(yes) = yes {
-                    result.extend(statement(yes, vec![path.clone()], unknown, depth + 1));
-                } else {
-                    unknown.push(span(n));
+                if known != Some(false) {
+                    if let Some(yes) = yes {
+                        result.extend(statement(
+                            source,
+                            yes,
+                            vec![path.clone()],
+                            unknown,
+                            depth + 1,
+                        ));
+                    } else {
+                        unknown.push(span(n));
+                    }
                 }
-                if let Some(no) = no {
-                    result.extend(statement(no, vec![path], unknown, depth + 1));
-                } else {
-                    result.push(path);
+                if known != Some(true) {
+                    if let Some(no) = no {
+                        result.extend(statement(source, no, vec![path], unknown, depth + 1));
+                    } else {
+                        result.push(path);
+                    }
                 }
             }
             result
         }
         "else_clause" => {
             if let Some(body) = n.child_by_field_name("body").or_else(|| n.named_child(0)) {
-                statement(body, paths, unknown, depth + 1)
+                statement(source, body, paths, unknown, depth + 1)
             } else {
                 unknown.push(span(n));
                 paths
@@ -177,7 +201,7 @@ pub(crate) fn collect(source: &str, root: Node<'_>) -> Vec<NormalControl> {
                 (n.child_by_field_name("name"), n.child_by_field_name("body"))
             {
                 let mut unknown = Vec::new();
-                let paths = statement(body, vec![Path::default()], &mut unknown, 0);
+                let paths = statement(source, body, vec![Path::default()], &mut unknown, 0);
                 // Names are supplied by the grammar byte span, not a text search.
                 result.push(NormalControl {
                     name: source[name.byte_range()].to_string(),

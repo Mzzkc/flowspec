@@ -7,6 +7,23 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 fn main() {
+    // A shared target can reuse an identical build-script fingerprint from a
+    // sibling worktree. The source-owned build recipe supplies a content seal;
+    // Cargo tracks its VALUE, so switching root/HEAD/tree invalidates provenance
+    // without timestamp touches or a duplicate target. Refuse a mismatched seal.
+    println!("cargo:rerun-if-env-changed=FLOWSPEC_BUILD_SOURCE_SEAL");
+    if let Ok(expected) = std::env::var("FLOWSPEC_BUILD_SOURCE_SEAL") {
+        let actual = format!(
+            "{}:{}:{}",
+            git(&["rev-parse", "--show-toplevel"]).expect("source root"),
+            git(&["rev-parse", "HEAD"]).expect("source SHA"),
+            git(&["rev-parse", "HEAD^{tree}"]).expect("source tree")
+        );
+        assert_eq!(
+            expected, actual,
+            "FLOWSPEC_BUILD_SOURCE_SEAL must bind the actual checkout"
+        );
+    }
     // PROFILE is Cargo's actual build profile, independent of rustc's
     // debug-assertions flag. Optimized release cannot enable the probe by
     // overriding that flag; ordinary release has no probe API at all.

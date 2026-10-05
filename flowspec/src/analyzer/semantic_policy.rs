@@ -13,12 +13,20 @@ use std::collections::HashSet;
 use std::path::Path;
 fn resolve(graph: &Graph, root: &Path, authority: &str) -> Option<SymbolId> {
     let (path, name) = authority.split_once("::")?;
+    if name.contains("::") {
+        return None;
+    }
     let mut matches = graph.all_symbols().filter(|(_, s)| {
         s.location
             .file
             .strip_prefix(root)
             .is_ok_and(|p| p.to_string_lossy() == path)
             && s.kind == SymbolKind::Function
+            && graph
+                .semantic_files()
+                .iter()
+                .find(|f| f.path == s.location.file)
+                .is_some_and(|f| f.normal_control.iter().any(|c| c.name == name))
             && (s.qualified_name
                 == format!(
                     "{}::{name}",
@@ -71,7 +79,13 @@ fn invocation_paths(
             let mut targets = graph
                 .edges_from(id)
                 .iter()
-                .filter(|e| e.kind == EdgeKind::Calls)
+                .filter(|e| {
+                    e.kind == EdgeKind::Calls
+                        && graph.get_symbol(e.target).is_some_and(|s| {
+                            s.kind == SymbolKind::Function
+                                && !s.annotations.iter().any(|a| a == "import")
+                        })
+                })
                 .filter_map(|e| {
                     let r = graph.get_reference(e.reference_id?)?;
                     let rr = location_range(&key, content, &r.location);

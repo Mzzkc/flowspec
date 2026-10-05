@@ -1466,8 +1466,10 @@ fn resolve_imports_impl(
                     })
                     .map(|(id, _, _)| *id);
                 if let Some(target_id) = target_id {
-                    if let Some(caller_sym) = graph.get_symbol(caller_id) {
-                        dotted_calls.push((caller_id, target_id, caller_sym.location.clone()));
+                    if let Some(reference) =
+                        edge.reference_id.and_then(|id| graph.get_reference(id))
+                    {
+                        dotted_calls.push((caller_id, target_id, reference.location.clone()));
                     }
                 }
             }
@@ -1612,17 +1614,33 @@ fn resolve_imports_impl(
         if import_targets.is_empty() {
             continue;
         }
-        // Find callers of this import symbol (intra-file call resolution)
-        let callers_of_import = graph.callers(id);
-        for caller_id in callers_of_import {
-            // Skip if transitive edge already exists (idempotency)
-            let existing_callees = graph.callees(caller_id);
-            if let Some(caller_sym) = graph.get_symbol(caller_id) {
-                let loc = caller_sym.location.clone();
-                for &target_id in &import_targets {
-                    if !existing_callees.contains(&target_id) {
-                        transitive_calls.push((caller_id, target_id, loc.clone()));
-                    }
+        // Preserve each actual invocation range through the import join. A
+        // caller declaration range is not evidence for a concrete call site.
+        for edge in graph
+            .edges_to(id)
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+        {
+            let caller_id = edge.target;
+            let Some(reference) = edge.reference_id.and_then(|id| graph.get_reference(id)) else {
+                continue;
+            };
+            for &target_id in &import_targets {
+                if graph
+                    .get_symbol(target_id)
+                    .is_none_or(|s| s.annotations.iter().any(|a| a == "import"))
+                {
+                    continue;
+                }
+                let exists = graph.edges_from(caller_id).iter().any(|e| {
+                    e.kind == EdgeKind::Calls
+                        && e.target == target_id
+                        && e.reference_id
+                            .and_then(|id| graph.get_reference(id))
+                            .is_some_and(|r| r.location == reference.location)
+                });
+                if !exists {
+                    transitive_calls.push((caller_id, target_id, reference.location.clone()));
                 }
             }
         }

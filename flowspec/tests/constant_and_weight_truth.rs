@@ -1,11 +1,36 @@
-use flowspec::{analyze,Config};
 use flowspec::parser::ir::EdgeKind;
+use flowspec::{analyze, Config};
 #[test]
 fn returned_constant_read_binds_exact_authority_but_parameter_shadow_does_not() {
-    for (parameter,expected) in [("x: u64",true),("EXP_MASK: u64",false)] {
-        let d=tempfile::tempdir().unwrap();std::fs::write(d.path().join("source.rs"),format!("const EXP_MASK: u64 = 42; pub fn api({parameter}) -> u64 {{ return EXP_MASK; }}")).unwrap();
-        let r=analyze(d.path(),&Config::default(),&[]).unwrap();let (constant,_)=r.graph.all_symbols().find(|(_,s)|s.name=="EXP_MASK").unwrap();let (api,_)=r.graph.all_symbols().find(|(_,s)|s.name=="api").unwrap();
-        let edge=r.graph.edges_from(api).iter().any(|e|e.kind==EdgeKind::References && e.target==constant);assert_eq!(edge,expected,"parameter shadow is not a consumer of unrelated outer constant");
+    for (parameter, expected) in [("x: u64", true), ("EXP_MASK: u64", false)] {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("source.rs"),
+            format!(
+                "const EXP_MASK: u64 = 42; pub fn api({parameter}) -> u64 {{ return EXP_MASK; }}"
+            ),
+        )
+        .unwrap();
+        let r = analyze(d.path(), &Config::default(), &[]).unwrap();
+        let (constant, _) = r
+            .graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "EXP_MASK")
+            .unwrap();
+        let (api, _) = r
+            .graph
+            .all_symbols()
+            .find(|(_, s)| s.name == "api")
+            .unwrap();
+        let edge = r
+            .graph
+            .edges_from(api)
+            .iter()
+            .any(|e| e.kind == EdgeKind::References && e.target == constant);
+        assert_eq!(
+            edge, expected,
+            "parameter shadow is not a consumer of unrelated outer constant"
+        );
     }
 }
 #[test]

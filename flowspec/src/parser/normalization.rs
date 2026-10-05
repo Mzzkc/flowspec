@@ -668,6 +668,7 @@ fn syntax_weight(n: Node<'_>, depth: usize) -> Option<usize> {
         | "unary_operator"
         | "not_operator"
         | "if_statement"
+        | "if_expression"
         | "while_statement"
         | "augmented_assignment" => 1,
         "comparison_operator" => {
@@ -678,6 +679,10 @@ fn syntax_weight(n: Node<'_>, depth: usize) -> Option<usize> {
         | "statement_block"
         | "expression_statement"
         | "return_statement"
+        | "return_expression"
+        | "boolean_literal"
+        | "integer_literal"
+        | "float_literal"
         | "assignment"
         | "identifier"
         | "integer"

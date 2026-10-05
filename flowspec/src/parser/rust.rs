@@ -1208,6 +1208,39 @@ fn extract_all_type_references(
     }
 }
 
+/// Check actual enclosing lexical binders before assigning an item read. Rust
+/// parameter and simple local shadows defeat the outer binding; destructuring
+/// remains unsupported rather than selecting an arbitrary same-spelling item.
+fn value_is_shadowed(content: &[u8], use_node: Node<'_>, name: &str) -> bool {
+    let mut ancestor = use_node.parent();
+    while let Some(node) = ancestor {
+        if node.kind() == "function_item" {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                if params.named_children(&mut cursor).any(|p| {
+                    p.child_by_field_name("pattern")
+                        .is_some_and(|n| node_text(content, n) == name)
+                }) {
+                    return true;
+                }
+            }
+        }
+        if node.kind() == "block" {
+            let mut cursor = node.walk();
+            if node.named_children(&mut cursor).any(|n| {
+                n.kind() == "let_declaration"
+                    && n.end_byte() <= use_node.start_byte()
+                    && n.child_by_field_name("pattern")
+                        .is_some_and(|p| node_text(content, p) == name)
+            }) {
+                return true;
+            }
+        }
+        ancestor = node.parent();
+    }
+    false
+}
+
 /// Non-call uses of a function binding are runtime consumers.
 fn extract_function_values(result: &mut ParseOutput, content: &[u8], path: &Path, root: Node) {
     let mut pending = vec![(root, 0)];
@@ -1224,6 +1257,7 @@ fn extract_function_values(result: &mut ParseOutput, content: &[u8], path: &Path
                     || p.child_by_field_name("function") == Some(node)
             });
             if !definition
+                && !value_is_shadowed(content, node, name)
                 && result.symbols.iter().any(|s| {
                     s.name == name
                         && (s.kind == SymbolKind::Function || s.kind == SymbolKind::Constant)

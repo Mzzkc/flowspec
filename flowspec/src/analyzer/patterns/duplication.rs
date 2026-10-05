@@ -78,6 +78,31 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
                 let (id_a, sym_a) = &symbols[i];
                 let (id_b, sym_b) = &symbols[j];
 
+                // The public rule gives Calls/Returns zero weight. A complete
+                // original-syntax upper bound below eight independently refutes
+                // this pair even when call effects or environments are unknown.
+                let below_threshold = |symbol: &crate::parser::ir::Symbol| {
+                    graph
+                        .semantic_files()
+                        .iter()
+                        .find(|f| f.path == symbol.location.file)
+                        .and_then(|f| {
+                            f.functions.iter().find(|n| {
+                                n.name == symbol.name && {
+                                    let prefix = &n.range;
+                                    f.normal_control
+                                        .iter()
+                                        .any(|c| c.range == *prefix && c.name == symbol.name)
+                                }
+                            })
+                        })
+                        .and_then(|n| n.substantive_weight_bound)
+                        .is_some_and(|w| w < 8)
+                };
+                if below_threshold(sym_a) || below_threshold(sym_b) {
+                    continue;
+                }
+
                 // Check arity match — require at least one function to have a
                 // known signature. Without signatures, arity is unknown and
                 // comparing unknown-arity functions produces too many false positives.
