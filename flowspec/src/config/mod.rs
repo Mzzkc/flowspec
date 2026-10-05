@@ -6,7 +6,7 @@
 //! patterns. Layer violation rules and other analysis settings are planned
 //! for v0.2.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Raw YAML structure for deserialization.
@@ -21,6 +21,8 @@ struct ConfigFile {
     /// Patterns to exclude from analysis.
     #[serde(default)]
     exclude: Vec<String>,
+    #[serde(default)]
+    semantic_policy: Option<SemanticPolicy>,
 }
 
 /// Project configuration loaded from `.flowspec/config.yaml`.
@@ -38,6 +40,8 @@ pub struct Config {
     pub source_sha256: Option<String>,
     /// Optional local transport read boundary; excludes ambient global/parent ignore policy.
     pub read_root: Option<PathBuf>,
+    /// Explicit, validated user-owned semantic contracts. Never discovered from policy.json.
+    pub semantic_policy: Option<SemanticPolicy>,
 }
 
 impl Config {
@@ -68,6 +72,7 @@ impl Config {
                 origin: "explicit".to_string(),
                 source_sha256: Some(source_sha256),
                 read_root: None,
+                semantic_policy: config_file.semantic_policy,
             });
         }
 
@@ -81,6 +86,7 @@ impl Config {
                 origin: "implicit".to_string(),
                 source_sha256: Some(source_sha256),
                 read_root: None,
+                semantic_policy: config_file.semantic_policy,
             })
         } else {
             Ok(Self {
@@ -90,6 +96,7 @@ impl Config {
                 origin: "default".to_string(),
                 source_sha256: None,
                 read_root: None,
+                semantic_policy: None,
             })
         }
     }
@@ -126,7 +133,7 @@ fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::F
     if let serde_yaml::Value::Mapping(map) = value {
         for key in map.keys() {
             if let Some(k) = key.as_str() {
-                if k != "languages" && k != "exclude" {
+                if k != "languages" && k != "exclude" && k != "semantic_policy" {
                     return Err(failure(format!("unknown config key `{k}`")));
                 }
             } else {
@@ -137,6 +144,9 @@ fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::F
 
     let config = serde_yaml::from_str::<ConfigFile>(content)
         .map_err(|e| failure(format!("parse failed: {e}")))?;
+    if let Some(policy) = &config.semantic_policy {
+        policy.validate().map_err(failure)?;
+    }
     for pattern in &config.exclude {
         if Path::new(pattern)
             .components()
@@ -496,5 +506,140 @@ mod tests {
             }
             other => panic!("invalid explicit config must not use valid implicit: {other:?}"),
         }
+    }
+}
+
+/// Versioned faithful policy transport. Presence does not certify an operation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticPolicy {
+    pub version: u32,
+    #[serde(default)]
+    pub environments: std::collections::BTreeMap<String, SemanticEnvironment>,
+    #[serde(default)]
+    pub layers: Vec<LayerRule>,
+    #[serde(default)]
+    pub peers: Vec<PeerRule>,
+    #[serde(default)]
+    pub migrations: Vec<MigrationRule>,
+    #[serde(default)]
+    pub exports: Vec<ExportRule>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticEnvironment {
+    pub version: String,
+    pub target: String,
+    #[serde(default)]
+    pub overflow: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerRule {
+    pub from: String,
+    pub to: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRule {
+    pub subjects: Vec<String>,
+    pub required_operations: Vec<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationRule {
+    pub old: String,
+    pub new: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportRule {
+    pub module: String,
+    pub symbols: Vec<String>,
+}
+impl SemanticPolicy {
+    fn validate(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err("semantic_policy.version must be 1".into());
+        }
+        let authority = |name: &str| -> Result<(), String> {
+            let Some((path, subject)) = name.split_once("::") else {
+                return Err(format!(
+                    "authority must be project-relative path::declaration: {name}"
+                ));
+            };
+            if subject.is_empty()
+                || path.is_empty()
+                || Path::new(path).is_absolute()
+                || Path::new(path).components().any(|p| {
+                    matches!(
+                        p,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(format!("invalid semantic authority: {name}"));
+            }
+            Ok(())
+        };
+        for (language, environment) in &self.environments {
+            if !matches!(
+                language.as_str(),
+                "python" | "javascript" | "typescript" | "rust"
+            ) || environment.version.is_empty()
+                || environment.target.is_empty()
+            {
+                return Err("invalid semantic environment".into());
+            }
+            if language == "rust"
+                && !matches!(
+                    environment.overflow.as_deref(),
+                    Some("checked" | "wrapping")
+                )
+            {
+                return Err("Rust environment requires overflow: checked or wrapping".into());
+            }
+        }
+        for layer in &self.layers {
+            for path in [&layer.from, &layer.to] {
+                if path.is_empty()
+                    || Path::new(path).is_absolute()
+                    || path.split('/').any(|part| part == "..")
+                    || glob::Pattern::new(path).is_err()
+                {
+                    return Err(format!("invalid layer path glob: {path}"));
+                }
+            }
+        }
+        for peer in &self.peers {
+            if peer.subjects.len() < 2 || peer.required_operations.is_empty() {
+                return Err("peer contract requires at least two subjects and an operation".into());
+            }
+            let unique: std::collections::BTreeSet<_> = peer.subjects.iter().collect();
+            if unique.len() != peer.subjects.len() {
+                return Err("peer subjects must be distinct".into());
+            }
+            for name in peer.subjects.iter().chain(&peer.required_operations) {
+                authority(name)?;
+            }
+        }
+        for migration in &self.migrations {
+            authority(&migration.old)?;
+            authority(&migration.new)?;
+            if migration.old == migration.new {
+                return Err("migration authorities must differ".into());
+            }
+        }
+        for export in &self.exports {
+            if export.module.is_empty()
+                || Path::new(&export.module).is_absolute()
+                || export.module.split('/').any(|p| p == "..")
+                || export.symbols.is_empty()
+                || export.symbols.iter().any(|s| s.is_empty())
+            {
+                return Err("invalid public export policy".into());
+            }
+        }
+        Ok(())
     }
 }

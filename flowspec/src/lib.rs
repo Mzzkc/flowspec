@@ -603,6 +603,9 @@ pub fn analyze_with_registry_and_options(
             match parsed {
                 Ok((result, _report)) => {
                     populate_graph(&mut graph, &result);
+                    let semantic_file = parser::semantic::collect(file, &content);
+                    graph::populate_semantic_import_uses(&mut graph, &semantic_file, &content);
+                    graph.record_semantic_file(semantic_file);
                     if parse_loss {
                         completeness.reject(file.display().to_string(), "parse_error");
                         record.rejected_reason = Some("parse_error".to_string());

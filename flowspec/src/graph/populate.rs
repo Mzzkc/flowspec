@@ -4753,3 +4753,64 @@ def setup():
         );
     }
 }
+
+/// Attach the parser's resolved lexical import consumers to the same graph
+/// primitive used by calls, exports, type reads and ordinary value reads.
+pub(crate) fn populate_semantic_import_uses(
+    graph: &mut Graph,
+    file: &crate::parser::semantic::SemanticFile,
+    source: &str,
+) {
+    let symbols: Vec<_> = graph
+        .symbols_in_file(&file.path)
+        .into_iter()
+        .filter_map(|id| graph.get_symbol(id).cloned().map(|s| (id, s)))
+        .collect();
+    let originals: Vec<_> = symbols.iter().map(|(_, s)| s.clone()).collect();
+    let ids: Vec<_> = symbols
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| (i, *id))
+        .collect();
+    let mut module = None;
+    let position = |offset: usize| {
+        let before = &source.as_bytes()[..offset];
+        (
+            1 + before.iter().filter(|b| **b == b'\n').count() as u32,
+            1 + before
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(offset, |n| offset - n - 1) as u32,
+        )
+    };
+    for use_site in &file.import_uses {
+        let targets: Vec<_> = symbols
+            .iter()
+            .filter(|(_, s)| s.name == use_site.name && s.annotations.iter().any(|a| a == "import"))
+            .map(|(id, _)| *id)
+            .collect();
+        if targets.len() != 1 {
+            continue;
+        }
+        let (line, column) = position(use_site.range.0);
+        let (end_line, end_column) = position(use_site.range.1);
+        let location = Location {
+            file: file.path.clone(),
+            line,
+            column,
+            end_line,
+            end_column,
+        };
+        let from = find_containing_symbol(&location, &originals, &ids).unwrap_or_else(|| {
+            *module.get_or_insert_with(|| create_module_symbol(graph, &location))
+        });
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from,
+            to: targets[0],
+            kind: use_site.kind,
+            location,
+            resolution: ResolutionStatus::Resolved,
+        });
+    }
+}

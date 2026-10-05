@@ -407,13 +407,25 @@ fn build_finding(
     if diagnostic.pattern != "data_dead_end" {
         return None;
     }
-    let mut candidates = graph.all_symbols().filter(|(_, symbol)| {
+    let mut candidates = graph.all_symbols().filter(|(id, symbol)| {
         symbol.qualified_name == diagnostic.entity
             && symbol.kind == SymbolKind::Function
-            && (symbol.visibility == crate::parser::ir::Visibility::Private
-                || (input_language(inputs, &symbol.location.file) == "python"
-                    && symbol.name.starts_with('_')
-                    && !symbol.name.starts_with("__")))
+            && ((symbol.location.file.extension().is_some_and(|e| e == "py")
+                && symbol.name.starts_with('_')
+                && !symbol.name.starts_with("__"))
+                || (symbol.location.file.extension().is_some_and(|e| e == "rs")
+                    && graph.effective_visibility(*id)
+                        == Some(crate::parser::ir::Visibility::Private)
+                    && graph
+                        .semantic_files()
+                        .iter()
+                        .find(|f| f.path == symbol.location.file)
+                        .and_then(|f| {
+                            f.executables
+                                .iter()
+                                .find(|p| p.qualified_name == symbol.qualified_name)
+                        })
+                        .is_some_and(|p| p.closure && p.consumers.is_empty())))
     });
     let (_, symbol) = candidates.next()?;
     if candidates.next().is_some() {
@@ -553,6 +565,48 @@ pub(crate) fn build(
         languages,
         registry,
     } = context;
+    if let Some(policy) = &config.semantic_policy {
+        for (pattern, requested, operation) in [
+            (
+                "partial_wiring",
+                !policy.peers.is_empty(),
+                "peer operation/complete CFG closure",
+            ),
+            (
+                "asymmetric_handling",
+                !policy.peers.is_empty(),
+                "peer effect/resource invariants",
+            ),
+            (
+                "incomplete_migration",
+                !policy.migrations.is_empty(),
+                "old/new authority consumer closure",
+            ),
+            (
+                "missing_reexport",
+                !policy.exports.is_empty(),
+                "complete parent export graph",
+            ),
+            (
+                "layer_violation",
+                !policy.layers.is_empty(),
+                "resolved forbidden module edges",
+            ),
+        ] {
+            if requested {
+                let mut item = loss(
+                    "policy_operation_unavailable",
+                    String::new(),
+                    None,
+                    "semantic_policy",
+                );
+                item["affected_patterns"] = json!([pattern]);
+                item["required_capabilities"] = json!([operation]);
+                item["policy"] = json!(policy);
+                losses.push(item);
+            }
+        }
+    }
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
@@ -577,6 +631,10 @@ pub(crate) fn build(
             "finding",
         ));
     }
+    append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
+    append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);
+    coalesce_semantic_losses(&mut losses);
+    findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();
     let mut by_severity: BTreeMap<&str, u64> = ["critical", "warning", "info"]
         .into_iter()
@@ -640,7 +698,7 @@ pub(crate) fn build(
         );
     }
     let effective = json!({"languages":languages,"exclude":config.exclude,
-        "gate_threshold":{"min_severity":"critical","min_confidence":"low"}});
+        "gate_threshold":{"min_severity":"critical","min_confidence":"low"},"semantic_policy":config.semantic_policy});
     let config_provenance = json!({"origin":origin,"source_path_key":config_key,
         "source_sha256":config.source_sha256,"effective_digest":hash("config",&effective),"effective":effective});
     let effective_languages: Vec<String> = inputs
@@ -702,8 +760,9 @@ pub(crate) fn build(
                     } else { affected_paths.insert(key.to_string()); }
                 }
             }
-            if pattern == "layer_violation" { reasons.push("policy_absent".to_string()); }
-            let state=if pattern=="layer_violation" {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
+            let policy_absent = pattern=="layer_violation" && config.semantic_policy.as_ref().is_none_or(|policy|policy.layers.is_empty());
+            if policy_absent { reasons.push("policy_absent".to_string()); }
+            let state=if policy_absent {"not_applicable"} else if reasons.is_empty(){"complete"}else{"incomplete"};
             json!({"language":lang,"state":state,"required_capabilities":capabilities,"affected_paths":affected_paths,"reason_codes":reasons})
         }).collect();
         pattern_state.push(json!({"pattern_id":pattern,"cells":cells}));
@@ -739,4 +798,277 @@ fn input_language<'a>(inputs: &'a [InputRecord], path: &Path) -> &'a str {
         .find(|input| input.path == path)
         .and_then(|input| input.language.as_deref())
         .unwrap_or("unknown")
+}
+
+fn append_semantic_proofs(
+    root: &Path,
+    inputs: &[InputRecord],
+    graph: &Graph,
+    findings: &mut Vec<Value>,
+    losses: &mut Vec<Value>,
+) {
+    for file in graph.semantic_files() {
+        let key = path_key(root, &file.path);
+        let Some(input) = inputs
+            .iter()
+            .find(|input| input.path == file.path && input.parsed && !input.changed_during_run)
+        else {
+            continue;
+        };
+        let Some(content) = input.content.as_deref() else {
+            continue;
+        };
+        for issue in &file.issues {
+            let mut item = loss(
+                &issue.reason,
+                key.clone(),
+                Some(offset_range(
+                    &key,
+                    content,
+                    issue.range.0 as u64,
+                    issue.range.1 as u64,
+                )),
+                "semantic_prerequisite",
+            );
+            item["affected_patterns"] = json!([issue.pattern]);
+            item["required_capabilities"] = json!([issue.operation]);
+            item["operation"] = json!(issue.operation);
+            losses.push(item);
+        }
+        for value in &file.values {
+            if !value.closure
+                || !value.reads.is_empty()
+                || !value.writes.is_empty()
+                || value.produced_type.is_empty()
+            {
+                continue;
+            }
+            let qualified_name = format!(
+                "{}::{}::{}@scope{}",
+                file.path.file_name().unwrap_or_default().to_string_lossy(),
+                value.owner,
+                value.name,
+                value.scope
+            );
+            let base = json!({"path_key":key,"language":input.language,"qualified_name":qualified_name,"construct_kind":"local_value","scope_ordinal":value.scope,"binding_ordinal":value.ordinal});
+            let binding_id = hash("binding", &base);
+            let mut subject = base.clone();
+            subject["binding_id"] = json!(binding_id);
+            subject["name"] = json!(value.name);
+            let cause = json!({"key_version":1,"parts":{"produced_binding_id":binding_id,"produced_kind":"local_value","produced_type":value.produced_type,"unconsumed_relation":"unconsumed_private_value"}});
+            let semantic_id = hash(
+                "finding.semantic",
+                &json!({"pattern_id":"data_dead_end","subject":base,"cause":cause}),
+            );
+            let range = offset_range(&key, content, value.range.0 as u64, value.range.1 as u64);
+            let evidence = json!([{"kind":"binding_value_consumer_closure","consumer_closure":"complete","binding_id":binding_id,"initializer_range":offset_range(&key,content,value.initializer.0 as u64,value.initializer.1 as u64),"effect_protocol":value.protocol,"reads":value.reads,"writes":value.writes,"escape":"none","visibility":"function_local"}]);
+            let observation_id = hash(
+                "finding.observation",
+                &json!({"semantic_id":semantic_id,"source_sha256":digest(content.as_bytes()),"range":range,"evidence":evidence}),
+            );
+            findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"data_dead_end","severity":"warning","confidence":"high","subject":subject,"cause":cause,"range":range,"evidence":evidence,"suggestion":"Remove the unused local value or connect it to its intended consumer."}));
+        }
+    }
+}
+
+fn append_duplication_proofs(
+    root: &Path,
+    config: &Config,
+    inputs: &[InputRecord],
+    graph: &Graph,
+    findings: &mut Vec<Value>,
+    losses: &mut Vec<Value>,
+) {
+    use crate::parser::normalization::{RULE_SHA256, RULE_VERSION};
+    let mut supported = Vec::new();
+    for file in graph.semantic_files() {
+        let key = path_key(root, &file.path);
+        let Some(input) = inputs
+            .iter()
+            .find(|i| i.path == file.path && i.parsed && !i.changed_during_run)
+        else {
+            continue;
+        };
+        let Some(content) = input.content.as_deref() else {
+            continue;
+        };
+        let language = input.language.as_deref().unwrap_or("unknown");
+        for function in &file.functions {
+            for issue in &function.issues {
+                let mut item = loss(
+                    &issue.reason,
+                    key.clone(),
+                    Some(offset_range(
+                        &key,
+                        content,
+                        if issue.reason == "DUP_TYPE_UNRESOLVED" {
+                            0
+                        } else {
+                            issue.range.0 as u64
+                        },
+                        if issue.reason == "DUP_TYPE_UNRESOLVED" {
+                            content.len() as u64
+                        } else {
+                            issue.range.1 as u64
+                        },
+                    )),
+                    "duplication_normalization",
+                );
+                item["affected_patterns"] = json!(["duplication"]);
+                item["required_capabilities"] = json!([issue.operation]);
+                losses.push(item);
+            }
+            if function.normal_form.is_none() {
+                continue;
+            }
+            let environment = config
+                .semantic_policy
+                .as_ref()
+                .and_then(|p| p.environments.get(language));
+            let known_environment = environment.is_some_and(|e| match language {
+                "javascript" => e.version == "ECMA-262/2025" && e.target == "ECMAScript",
+                "python" => e.version == "Python/3.14" && e.target == "Python",
+                // These protocols have no complete type/ownership normalizer yet.
+                "typescript" | "rust" => false,
+                _ => false,
+            });
+            if !known_environment {
+                let mut item = loss(
+                    "DUP_ENVIRONMENT_UNRESOLVED",
+                    key.clone(),
+                    Some(offset_range(
+                        &key,
+                        content,
+                        function.range.0 as u64,
+                        function.range.1 as u64,
+                    )),
+                    "duplication_environment",
+                );
+                item["affected_patterns"] = json!(["duplication"]);
+                item["required_capabilities"] =
+                    json!(["explicit language/runtime/target environment"]);
+                losses.push(item);
+                continue;
+            }
+            if let Some(normal) = &function.normal_form {
+                if function.weight >= 8
+                    && ((function.control_shape && function.operations >= 3)
+                        || function.max_operation_chain >= 3)
+                {
+                    let env = environment.unwrap();
+                    let mut normal = normal.clone();
+                    normal[1][1][4] = json!([language, env.version, env.target, env.overflow]);
+                    supported.push((file, input, content, function, normal));
+                }
+            }
+        }
+    }
+    for i in 0..supported.len() {
+        for j in i + 1..supported.len() {
+            let (file_a, input_a, content_a, a, normal_a) = &supported[i];
+            let (file_b, input_b, content_b, b, normal_b) = &supported[j];
+            if input_a.language != input_b.language || normal_a != normal_b {
+                continue;
+            }
+            let locator =
+                |file: &crate::parser::semantic::SemanticFile,
+                 f: &crate::parser::normalization::NormalizedFunction| {
+                    json!([
+                        input_a.language,
+                        file.path
+                            .strip_prefix(root)
+                            .unwrap_or(&file.path)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        f.declaration_path,
+                        f.declaration_ordinal
+                    ])
+                };
+            let mut locators = [locator(file_a, a), locator(file_b, b)];
+            locators.sort_by_key(crate::parser::normalization::canonical_bytes);
+            let identity = json!([
+                "duplication",
+                RULE_VERSION,
+                "binding-aware-whole-body-equivalence",
+                locators[0],
+                locators[1]
+            ]);
+            let semantic_id = format!(
+                "duplication:{:x}",
+                Sha256::digest(crate::parser::normalization::canonical_bytes(&identity))
+            );
+            let key_a = path_key(root, &file_a.path);
+            let key_b = path_key(root, &file_b.path);
+            let range_a = offset_range(&key_a, content_a, a.range.0 as u64, a.range.1 as u64);
+            let range_b = offset_range(&key_b, content_b, b.range.0 as u64, b.range.1 as u64);
+            let evidence = json!([{"rule_version":RULE_VERSION,"rule_sha256":RULE_SHA256,"relation":"binding-aware-whole-body-equivalence","weight":a.weight,"operations":a.operations,"control_shape":a.control_shape,"max_operation_chain":a.max_operation_chain,"normal_form":normal_a,"normal_form_digest":digest(&crate::parser::normalization::canonical_bytes(normal_a)),"binder_bijection":a.binder_names.iter().zip(&b.binder_names).collect::<Vec<_>>(),"ignored_ranges":[a.ignored,b.ignored],"ranges":[range_a,range_b],"body_ranges":[offset_range(&key_a,content_a,a.body_range.0 as u64,a.body_range.1 as u64),offset_range(&key_b,content_b,b.body_range.0 as u64,b.body_range.1 as u64)],"input_digests":[digest(content_a.as_bytes()),digest(content_b.as_bytes())]}]);
+            let observation_id = hash(
+                "finding.observation",
+                &json!({"semantic_id":semantic_id,"evidence":evidence}),
+            );
+            findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"duplication","severity":"warning","confidence":"high","subject":{"path_key":key_a,"language":input_a.language,"qualified_name":a.name,"construct_kind":"function_pair","locators":locators},"cause":{"key_version":1,"parts":{"relation":"binding-aware-whole-body-equivalence","rule_version":RULE_VERSION,"function_locators":locators}},"range":range_a,"evidence":evidence,"suggestion":"Consider consolidating the exactly equivalent function bodies while preserving their public contracts."}));
+        }
+    }
+}
+
+/// Sharing event metadata preserves every range and affected path while keeping
+/// bounded ordinary reports useful. Parser/fault records keep their exact form.
+fn coalesce_semantic_losses(losses: &mut Vec<Value>) {
+    let mut groups: BTreeMap<String, Value> = BTreeMap::new();
+    let mut retained = Vec::new();
+    for item in losses.drain(..) {
+        if !matches!(
+            item["stage"].as_str(),
+            Some("semantic_prerequisite" | "duplication_normalization" | "duplication_environment")
+        ) {
+            retained.push(item);
+            continue;
+        }
+        let key = serde_json::to_string(&json!([
+            item["stage"],
+            item["reason"],
+            item["affected_patterns"],
+            item["required_capabilities"]
+        ]))
+        .unwrap();
+        if let Some(group) = groups.get_mut(&key) {
+            for field in ["scope_paths", "ranges"] {
+                let items = item[field].as_array().unwrap();
+                let entries = group[field].as_array_mut().unwrap();
+                for value in items {
+                    if !entries.contains(value) {
+                        entries.push(value.clone());
+                    }
+                }
+            }
+        } else {
+            groups.insert(key, item);
+        }
+    }
+    for mut group in groups.into_values() {
+        // These new parser semantic prerequisites use exact half-open UTF-8
+        // ranges; repeated derived line/column coordinates are unnecessary.
+        // Existing parser/fault records retain their original schema verbatim.
+        if let Some(ranges) = group["ranges"].as_array_mut() {
+            for range in ranges {
+                *range = json!({"path_key":range["path_key"],"start_byte":range["start_byte"],"end_byte":range["end_byte"]});
+            }
+        }
+        group["scope_paths"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_key(|v| v.as_str().unwrap_or("").to_string());
+        group["id"] = json!(hash(
+            "loss",
+            &json!([
+                group["stage"],
+                group["reason"],
+                group["scope_paths"],
+                group["ranges"],
+                group["required_capabilities"]
+            ])
+        ));
+        retained.push(group);
+    }
+    *losses = retained;
 }

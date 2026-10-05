@@ -17,6 +17,8 @@
 pub mod ir;
 /// JavaScript/TypeScript language adapter (ES modules, CommonJS, JSX/TSX).
 pub mod javascript;
+/// Exact published duplication normal forms and located unresolved obligations.
+pub mod normalization;
 /// Python language adapter (imports, decorators, class hierarchy, attribute access).
 pub mod python;
 /// Structured per-file parser evidence.
@@ -25,6 +27,8 @@ pub mod report;
 pub mod rust;
 /// Native original-byte TypeScript and TSX extraction.
 pub mod typescript;
+/// Binding-aware semantic prerequisites, separate from compatibility entities.
+pub mod semantic;
 
 use std::path::Path;
 

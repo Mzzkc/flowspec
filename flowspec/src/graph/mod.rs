@@ -24,6 +24,7 @@ pub use populate::resolve_qualified_imports;
 
 pub use cache::{compute_file_hashes, load_file_hashes, save_file_hashes, CacheMetadata};
 pub use populate::populate_graph;
+pub(crate) use populate::populate_semantic_import_uses;
 pub use populate::resolve_cross_file_imports;
 #[allow(unused_imports)]
 // Used by cycle14_surface_tests via crate::graph::resolve_import_by_name
@@ -66,6 +67,8 @@ use crate::parser::ir::*;
 /// | [`detect_cycles()`](Self::detect_cycles) | Directed cycle detection via DFS coloring |
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Graph {
+    #[serde(default)]
+    semantic_files: Vec<crate::parser::semantic::SemanticFile>,
     symbols: SlotMap<SymbolId, Symbol>,
     scopes: SlotMap<ScopeId, Scope>,
     boundaries: SlotMap<BoundaryId, Boundary>,
@@ -120,6 +123,35 @@ impl Graph {
 
     pub fn dynamic_exports(&self) -> &HashSet<PathBuf> {
         &self.dynamic_exports
+    }
+
+    /// Original-byte binding/value proof records retained losslessly with the graph.
+    pub fn semantic_files(&self) -> &[crate::parser::semantic::SemanticFile] {
+        &self.semantic_files
+    }
+
+    /// Transitive source visibility, retaining declared visibility on Symbol.
+    pub fn effective_visibility(&self, id: SymbolId) -> Option<Visibility> {
+        let symbol = self.get_symbol(id)?;
+        let proof = self
+            .semantic_files
+            .iter()
+            .find(|f| f.path == symbol.location.file)
+            .and_then(|f| {
+                f.executables
+                    .iter()
+                    .find(|p| p.qualified_name == symbol.qualified_name)
+            });
+        Some(if proof.is_some_and(|p| !p.externally_visible) {
+            Visibility::Private
+        } else {
+            symbol.visibility
+        })
+    }
+
+    pub(crate) fn record_semantic_file(&mut self, file: crate::parser::semantic::SemanticFile) {
+        self.semantic_files.retain(|old| old.path != file.path);
+        self.semantic_files.push(file);
     }
 
     // -- Symbols ------------------------------------------------------------
@@ -525,6 +557,7 @@ impl Graph {
     ///
     /// If the file path is not in the graph, this is a no-op.
     pub fn remove_file(&mut self, path: &Path) {
+        self.semantic_files.retain(|file| file.path != path);
         self.unresolved_calls
             .retain(|call| call.location.file != path);
         self.dynamic_exports.remove(path);
