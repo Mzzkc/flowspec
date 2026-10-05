@@ -27,6 +27,12 @@ fn nonempty_full_graph_source_symbols_edges_and_ranges_survive_bounded_wire() {
     for s in symbols {
         assert!(g["entities"].as_array().unwrap().iter().any(|e| e["subject"]["qualified_name"] == s.qualified_name && e["range"]["start_line"] == s.location.line));
     }
-    assert_eq!(g["dependency_graph"].as_array().unwrap().len(), r.graph.all_symbols().map(|(id,_)|r.graph.edges_from(id).len()).sum::<usize>());
+    let graph = &r.graph;
+    let actual_edges: std::collections::BTreeSet<_> = graph.all_symbols().flat_map(|(id,s)| graph.edges_from(id).into_iter().map(move |e| (s.qualified_name.clone(), graph.get_symbol(e.target).unwrap().qualified_name.clone(), format!("{:?}",e.kind).to_lowercase()))).collect();
+    let decoded_edges: std::collections::BTreeSet<_> = g["dependency_graph"].as_array().unwrap().iter().map(|e| {
+        let name = |key: &serde_json::Value| g["entities"].as_array().unwrap().iter().find(|n| n["key"] == *key).unwrap()["subject"]["qualified_name"].as_str().unwrap().to_string();
+        (name(&e["source_key"]), name(&e["target_key"]), e["kind"].as_str().unwrap().to_string())
+    }).collect();
+    assert_eq!(decoded_edges, actual_edges);
     assert!(serde_json::to_vec(&r.manifest).unwrap().len() < 20480);
 }
