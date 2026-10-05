@@ -1025,6 +1025,7 @@ fn extract_call(result: &mut ParseOutput, content: &[u8], path: &Path, node: Nod
     };
 
     if let Some(name) = callee_name {
+        let name = typed_receiver_callee(content, node, &name).unwrap_or(name);
         result.references.push(Reference {
             id: ReferenceId::default(),
             from: SymbolId::default(),
@@ -1034,6 +1035,54 @@ fn extract_call(result: &mut ParseOutput, content: &[u8], path: &Path, node: Nod
             resolution: ResolutionStatus::Partial(format!("call:{}", name)),
         });
     }
+}
+
+/// Resolve only explicit nominal parameter receivers with no intervening local
+/// rebinding. Unknown/generic/container receiver types stay unresolved. Graph
+/// resolution still proves the unique declared owner and exact method identity.
+fn typed_receiver_callee(content: &[u8], call: Node<'_>, name: &str) -> Option<String> {
+    let (receiver, method) = name.split_once('.')?;
+    if matches!(receiver, "self" | "this") {
+        return None;
+    }
+    let mut ancestor = call.parent();
+    let function = loop {
+        let node = ancestor?;
+        if node.kind() == "function_item" {
+            break node;
+        }
+        ancestor = node.parent();
+    };
+    let mut pending = vec![function];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "let_declaration"
+            && node.start_byte() < call.start_byte()
+            && node
+                .child_by_field_name("pattern")
+                .is_some_and(|p| node_text(content, p) == receiver)
+        {
+            return None;
+        }
+        if node != function && node.kind() == "function_item" {
+            continue;
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    let parameters = function.child_by_field_name("parameters")?;
+    let mut cursor = parameters.walk();
+    let parameter = parameters.named_children(&mut cursor).find(|p| {
+        p.child_by_field_name("pattern")
+            .is_some_and(|n| node_text(content, n) == receiver)
+    })?;
+    let mut ty = parameter.child_by_field_name("type")?;
+    if ty.kind() == "reference_type" {
+        ty = ty.child_by_field_name("type")?;
+    }
+    if ty.kind() != "type_identifier" {
+        return None;
+    }
+    Some(format!("{}::{method}", node_text(content, ty)))
 }
 
 /// Rust primitive type names and keywords that should NOT emit type references.
@@ -1175,13 +1224,10 @@ fn extract_function_values(result: &mut ParseOutput, content: &[u8], path: &Path
                     || p.child_by_field_name("function") == Some(node)
             });
             if !definition
-                && result
-                    .symbols
-                    .iter()
-                    .any(|s| {
-                        s.name == name
-                            && (s.kind == SymbolKind::Function || s.kind == SymbolKind::Constant)
-                    })
+                && result.symbols.iter().any(|s| {
+                    s.name == name
+                        && (s.kind == SymbolKind::Function || s.kind == SymbolKind::Constant)
+                })
             {
                 result.references.push(Reference {
                     id: ReferenceId::default(),

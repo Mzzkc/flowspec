@@ -544,6 +544,9 @@ pub struct LayerRule {
 pub struct PeerRule {
     pub subjects: Vec<String>,
     pub required_operations: Vec<String>,
+    /// Explicit normal-exit invocation contract; absent means all exits (not yet supported).
+    #[serde(default)]
+    pub exit_scope: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -612,6 +615,9 @@ impl SemanticPolicy {
             }
         }
         for peer in &self.peers {
+            if peer.exit_scope.as_deref().is_some_and(|s| s != "normal") {
+                return Err("peer exit_scope must be normal or omitted for all exits".into());
+            }
             if peer.subjects.len() < 2 || peer.required_operations.is_empty() {
                 return Err("peer contract requires at least two subjects and an operation".into());
             }

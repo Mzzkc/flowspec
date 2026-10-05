@@ -36,6 +36,8 @@ pub struct SemanticFile {
     pub executables: Vec<ExecutableBinding>,
     #[serde(default)]
     pub import_uses: Vec<ImportUse>,
+    #[serde(default)]
+    pub normal_control: Vec<super::control::NormalControl>,
 }
 
 fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
@@ -414,6 +416,7 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
         );
         return collector.file;
     }
+    collector.file.normal_control = super::control::collect(source, root);
     let language_id = crate::registry::language_id_for_path(path);
     let mut pending = vec![(root, 0usize)];
     while let Some((node, depth)) = pending.pop() {

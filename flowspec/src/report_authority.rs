@@ -655,8 +655,11 @@ pub(crate) fn build(
         for (pattern, requested, operation) in [
             (
                 "partial_wiring",
-                !policy.peers.is_empty(),
-                "peer operation/complete CFG closure",
+                policy
+                    .peers
+                    .iter()
+                    .any(|p| p.exit_scope.as_deref() != Some("normal")),
+                "peer operation/all-exit CFG closure",
             ),
             (
                 "asymmetric_handling",
@@ -719,6 +722,14 @@ pub(crate) fn build(
     }
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
     append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);
+    crate::analyzer::semantic_policy::append(
+        root,
+        config,
+        inputs,
+        graph,
+        &mut findings,
+        &mut losses,
+    );
     coalesce_semantic_losses(&mut losses);
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();

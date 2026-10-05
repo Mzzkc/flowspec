@@ -25,3 +25,6 @@ pub mod patterns;
 
 /// Binding-aware type construction and executable operation records.
 pub mod type_flow;
+
+/// Exact validated source-policy consumers.
+pub(crate) mod semantic_policy;
