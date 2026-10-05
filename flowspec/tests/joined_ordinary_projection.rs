@@ -3,6 +3,30 @@ use std::{fs, path::Path};
 use tempfile::TempDir;
 
 #[test]
+fn incomplete_rust_report_preserves_entities_within_requested_output_bounds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/rust");
+    let result = analyze(&root, &Config::default(), &["rust".into()]).unwrap();
+    let expected = result.graph.all_symbols().filter(|(_, symbol)|
+        symbol.kind != flowspec::parser::ir::SymbolKind::Module).count();
+    assert_eq!(result.manifest.entities.len(), expected);
+    assert!(expected > 0);
+    let output = TempDir::new().unwrap();
+    for (format, name, ratio) in [(OutputFormat::Yaml, "yaml", 10), (OutputFormat::Json, "json", 15)] {
+        let target = output.path().join(name);
+        commands::run_analyze(&root, &[], format, Some(&target), None, &[], None, None).unwrap();
+        let bytes = fs::read(&target).unwrap();
+        assert!(bytes.len() < 20480 || bytes.len() as u64 <= result.source_bytes * ratio);
+        let report: serde_json::Value = if name == "yaml" {
+            serde_yaml::from_slice(&bytes).unwrap()
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        assert_eq!(report["entities"].as_array().unwrap().len(), expected);
+        assert_eq!(report["authority"]["execution"], "incomplete");
+    }
+}
+
+#[test]
 fn javascript_ordinary_report_preserves_four_original_basic_symbols() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
