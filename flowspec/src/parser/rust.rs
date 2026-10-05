@@ -957,7 +957,27 @@ fn extract_all_calls(
 fn extract_call(result: &mut ParseOutput, content: &[u8], path: &Path, node: Node) {
     let callee_name = if let Some(func_node) = node.child_by_field_name("function") {
         match func_node.kind() {
-            "identifier" => Some(node_text(content, func_node).to_string()),
+            "identifier" => {
+                let name = node_text(content, func_node);
+                // A parameter or preceding local binds this invocation. Its
+                // spelling cannot prove a call to a same-name imported item.
+                // Retain the unresolved invocation and range as report debt.
+                if value_is_shadowed(content, func_node, name) {
+                    result.references.push(Reference {
+                        id: ReferenceId::default(),
+                        from: SymbolId::default(),
+                        to: SymbolId::default(),
+                        kind: ReferenceKind::Call,
+                        location: node_location(path, node),
+                        resolution: ResolutionStatus::Partial(
+                            "prerequisite_loss:unresolved_call:calls".to_string(),
+                        ),
+                    });
+                    None
+                } else {
+                    Some(name.to_string())
+                }
+            }
             "scoped_identifier" => {
                 // Module::function() — take last segment for the call.
                 // Also emit a usage reference for the prefix so that
