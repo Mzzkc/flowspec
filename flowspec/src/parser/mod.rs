@@ -21,6 +21,8 @@ pub mod javascript;
 pub mod python;
 /// Rust language adapter (modules, traits, impls, use declarations).
 pub mod rust;
+/// Binding-aware semantic prerequisites, separate from compatibility entities.
+pub mod semantic;
 
 use std::path::Path;
 

@@ -66,6 +66,8 @@ use crate::parser::ir::*;
 /// | [`detect_cycles()`](Self::detect_cycles) | Directed cycle detection via DFS coloring |
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Graph {
+    #[serde(default)]
+    semantic_files: Vec<crate::parser::semantic::SemanticFile>,
     symbols: SlotMap<SymbolId, Symbol>,
     scopes: SlotMap<ScopeId, Scope>,
     boundaries: SlotMap<BoundaryId, Boundary>,
@@ -120,6 +122,16 @@ impl Graph {
 
     pub fn dynamic_exports(&self) -> &HashSet<PathBuf> {
         &self.dynamic_exports
+    }
+
+    /// Original-byte binding/value proof records retained losslessly with the graph.
+    pub fn semantic_files(&self) -> &[crate::parser::semantic::SemanticFile] {
+        &self.semantic_files
+    }
+
+    pub(crate) fn record_semantic_file(&mut self, file: crate::parser::semantic::SemanticFile) {
+        self.semantic_files.retain(|old| old.path != file.path);
+        self.semantic_files.push(file);
     }
 
     // -- Symbols ------------------------------------------------------------
@@ -525,6 +537,7 @@ impl Graph {
     ///
     /// If the file path is not in the graph, this is a no-op.
     pub fn remove_file(&mut self, path: &Path) {
+        self.semantic_files.retain(|file| file.path != path);
         self.unresolved_calls
             .retain(|call| call.location.file != path);
         self.dynamic_exports.remove(path);

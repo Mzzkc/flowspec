@@ -445,6 +445,8 @@ pub(crate) fn build(
             "finding",
         ));
     }
+    append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
+    findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();
     let mut by_severity: BTreeMap<&str, u64> = ["critical", "warning", "info"]
         .into_iter()
@@ -607,4 +609,75 @@ fn input_language<'a>(inputs: &'a [InputRecord], path: &Path) -> &'a str {
         .find(|input| input.path == path)
         .and_then(|input| input.language.as_deref())
         .unwrap_or("unknown")
+}
+
+fn append_semantic_proofs(
+    root: &Path,
+    inputs: &[InputRecord],
+    graph: &Graph,
+    findings: &mut Vec<Value>,
+    losses: &mut Vec<Value>,
+) {
+    for file in graph.semantic_files() {
+        let key = path_key(root, &file.path);
+        let Some(input) = inputs
+            .iter()
+            .find(|input| input.path == file.path && input.parsed && !input.changed_during_run)
+        else {
+            continue;
+        };
+        let Some(content) = input.content.as_deref() else {
+            continue;
+        };
+        for issue in &file.issues {
+            let mut item = loss(
+                &issue.reason,
+                key.clone(),
+                Some(offset_range(
+                    &key,
+                    content,
+                    issue.range.0 as u64,
+                    issue.range.1 as u64,
+                )),
+                "semantic_prerequisite",
+            );
+            item["affected_patterns"] = json!([issue.pattern]);
+            item["required_capabilities"] = json!([issue.operation]);
+            item["operation"] = json!(issue.operation);
+            losses.push(item);
+        }
+        for value in &file.values {
+            if !value.closure
+                || !value.reads.is_empty()
+                || !value.writes.is_empty()
+                || value.produced_type.is_empty()
+            {
+                continue;
+            }
+            let qualified_name = format!(
+                "{}::{}::{}@scope{}",
+                file.path.file_name().unwrap_or_default().to_string_lossy(),
+                value.owner,
+                value.name,
+                value.scope
+            );
+            let base = json!({"path_key":key,"language":input.language,"qualified_name":qualified_name,"construct_kind":"local_value","scope_ordinal":value.scope,"binding_ordinal":value.ordinal});
+            let binding_id = hash("binding", &base);
+            let mut subject = base.clone();
+            subject["binding_id"] = json!(binding_id);
+            subject["name"] = json!(value.name);
+            let cause = json!({"key_version":1,"parts":{"produced_binding_id":binding_id,"produced_kind":"local_value","produced_type":value.produced_type,"unconsumed_relation":"unconsumed_private_value"}});
+            let semantic_id = hash(
+                "finding.semantic",
+                &json!({"pattern_id":"data_dead_end","subject":base,"cause":cause}),
+            );
+            let range = offset_range(&key, content, value.range.0 as u64, value.range.1 as u64);
+            let evidence = json!([{"kind":"binding_value_consumer_closure","consumer_closure":"complete","binding_id":binding_id,"initializer_range":offset_range(&key,content,value.initializer.0 as u64,value.initializer.1 as u64),"effect_protocol":value.protocol,"reads":value.reads,"writes":value.writes,"escape":"none","visibility":"function_local"}]);
+            let observation_id = hash(
+                "finding.observation",
+                &json!({"semantic_id":semantic_id,"source_sha256":digest(content.as_bytes()),"range":range,"evidence":evidence}),
+            );
+            findings.push(json!({"identity_status":"stable","semantic_id":semantic_id,"observation_id":observation_id,"pattern_id":"data_dead_end","severity":"warning","confidence":"high","subject":subject,"cause":cause,"range":range,"evidence":evidence,"suggestion":"Remove the unused local value or connect it to its intended consumer."}));
+        }
+    }
 }
