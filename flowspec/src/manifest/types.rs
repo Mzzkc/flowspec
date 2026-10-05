@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Contains all 8 required sections. Sections are always present even when
 /// empty (empty lists, not omitted) so consumers can rely on a stable schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(into = "ManifestWire", from = "ManifestWire")]
 pub struct Manifest {
     /// Full analyzer-produced JSON contract. Legacy sections are display projections.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -699,5 +700,132 @@ impl Manifest {
         self.outcome = Some(outcome);
         self.completeness = Some(completeness);
         self
+    }
+}
+
+// Wire references preserve the compact ABI while public values retain mirrors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestWire {
+    /// Full analyzer-produced JSON contract. Legacy sections are display projections.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub authority: Option<serde_json::Value>,
+    /// Compatibility mirror of source loss records in the authoritative report.
+    #[serde(default)]
+    pub losses: Vec<serde_json::Value>,
+    /// Compatibility mirror of pattern state in the authoritative report.
+    #[serde(default)]
+    pub pattern_state: Vec<serde_json::Value>,
+    /// Count of the unfiltered authoritative catalog.
+    #[serde(default)]
+    pub full_findings_total: u64,
+    /// Count of the current display projection.
+    #[serde(default)]
+    pub displayed_findings_total: u64,
+    /// Schema version for analyzed reports; absent on legacy empty payloads.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub schema_version: Option<u32>,
+    /// Whether the declared scope was completely analyzed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub execution: Option<Execution>,
+    /// Full finding presence before display filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub findings_present: Option<bool>,
+    /// Derived report state before display filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub outcome: Option<Outcome>,
+    /// Input accounting before display filters.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub completeness: Option<Completeness>,
+    /// Project identity, analysis timestamp, version, counts.
+    pub metadata: Metadata,
+    /// Compressed structural overview (~2K token budget).
+    pub summary: Summary,
+    /// Structural issues found in the codebase.
+    pub diagnostics: Vec<DiagnosticEntry>,
+    /// Every meaningful symbol in the codebase.
+    pub entities: Vec<EntityEntry>,
+    /// Traced data flow paths from entry to exit.
+    pub flows: Vec<FlowEntry>,
+    /// Interfaces where data crosses a meaningful boundary.
+    pub boundaries: Vec<BoundaryEntry>,
+    /// Module-level dependency structure.
+    pub dependency_graph: Vec<DependencyEdge>,
+    /// Where each significant type is created, transformed, and consumed.
+    pub type_flows: Vec<TypeFlowEntry>,
+}
+
+impl Manifest {
+    pub(crate) fn sync_pattern_state(&mut self) {
+        if let Some(a) = &self.authority {
+            self.pattern_state = a["pattern_state"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|p| {
+                    p["cells"].as_array().into_iter().flatten().map(|c| {
+                        serde_json::json!({"pattern_id":p["pattern_id"],"language":c["language"],
+                        "state":c["state"],"reason_codes":c["reason_codes"]})
+                    })
+                })
+                .collect();
+        }
+    }
+}
+impl From<Manifest> for ManifestWire {
+    fn from(mut value: Manifest) -> Self {
+        let referenced = value.authority.as_ref().is_some_and(|a| {
+            a["analysis_graph"]["compatibility_pattern_state"] == "/authority/pattern_state"
+                || a["analysis_graph"]["projection"]["compatibility_pattern_state"]
+                    == "/authority/pattern_state"
+        });
+        if referenced {
+            value.pattern_state.clear();
+        }
+        Self {
+            authority: value.authority,
+            losses: value.losses,
+            pattern_state: value.pattern_state,
+            full_findings_total: value.full_findings_total,
+            displayed_findings_total: value.displayed_findings_total,
+            schema_version: value.schema_version,
+            execution: value.execution,
+            findings_present: value.findings_present,
+            outcome: value.outcome,
+            completeness: value.completeness,
+            metadata: value.metadata,
+            summary: value.summary,
+            diagnostics: value.diagnostics,
+            entities: value.entities,
+            flows: value.flows,
+            boundaries: value.boundaries,
+            dependency_graph: value.dependency_graph,
+            type_flows: value.type_flows,
+        }
+    }
+}
+impl From<ManifestWire> for Manifest {
+    fn from(value: ManifestWire) -> Self {
+        let mut result = Self {
+            authority: value.authority,
+            losses: value.losses,
+            pattern_state: value.pattern_state,
+            full_findings_total: value.full_findings_total,
+            displayed_findings_total: value.displayed_findings_total,
+            schema_version: value.schema_version,
+            execution: value.execution,
+            findings_present: value.findings_present,
+            outcome: value.outcome,
+            completeness: value.completeness,
+            metadata: value.metadata,
+            summary: value.summary,
+            diagnostics: value.diagnostics,
+            entities: value.entities,
+            flows: value.flows,
+            boundaries: value.boundaries,
+            dependency_graph: value.dependency_graph,
+            type_flows: value.type_flows,
+        };
+        result.sync_pattern_state();
+        result
     }
 }

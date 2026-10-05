@@ -351,3 +351,13 @@ Compatibility loss and pattern-state arrays refer to the full authoritative arra
 at the paths recorded in the graph payload. This encoding adds no analysis loss;
 requested JSON/YAML bytes still pass the original prewrite size guard, and Summary
 retains its exemption. The separate incomplete graph projection remains explicit.
+
+Public `analyze` (including registry extensions) and `diagnose_report` now establish
+the same lossless graph normal form before gate or display options. At equal
+effective options their fourteen-field identities bind the same actual report;
+identity still includes every graph field. `AnalysisResult.graph` retains the
+original queryable graph. The in-memory `Manifest.pattern_state` mirror always
+contains every authoritative pattern/language cell. Compact wire reports retain
+the existing explicit `/authority/pattern_state` reference instead of repeating
+that array; deserializing a Manifest reconstructs its mirror from authority.
+This preserves the existing versioned table encoding and producer ABI v1.

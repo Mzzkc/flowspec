@@ -157,6 +157,70 @@ pub(crate) fn prepare_report(
         );
     }
 
+    // Apply diagnostic filters to output only
+    apply_diagnostic_filters(
+        &mut result.manifest.diagnostics,
+        checks,
+        severity,
+        confidence,
+    );
+    result.manifest.displayed_findings_total = result.manifest.diagnostics.len() as u64;
+    if let Some(authority) = result.manifest.authority.as_mut() {
+        authority["display"]["filters"] = serde_json::json!({
+            "checks":checks,"min_severity":severity.map(|s|s.to_string()),
+            "min_confidence":confidence.map(|c|c.to_string())});
+        let indices: Vec<usize> = authority["findings"]["all"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, finding)| {
+                let pattern = finding["pattern_id"].as_str().unwrap_or("");
+                (checks.is_empty() || checks.iter().any(|c| c == pattern))
+                    && severity.is_none_or(|min| {
+                        crate::Severity::from_str_checked(
+                            finding["severity"].as_str().unwrap_or(""),
+                        )
+                        .is_some_and(|s| s >= min)
+                    })
+                    && confidence.is_none_or(|min| {
+                        crate::Confidence::from_str_checked(
+                            finding["confidence"].as_str().unwrap_or(""),
+                        )
+                        .is_some_and(|c| c >= min)
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        authority["display"]["indices"] = serde_json::json!(indices);
+        authority["continuation"]["shown"] = serde_json::json!(indices.len());
+        authority["continuation"]["matched_total"] = serde_json::json!(indices.len());
+        authority["continuation"]["full"] = authority["findings"]["total"].clone();
+    }
+
+    // Update metadata and summary counts to reflect filtered diagnostics (#16)
+    result.manifest.metadata.diagnostic_count = result.manifest.diagnostics.len() as u64;
+    recompute_diagnostic_summary(
+        &result.manifest.diagnostics,
+        &mut result.manifest.summary.diagnostic_summary,
+    );
+
+    // Requested consumers validate their actual serialized bytes before writing.
+    // A complete catalog that cannot fit a structured output remains complete:
+    // its Summary and in-memory report must not acquire serialization loss.
+    Ok(result)
+}
+
+/// Establish the shared public report form before any caller-specific gate/filter.
+pub(crate) fn normalize_report(result: &mut crate::AnalysisResult) -> Result<(), FlowspecError> {
+    // Already-normalized reports retain identity and loss accounting on reuse.
+    if result.manifest.authority.as_ref().is_some_and(|a| {
+        a["analysis_graph"]["encoding"] == "flowspec.graph.tables.v1"
+            || a["analysis_graph"]["projection"]["analysis_graph"] == "omitted"
+    }) {
+        result.manifest.sync_pattern_state();
+        return Ok(());
+    }
     // Decide the available analysis projection before any presentation choice.
     // Evaluate the same full report for both structured formats, so a display
     // filter or format cannot manufacture a different execution or gate state.
@@ -212,58 +276,8 @@ pub(crate) fn prepare_report(
         bound_analyze_report(&mut result.manifest);
     }
 
-    // Apply diagnostic filters to output only
-    apply_diagnostic_filters(
-        &mut result.manifest.diagnostics,
-        checks,
-        severity,
-        confidence,
-    );
-    result.manifest.displayed_findings_total = result.manifest.diagnostics.len() as u64;
-    if let Some(authority) = result.manifest.authority.as_mut() {
-        authority["display"]["filters"] = serde_json::json!({
-            "checks":checks,"min_severity":severity.map(|s|s.to_string()),
-            "min_confidence":confidence.map(|c|c.to_string())});
-        let indices: Vec<usize> = authority["findings"]["all"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .filter(|(_, finding)| {
-                let pattern = finding["pattern_id"].as_str().unwrap_or("");
-                (checks.is_empty() || checks.iter().any(|c| c == pattern))
-                    && severity.is_none_or(|min| {
-                        crate::Severity::from_str_checked(
-                            finding["severity"].as_str().unwrap_or(""),
-                        )
-                        .is_some_and(|s| s >= min)
-                    })
-                    && confidence.is_none_or(|min| {
-                        crate::Confidence::from_str_checked(
-                            finding["confidence"].as_str().unwrap_or(""),
-                        )
-                        .is_some_and(|c| c >= min)
-                    })
-            })
-            .map(|(i, _)| i)
-            .collect();
-        authority["display"]["indices"] = serde_json::json!(indices);
-        authority["continuation"]["shown"] = serde_json::json!(indices.len());
-        authority["continuation"]["matched_total"] = serde_json::json!(indices.len());
-        authority["continuation"]["full"] = authority["findings"]["total"].clone();
-    }
-
-    // Update metadata and summary counts to reflect filtered diagnostics (#16)
-    result.manifest.metadata.diagnostic_count = result.manifest.diagnostics.len() as u64;
-    recompute_diagnostic_summary(
-        &result.manifest.diagnostics,
-        &mut result.manifest.summary.diagnostic_summary,
-    );
-
-    // Requested consumers validate their actual serialized bytes before writing.
-    // A complete catalog that cannot fit a structured output remains complete:
-    // its Summary and in-memory report must not acquire serialization loss.
-    Ok(result)
+    result.manifest.sync_pattern_state();
+    Ok(())
 }
 
 fn render_report(

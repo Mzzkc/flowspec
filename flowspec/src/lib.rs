@@ -1015,13 +1015,15 @@ pub fn analyze_with_registry(
         })
         .collect();
     manifest.authority = Some(authority);
-    Ok(AnalysisResult {
+    let mut result = AnalysisResult {
         manifest,
         has_critical,
         has_findings,
         graph,
         source_bytes,
-    })
+    };
+    commands::normalize_report(&mut result)?;
+    Ok(result)
 }
 
 /// Extract input and output type strings from a function signature.
