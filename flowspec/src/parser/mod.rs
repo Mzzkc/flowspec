@@ -13,10 +13,10 @@
 //! Output flows into [`crate::graph::populate_graph`] which inserts IR
 //! nodes into the persistent analysis graph.
 
-/// Source-owned normal-return control paths for explicit invocation policies.
-pub mod control;
 /// Native finite primitive contract and operand facts.
 pub mod contracts;
+/// Source-owned normal-return control paths for explicit invocation policies.
+pub mod control;
 /// Intermediate representation types — `Symbol`, `Scope`, `Reference`, `Boundary`, and their IDs.
 pub mod ir;
 /// JavaScript/TypeScript language adapter (ES modules, CommonJS, JSX/TSX).

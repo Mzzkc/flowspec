@@ -652,13 +652,11 @@ pub(crate) fn build(
         registry,
     } = context;
     if let Some(policy) = &config.semantic_policy {
-        for (pattern, requested, operation) in [
-            (
-                "asymmetric_handling",
-                !policy.peers.is_empty(),
-                "peer effect/resource invariants",
-            ),
-        ] {
+        for (pattern, requested, operation) in [(
+            "asymmetric_handling",
+            !policy.peers.is_empty(),
+            "peer effect/resource invariants",
+        )] {
             if requested {
                 let mut item = loss(
                     "policy_operation_unavailable",
@@ -726,7 +724,14 @@ pub(crate) fn build(
         &mut losses,
     );
     crate::analyzer::module_policy::append(root, config, inputs, graph, &mut findings, &mut losses);
-    crate::analyzer::contract_history::append(root, config, inputs, graph, &mut findings, &mut losses);
+    crate::analyzer::contract_history::append(
+        root,
+        config,
+        inputs,
+        graph,
+        &mut findings,
+        &mut losses,
+    );
     crate::analyzer::resources::append(root, config, inputs, graph, &mut findings, &mut losses);
     coalesce_semantic_losses(&mut losses);
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
