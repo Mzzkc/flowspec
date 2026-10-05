@@ -56,30 +56,30 @@ fn languages() -> Vec<(
     vec![
         (
             "py",
-            "def old():\n    return 1\ndef new():\n    return 2\n",
-            "def consumer():\n    return old() + new()\n",
-            "def consumer():\n    return new()\n",
+            "def old():\n    return 1\ndef upgraded():\n    return 2\n",
+            "def consumer():\n    return old() + upgraded()\n",
+            "def consumer():\n    return upgraded()\n",
             "def api():\n    return 1\n",
         ),
         (
             "js",
-            "export function old(){return 1;}\nexport function new(){return 2;}\n",
-            "export function consumer(){return old() + new();}\n",
-            "export function consumer(){return new();}\n",
+            "export function old(){return 1;}\nexport function upgraded(){return 2;}\n",
+            "export function consumer(){return old() + upgraded();}\n",
+            "export function consumer(){return upgraded();}\n",
             "export function api(){return 1;}\n",
         ),
         (
             "ts",
-            "export function old():number{return 1;}\nexport function new():number{return 2;}\n",
-            "export function consumer():number{return old() + new();}\n",
-            "export function consumer():number{return new();}\n",
+            "export function old():number{return 1;}\nexport function upgraded():number{return 2;}\n",
+            "export function consumer():number{return old() + upgraded();}\n",
+            "export function consumer():number{return upgraded();}\n",
             "export function api():number{return 1;}\n",
         ),
         (
             "rs",
-            "pub fn old()->i32{1}\npub fn new()->i32{2}\n",
-            "pub fn consumer()->i32{old() + new()}\n",
-            "pub fn consumer()->i32{new()}\n",
+            "pub fn old()->i32{1}\npub fn upgraded()->i32{2}\n",
+            "pub fn consumer()->i32{old() + upgraded()}\n",
+            "pub fn consumer()->i32{upgraded()}\n",
             "pub fn api()->i32{1}\n",
         ),
     ]
@@ -88,7 +88,7 @@ fn languages() -> Vec<(
 fn declared_migration_requires_exact_live_old_binding_in_four_languages() {
     for (ext, declarations, live, satisfied, _) in languages() {
         let name = format!("subject.{ext}");
-        let policy = json!({"version":1,"migrations":[{"old":format!("{name}::old"),"new":format!("{name}::new")}]});
+        let policy = json!({"version":1,"migrations":[{"old":format!("{name}::old"),"new":format!("{name}::upgraded")}]});
         let source = format!("{declarations}{live}");
         let a = run(&[(&name, &source)], policy.clone());
         assert_eq!(findings(&a, "incomplete_migration").len(), 1, "{ext}: {a}");
@@ -109,7 +109,7 @@ fn declared_migration_requires_exact_live_old_binding_in_four_languages() {
         assert_eq!(state(&clean, "incomplete_migration"), "complete");
         let unknown = run(
             &[(&name, &source)],
-            json!({"version":1,"migrations":[{"old":format!("{name}::absent"),"new":format!("{name}::new") }]}),
+            json!({"version":1,"migrations":[{"old":format!("{name}::absent"),"new":format!("{name}::upgraded") }]}),
         );
         assert!(findings(&unknown, "incomplete_migration").is_empty());
         assert_eq!(state(&unknown, "incomplete_migration"), "incomplete");
