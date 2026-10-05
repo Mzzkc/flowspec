@@ -28,3 +28,6 @@ pub mod type_flow;
 
 /// Exact validated source-policy consumers.
 pub(crate) mod semantic_policy;
+
+/// Source-owned module policy and public export closure.
+pub(crate) mod module_policy;

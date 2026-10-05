@@ -71,7 +71,7 @@ fn twenty_selected_files_emit_bounded_yaml() {
         "actual YAML output {} bytes over {source} source bytes",
         output.stdout.len()
     );
-    let report: serde_yaml::Value = serde_yaml::from_slice(&output.stdout).unwrap();
+    let report: serde_json::Value = serde_yaml::from_slice(&output.stdout).unwrap();
     let report = flowspec::commands::expand_report_records(&report).unwrap();
     assert_eq!(report["authority"]["inventory"]["selected"], 20);
     if output.status.code() == Some(3) {

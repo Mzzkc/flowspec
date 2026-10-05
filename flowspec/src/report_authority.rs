@@ -666,21 +666,6 @@ pub(crate) fn build(
                 !policy.peers.is_empty(),
                 "peer effect/resource invariants",
             ),
-            (
-                "incomplete_migration",
-                !policy.migrations.is_empty(),
-                "old/new authority consumer closure",
-            ),
-            (
-                "missing_reexport",
-                !policy.exports.is_empty(),
-                "complete parent export graph",
-            ),
-            (
-                "layer_violation",
-                !policy.layers.is_empty(),
-                "resolved forbidden module edges",
-            ),
         ] {
             if requested {
                 let mut item = loss(
@@ -701,6 +686,12 @@ pub(crate) fn build(
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
+        if matches!(
+            diagnostic.pattern.as_str(),
+            "layer_violation" | "incomplete_migration" | "missing_reexport"
+        ) {
+            continue;
+        }
         if let Some(finding) = build_finding(root, diagnostic, graph, inputs) {
             if blockers.is_empty() {
                 findings.push(finding);
@@ -714,13 +705,23 @@ pub(crate) fn build(
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     // Legacy findings without an implemented cause proof are visible as debt,
     // never promoted into the authoritative finding catalog.
-    if diagnostics.len() != findings.len() {
-        losses.push(loss(
-            "semantic_proof_unavailable",
-            String::new(),
-            None,
-            "finding",
-        ));
+    let mut unqualified_patterns = std::collections::BTreeSet::new();
+    for diagnostic in diagnostics {
+        if matches!(
+            diagnostic.pattern.as_str(),
+            "layer_violation" | "incomplete_migration" | "missing_reexport"
+        ) {
+            continue;
+        }
+        if build_finding(root, diagnostic, graph, inputs).is_none() {
+            unqualified_patterns.insert(diagnostic.pattern.clone());
+        }
+    }
+    if !unqualified_patterns.is_empty() {
+        let mut item = loss("semantic_proof_unavailable", String::new(), None, "finding");
+        item["affected_patterns"] = json!(unqualified_patterns);
+        item["id"] = json!(hash("unqualified-diagnostic-loss", &item));
+        losses.push(item);
     }
     append_semantic_proofs(root, inputs, graph, &mut findings, &mut losses);
     append_duplication_proofs(root, config, inputs, graph, &mut findings, &mut losses);
@@ -732,6 +733,7 @@ pub(crate) fn build(
         &mut findings,
         &mut losses,
     );
+    crate::analyzer::module_policy::append(root, config, inputs, graph, &mut findings, &mut losses);
     coalesce_semantic_losses(&mut losses);
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     let mut by_pattern: BTreeMap<&str, u64> = PATTERNS.iter().map(|p| (*p, 0)).collect();
