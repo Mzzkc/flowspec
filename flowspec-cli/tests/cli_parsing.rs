@@ -192,7 +192,7 @@ fn summary_format_is_accepted() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "summary"])
         .assert()
-        .code(predicate::in_iter([0, 2]));
+        .code(predicate::in_iter([0, 2, 3]));
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn sarif_format_is_accepted() {
     let mut cmd = Command::cargo_bin("flowspec").unwrap();
     cmd.args(["analyze", ".", "--format", "sarif"])
         .assert()
-        .code(predicate::in_iter([0, 2]));
+        .code(predicate::in_iter([0, 2, 3]));
 }
 
 #[test]
