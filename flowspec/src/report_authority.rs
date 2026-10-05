@@ -654,14 +654,6 @@ pub(crate) fn build(
     if let Some(policy) = &config.semantic_policy {
         for (pattern, requested, operation) in [
             (
-                "partial_wiring",
-                policy
-                    .peers
-                    .iter()
-                    .any(|p| p.exit_scope.as_deref() != Some("normal")),
-                "peer operation/all-exit CFG closure",
-            ),
-            (
                 "asymmetric_handling",
                 !policy.peers.is_empty(),
                 "peer effect/resource invariants",
