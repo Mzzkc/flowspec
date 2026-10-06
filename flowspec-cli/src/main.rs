@@ -432,14 +432,21 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
         }
         Commands::ExpandReport => {
             use std::io::Read;
-            let mut input = String::new();
+            const INPUT_LIMIT: u64 = 64 * 1024 * 1024;
+            let mut input = Vec::new();
             std::io::stdin()
-                .read_to_string(&mut input)
+                .take(INPUT_LIMIT + 1)
+                .read_to_end(&mut input)
                 .map_err(|e| FlowspecError::Manifest {
                     reason: e.to_string(),
                 })?;
+            if input.len() as u64 > INPUT_LIMIT {
+                return Err(FlowspecError::Manifest {
+                    reason: "report input exceeds 64 MiB limit".into(),
+                });
+            }
             let value: serde_json::Value =
-                serde_json::from_str(&input).map_err(|e| FlowspecError::Manifest {
+                serde_json::from_slice(&input).map_err(|e| FlowspecError::Manifest {
                     reason: e.to_string(),
                 })?;
             let expanded = commands::expand_report_records(&value)

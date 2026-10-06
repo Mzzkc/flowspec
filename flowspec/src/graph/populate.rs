@@ -817,6 +817,53 @@ fn resolve_callee(
         return SymbolId::default();
     }
 
+    // Python unqualified calls search the lexical namespace from the caller
+    // outward. A same-name definition in another function is not visible.
+    if let Some(from) = graph
+        .get_symbol(*from_id)
+        .filter(|s| s.location.file.extension().is_some_and(|ext| ext == "py"))
+    {
+        let mut namespace = from.qualified_name.as_str();
+        loop {
+            // Methods do not capture their class namespace as a lexical scope.
+            let class_namespace = symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Class && s.qualified_name == namespace);
+            if !class_namespace {
+                let qualified = format!("{namespace}::{callee_name}");
+                let mut candidates = symbol_id_map.iter().filter(|(idx, _)| {
+                    let symbol = &symbols[*idx];
+                    symbol.qualified_name == qualified
+                        && !symbol
+                            .annotations
+                            .iter()
+                            .any(|a| a == "type_only" || a == "type_checking")
+                });
+                if let Some((_, id)) = candidates.next() {
+                    return if candidates.next().is_none() {
+                        *id
+                    } else {
+                        SymbolId::default()
+                    };
+                }
+            }
+            match namespace.rsplit_once("::") {
+                Some((parent, _)) => namespace = parent,
+                None => break,
+            }
+        }
+        // Import symbols use a separate qualified-name segment in the IR.
+        let qualified = format!("{namespace}::import::{callee_name}");
+        let mut imports = symbol_id_map.iter().filter(|(idx, _)| {
+            symbols[*idx].qualified_name == qualified
+                && symbols[*idx].annotations.iter().any(|a| a == "import")
+        });
+        return match (imports.next(), imports.next()) {
+            (Some((_, id)), None) => *id,
+            _ => SymbolId::default(),
+        };
+    }
+
     // Simple name: match against all symbols in the same file
     let mut candidates: Vec<(usize, SymbolId)> = Vec::new();
     for &(idx, real_id) in symbol_id_map {
