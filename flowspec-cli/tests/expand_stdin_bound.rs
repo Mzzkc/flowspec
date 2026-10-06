@@ -3,8 +3,8 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn public_stdin_limit_is_inclusive_and_refuses_without_output() {
-    let limit = 64 * 1024 * 1024;
-    for (size, expected) in [(2, 0), (limit, 0), (limit + 1, 1)] {
+    let limit = 128 * 1024 * 1024;
+    for (size, expected) in [(2, 0), (64 * 1024 * 1024 + 39, 0), (limit, 0), (limit + 1, 1)] {
         let mut file = tempfile::tempfile().unwrap();
         let mut input = vec![b' '; size];
         input[..2].copy_from_slice(b"{}");
@@ -21,7 +21,7 @@ fn public_stdin_limit_is_inclusive_and_refuses_without_output() {
             assert_eq!(output.stdout, b"{}");
         } else {
             assert!(output.stdout.is_empty());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("64 MiB"));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("128 MiB"));
         }
     }
 }

@@ -722,7 +722,7 @@ pub(crate) fn build(
         .filter(|finding| {
             finding["pattern_id"] == "data_dead_end"
                 && finding["subject"]["construct_kind"] == "function"
-                && matches!(finding["subject"]["language"].as_str(), Some("python" | "rust"))
+                && matches!(finding["subject"]["language"].as_str(), Some("python" | "rust" | "javascript" | "typescript"))
         })
         .filter(|finding| {
             graph.all_symbols().any(|(id, symbol)| {
