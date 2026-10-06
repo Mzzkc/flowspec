@@ -25,7 +25,7 @@ use crate::parser::ir::{EdgeKind, SymbolKind};
 /// diagnostic locations, matching the format of entity `loc` fields.
 pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    let components = graph.connected_components();
+    let components = graph.consumption_components();
 
     for component in &components {
         // Require 2+ symbols for a cluster
@@ -74,7 +74,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         // Check for external inbound edges
         let component_set: HashSet<_> = component.iter().copied().collect();
         let has_external_inbound = component.iter().any(|&id| {
-            graph.edges_to(id).iter().any(|edge| {
+            graph.consumption_edges_to(id).iter().any(|edge| {
                 // In incoming edges, edge.target is the SOURCE symbol
                 !component_set.contains(&edge.target)
                     && matches!(edge.kind, EdgeKind::Calls | EdgeKind::References)
@@ -87,7 +87,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
 
         // Check for internal edges (must have at least one to be a "cluster")
         let has_internal_edges = component.iter().any(|&id| {
-            graph.edges_from(id).iter().any(|edge| {
+            graph.consumption_edges_to(id).iter().any(|edge| {
                 component_set.contains(&edge.target)
                     && matches!(edge.kind, EdgeKind::Calls | EdgeKind::References)
             })
@@ -118,7 +118,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
             .iter()
             .map(|&id| {
                 graph
-                    .edges_from(id)
+                    .consumption_edges_to(id)
                     .iter()
                     .filter(|e| component_set.contains(&e.target))
                     .count()

@@ -371,32 +371,169 @@ impl Graph {
 
     // -- Edge queries -------------------------------------------------------
 
-    /// Returns all symbols called by the given symbol.
-    pub fn callees(&self, id: SymbolId) -> Vec<SymbolId> {
-        self.outgoing
-            .get(&id)
-            .map(|edges| {
-                edges
+    /// True only for a resolved runtime import proxy. Type-only imports cannot
+    /// transport callable or value consumption.
+    fn runtime_import(&self, id: SymbolId) -> bool {
+        self.get_symbol(id).is_some_and(|s| {
+            s.resolution == ResolutionStatus::Resolved
+                && s.annotations.iter().any(|a| a == "import")
+                && !s
+                    .annotations
                     .iter()
-                    .filter(|e| e.kind == EdgeKind::Calls)
-                    .map(|e| e.target)
-                    .collect()
-            })
-            .unwrap_or_default()
+                    .any(|a| a == "type_only" || a == "type_checking")
+        })
     }
 
-    /// Returns all symbols that call the given symbol.
+    /// Resolve a callable binding without manufacturing executable references.
+    /// Cycles terminate by SymbolId; distinct source invocations are never merged.
+    fn callable_targets(&self, id: SymbolId) -> Vec<SymbolId> {
+        let mut pending = vec![id];
+        let mut seen = HashSet::new();
+        let mut targets = Vec::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if self.runtime_import(current) {
+                pending.extend(
+                    self.edges_from(current)
+                        .iter()
+                        .filter(|e| {
+                            e.kind == EdgeKind::References
+                                && e.reference_id
+                                    .and_then(|r| self.get_reference(r))
+                                    .is_some_and(|r| {
+                                        r.kind != ReferenceKind::Annotation
+                                            && r.resolution == ResolutionStatus::Resolved
+                                    })
+                        })
+                        .map(|e| e.target),
+                );
+            } else if self
+                .get_symbol(current)
+                .is_some_and(|s| !s.annotations.iter().any(|a| a == "import"))
+            {
+                targets.push(current);
+            }
+        }
+        targets
+    }
+
+    /// Source call sites with their resolved callable targets. The reference ID
+    /// and range belong to the real invocation, even across an import chain.
+    /// This is a query result, never an edge inserted into executable topology.
+    pub fn call_edges_from(&self, id: SymbolId) -> Vec<Edge> {
+        let mut result = Vec::new();
+        for edge in self
+            .edges_from(id)
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+        {
+            let targets = self.callable_targets(edge.target);
+            if targets.is_empty() {
+                result.push(edge.clone());
+            } else {
+                result.extend(targets.into_iter().map(|target| Edge {
+                    target,
+                    ..edge.clone()
+                }));
+            }
+        }
+        result
+    }
+
+    /// Actual source consumers of a definition, following resolved runtime
+    /// import bindings backwards. Import declarations alone and annotations
+    /// do not consume a definition. Call and value-read ranges remain exact.
+    pub fn consumption_edges_to(&self, id: SymbolId) -> Vec<Edge> {
+        let mut pending = vec![id];
+        let mut aliases = HashSet::new();
+        let mut references = HashSet::new();
+        let mut result = Vec::new();
+        while let Some(current) = pending.pop() {
+            if !aliases.insert(current) {
+                continue;
+            }
+            for edge in self.edges_to(current) {
+                if !matches!(edge.kind, EdgeKind::Calls | EdgeKind::References) {
+                    continue;
+                }
+                let reference = edge.reference_id.and_then(|r| self.get_reference(r));
+                if reference.is_some_and(|r| r.kind == ReferenceKind::Annotation) {
+                    continue;
+                }
+                if edge.kind == EdgeKind::References && self.runtime_import(edge.target) {
+                    pending.push(edge.target);
+                    continue;
+                }
+                if reference.is_some_and(|r| r.kind == ReferenceKind::Import) {
+                    continue;
+                }
+                if edge.reference_id.is_none_or(|r| references.insert(r)) {
+                    result.push(edge.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns symbols called by actual invocations, resolving import bindings.
+    pub fn callees(&self, id: SymbolId) -> Vec<SymbolId> {
+        self.call_edges_from(id)
+            .into_iter()
+            .map(|e| e.target)
+            .collect()
+    }
+
+    /// Returns exact calling symbols through real call/import-reference chains.
+    /// Value reads and import declarations do not become callers.
     pub fn callers(&self, id: SymbolId) -> Vec<SymbolId> {
-        self.incoming
-            .get(&id)
-            .map(|edges| {
-                edges
-                    .iter()
-                    .filter(|e| e.kind == EdgeKind::Calls)
-                    .map(|e| e.target)
-                    .collect()
+        self.consumption_edges_to(id)
+            .into_iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .map(|e| e.target)
+            .collect()
+    }
+
+    /// Components of actual consumption, excluding lexical containment and
+    /// import declarations. Alias proxies transport consumption but are not
+    /// executable members of a component.
+    pub fn consumption_components(&self) -> Vec<Vec<SymbolId>> {
+        let nodes: Vec<_> = self
+            .all_symbols()
+            .filter(|(_, s)| {
+                s.kind != SymbolKind::Module && !s.annotations.iter().any(|a| a == "import")
             })
-            .unwrap_or_default()
+            .map(|(id, _)| id)
+            .collect();
+        let node_set: HashSet<_> = nodes.iter().copied().collect();
+        let mut adjacent: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
+        for &id in &nodes {
+            for edge in self.consumption_edges_to(id) {
+                if node_set.contains(&edge.target) {
+                    adjacent.entry(id).or_default().push(edge.target);
+                    adjacent.entry(edge.target).or_default().push(id);
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut components = Vec::new();
+        for &id in &nodes {
+            if seen.contains(&id) {
+                continue;
+            }
+            let mut pending = vec![id];
+            let mut component = Vec::new();
+            while let Some(current) = pending.pop() {
+                if !seen.insert(current) {
+                    continue;
+                }
+                component.push(current);
+                pending.extend(adjacent.get(&current).into_iter().flatten().copied());
+            }
+            components.push(component);
+        }
+        components
     }
 
     /// Returns all symbols that import the given symbol (cross-file references).

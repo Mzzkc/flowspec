@@ -17,7 +17,7 @@ use crate::manifest::types::{DiagnosticEntry, FlowEntry, Manifest};
 use crate::manifest::{validate_manifest_size, OutputFormatter};
 use crate::parser::ir::SymbolId;
 use crate::{
-    deduplicate_flows, Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter,
+    Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter,
     YamlFormatter,
 };
 
@@ -579,10 +579,8 @@ pub fn run_trace(
     // Convert FlowPath (graph-level) → FlowEntry (manifest-level)
     let mut flow_entries = flow_paths_to_entries(&result.graph, &flow_paths, &matched_entity);
 
-    // Deduplicate flows for --direction both (forward + backward may overlap)
-    if direction == TraceDirection::Both {
-        flow_entries = deduplicate_flows(flow_entries);
-    }
+    // The source query already supplies actual invocations. Equal binding
+    // sequences can belong to distinct call sites and must remain visible.
 
     // Apply depth truncation to steps
     for flow in &mut flow_entries {
@@ -2851,6 +2849,7 @@ pub fn exact_trace_output(
     depth: usize,
     direction: TraceDirection,
 ) -> Result<TraceOutput, FlowspecError> {
+    let graph = &result.graph;
     let name = find_matching_symbol(symbol, &result.manifest.entities)?;
     let mut matches = result
         .graph
@@ -2904,6 +2903,7 @@ pub fn exact_trace_output(
                 .to_path_buf();
             location
         }));
+        let mut occurrences = std::collections::HashMap::<String, usize>::new();
         for path in report.paths {
             let Some(entry) = identity(path.entry) else {
                 continue;
@@ -2922,9 +2922,36 @@ pub fn exact_trace_output(
                 "trace-path",
                 &serde_json::json!({"entry":entry.binding_id,"hops":hops,"backward":backward}),
             );
-            if !seen.insert(key.clone()) {
-                continue;
+            // Equal binding hops can arise from distinct source call sites.
+            // Reconstruct the actual edge-reference combination in traversal
+            // order, without changing the public Graph or trace struct layout.
+            let occurrence = occurrences.entry(key.clone()).or_default();
+            let mut current = path.entry;
+            let mut choices = Vec::new();
+            for step in &path.steps {
+                let edges = if backward { graph.edges_to(current) } else { graph.edges_from(current) };
+                let references: Vec<_> = edges.iter().filter(|e| e.target == step.symbol && e.kind == step.edge_kind)
+                    .filter_map(|e| e.reference_id.and_then(|r| graph.get_reference(r)))
+                    .map(|r| {
+                        let mut location = r.location.clone();
+                        location.file = location.file.strip_prefix(root).unwrap_or(&location.file).to_path_buf();
+                        location
+                    }).collect();
+                choices.push(references);
+                current = step.symbol;
             }
+            let mut index = *occurrence;
+            *occurrence += 1;
+            let mut sites = Vec::new();
+            for references in choices.into_iter().rev() {
+                if !references.is_empty() {
+                    sites.push(references[index % references.len()].clone());
+                    index /= references.len();
+                }
+            }
+            sites.reverse();
+            let key = crate::report_authority::hash("trace-path", &serde_json::json!({"binding_path":key,"source_references":sites}));
+            if !seen.insert(key.clone()) { continue; }
             if path.truncated {
                 continuation.push(key.clone());
             }

@@ -1791,75 +1791,9 @@ fn resolve_imports_impl(
         });
     }
 
-    // Phase 5: Create transitive call edges through resolved import chains.
-    // When a call edge points to an import symbol that was just resolved,
-    // create a direct call edge from the caller to the resolved definition.
-    // This makes `callers(def_id)` return cross-file callers.
-    let mut transitive_calls: Vec<(SymbolId, SymbolId, Location)> = Vec::new();
-    for (id, symbol) in graph.all_symbols() {
-        if !symbol.annotations.contains(&"import".to_string()) {
-            continue;
-        }
-        if symbol.resolution != ResolutionStatus::Resolved
-            || symbol
-                .annotations
-                .iter()
-                .any(|a| a == "type_only" || a == "type_checking")
-        {
-            continue;
-        }
-        // Find the resolved definition target from import edges
-        let import_targets: Vec<SymbolId> = graph
-            .edges_from(id)
-            .iter()
-            .filter(|e| e.kind == EdgeKind::References)
-            .map(|e| e.target)
-            .collect();
-        if import_targets.is_empty() {
-            continue;
-        }
-        // Preserve each actual invocation range through the import join. A
-        // caller declaration range is not evidence for a concrete call site.
-        for edge in graph
-            .edges_to(id)
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Calls)
-        {
-            let caller_id = edge.target;
-            let Some(reference) = edge.reference_id.and_then(|id| graph.get_reference(id)) else {
-                continue;
-            };
-            for &target_id in &import_targets {
-                if graph
-                    .get_symbol(target_id)
-                    .is_none_or(|s| s.annotations.iter().any(|a| a == "import"))
-                {
-                    continue;
-                }
-                let exists = graph.edges_from(caller_id).iter().any(|e| {
-                    e.kind == EdgeKind::Calls
-                        && e.target == target_id
-                        && e.reference_id
-                            .and_then(|id| graph.get_reference(id))
-                            .is_some_and(|r| r.location == reference.location)
-                });
-                if !exists {
-                    transitive_calls.push((caller_id, target_id, reference.location.clone()));
-                }
-            }
-        }
-    }
-
-    for (caller_id, def_id, location) in transitive_calls {
-        graph.add_reference(Reference {
-            id: ReferenceId::default(),
-            from: caller_id,
-            to: def_id,
-            kind: ReferenceKind::Call,
-            location,
-            resolution: ResolutionStatus::Resolved,
-        });
-    }
+    // Cross-file definition consumption is derived by Graph's shared queries.
+    // Keep the source Call(caller, proxy) -> Reference(proxy, definition) path;
+    // a second direct Call would invent another executable alternative.
 
     // CF: apply A1 dotted-call-to-import resolutions as CALL edges so the flow
     // tracer traverses them cross-file to the resolved target (main -> helper.build).

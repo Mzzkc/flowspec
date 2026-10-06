@@ -984,8 +984,8 @@ pub fn analyze_with_registry_and_options(
         })
         .collect();
 
-    // Stage 4c: Deduplicate flows — hash-based dedup on (entry, exit, steps)
-    let flows = deduplicate_flows(flows);
+    // Distinct source invocations can share every binding hop. Retain actual
+    // path multiplicity; terminal topology is not a call-site identity.
 
     // Stage 5: Assemble manifest
     let diagnostic_count = diagnostics.len() as u64;

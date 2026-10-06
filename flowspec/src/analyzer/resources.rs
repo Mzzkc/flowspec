@@ -36,8 +36,8 @@ fn paths(
             p.iter()
                 .map(|&(a, b)| {
                     let mut targets = graph
-                        .edges_from(id)
-                        .iter()
+                        .call_edges_from(id)
+                        .into_iter()
                         .filter(|e| e.kind == EdgeKind::Calls)
                         .filter_map(|e| {
                             let r = graph.get_reference(e.reference_id?)?;

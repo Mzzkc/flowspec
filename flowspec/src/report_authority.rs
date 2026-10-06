@@ -706,7 +706,7 @@ pub(crate) fn build(
             graph.all_symbols().any(|(id, symbol)| {
                 symbol.qualified_name == finding["subject"]["qualified_name"]
                     && path_key(root, &symbol.location.file) == finding["subject"]["path_key"]
-                    && [graph.edges_from(id), graph.edges_to(id)]
+                    && [graph.call_edges_from(id), graph.consumption_edges_to(id)]
                         .into_iter()
                         .flatten()
                         .all(|edge| {

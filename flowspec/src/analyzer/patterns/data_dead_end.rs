@@ -85,7 +85,7 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
 
         // Count inbound consumption edges (Calls + References, not Contains)
         let inbound_count = graph
-            .edges_to(id)
+            .consumption_edges_to(id)
             .iter()
             .filter(|edge| {
                 matches!(edge.kind, EdgeKind::Calls | EdgeKind::References)

@@ -177,7 +177,7 @@ pub(crate) fn append(
             continue;
         }
         for edge in graph
-            .edges_to(id)
+            .consumption_edges_to(id)
             .iter()
             .filter(|e| e.kind == EdgeKind::Calls)
         {
@@ -267,7 +267,7 @@ pub(crate) fn append(
         if h.state != "shim"
             || new.is_none()
             || !graph
-                .edges_from(old)
+                .call_edges_from(old)
                 .iter()
                 .any(|e| e.kind == EdgeKind::Calls && Some(e.target) == new)
         {
@@ -286,7 +286,7 @@ pub(crate) fn append(
             continue;
         }
         for e in graph
-            .edges_to(old)
+            .consumption_edges_to(old)
             .iter()
             .filter(|e| e.kind == EdgeKind::Calls && Some(e.target) != new && e.target != old)
         {

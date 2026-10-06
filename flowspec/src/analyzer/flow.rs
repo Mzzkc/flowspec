@@ -68,7 +68,8 @@ fn trace_edges(graph: &Graph, current: SymbolId, backward: bool) -> Vec<(SymbolI
             .cmp(&key(b.0))
             .then(format!("{:?}", a.1).cmp(&format!("{:?}", b.1)))
     });
-    selected.dedup();
+    // Distinct source call sites may have identical endpoints. Retain each
+    // invocation; topology no longer contains fabricated transitive calls.
     selected
 }
 
@@ -144,15 +145,8 @@ fn trace_walk(graph: &Graph, start: SymbolId, max_depth: usize, backward: bool) 
             }
         }
     }
-    let mut identities = HashSet::new();
-    paths.retain(|p| {
-        identities.insert(
-            p.steps
-                .iter()
-                .map(|s| (s.symbol, s.edge_kind))
-                .collect::<Vec<_>>(),
-        )
-    });
+    // Path multiplicity is source invocation multiplicity. Equal binding hops
+    // are not proof that two distinct call sites are the same invocation.
     TraceWalk {
         paths,
         continuation,

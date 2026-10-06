@@ -108,7 +108,7 @@ pub fn extract_dependency_graph(graph: &Graph) -> Vec<ModuleDependency> {
 
 /// Extracts the qualified names of all symbols called by the given symbol.
 ///
-/// Uses `graph.callees()` which returns outgoing edges with `EdgeKind::Calls`.
+/// Uses `graph.callees()` which resolves real invocations through import bindings.
 /// Filters `SymbolId::default()` phantom entries (unresolved cross-file
 /// references) and symbols whose IDs cannot be resolved (defensive).
 pub fn extract_calls(graph: &Graph, symbol_id: SymbolId) -> Vec<String> {
@@ -126,7 +126,7 @@ pub fn extract_calls(graph: &Graph, symbol_id: SymbolId) -> Vec<String> {
 
 /// Extracts the qualified names of all symbols that call the given symbol.
 ///
-/// Uses `graph.callers()` which returns incoming edges with `EdgeKind::Calls`.
+/// Uses `graph.callers()` which derives real source callers through import bindings.
 /// Filters `SymbolId::default()` phantom entries (unresolved cross-file
 /// references) and symbols whose IDs cannot be resolved (defensive).
 pub fn extract_called_by(graph: &Graph, symbol_id: SymbolId) -> Vec<String> {

@@ -96,8 +96,8 @@ fn invocation_paths(
         let mut accumulated = vec![HashSet::new()];
         for &(a, b) in path {
             let mut targets = graph
-                .edges_from(id)
-                .iter()
+                .call_edges_from(id)
+                .into_iter()
                 .filter(|e| {
                     e.kind == EdgeKind::Calls
                         && graph.get_symbol(e.target).is_some_and(|s| {
@@ -245,7 +245,7 @@ fn append_private_implementations(
         let range = location_range(&key, content, &symbol.location);
         // An actual bound call/reference defeats absence, including an unrelated
         // spelling on a different owner. Type annotations alone are not consumers.
-        if graph.edges_to(id).iter().any(|e| {
+        if graph.consumption_edges_to(id).iter().any(|e| {
             matches!(e.kind, EdgeKind::Calls | EdgeKind::References)
                 && e.reference_id
                     .and_then(|i| graph.get_reference(i))
