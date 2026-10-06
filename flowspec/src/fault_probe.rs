@@ -129,7 +129,7 @@ fn operation(
 ) {
     let index = state.operations.len();
     state.operations.push(json!({"index":index,"operation":name,"case":format!("{:?}",state.plan.case),
-        "gate_nonce":state.plan.nonce,"target_path_key":crate::report_authority::path_key(&state.root,path),
+        "gate_nonce":state.plan.nonce,"target_path_key":crate::identity::path_key(&state.root,path),
         "line":line,"callsite":callsite,"result":result}));
 }
 fn loss(
@@ -147,7 +147,7 @@ fn loss(
             || range.clone(),
             |content| {
                 crate::report_authority::offset_range(
-                    &crate::report_authority::path_key(&state.root, path),
+                    &crate::identity::path_key(&state.root, path),
                     content,
                     range["start_byte"].as_u64().unwrap_or(0),
                     range["end_byte"].as_u64().unwrap_or(0),
@@ -157,7 +157,7 @@ fn loss(
     });
     let mut entry = crate::report_authority::loss(
         reason,
-        crate::report_authority::path_key(&state.root, path),
+        crate::identity::path_key(&state.root, path),
         range,
         stage,
     );
@@ -269,7 +269,7 @@ pub(crate) fn read_after(path: &Path, content: &str) -> bool {
             "consumed",
         );
         if let Some(last) = state.operations.last_mut() {
-            last["raw_sha256"] = json!(crate::report_authority::digest(content.as_bytes()));
+            last["raw_sha256"] = json!(crate::identity::digest(content.as_bytes()));
             last["bytes_consumed"] = json!(content.len());
         }
         operation(
@@ -319,7 +319,7 @@ pub(crate) fn js_node(path: &Path, kind: &str, line: u64, start: u64, end: u64) 
             "parser.javascript.visit_node",
             "partial_ir",
         );
-        let key = crate::report_authority::path_key(&state.root, path);
+        let key = crate::identity::path_key(&state.root, path);
         let range = crate::report_authority::point_range(&key, line, 1, start, end);
         loss(state, "depth_truncation", path, Some(range), "parse", None);
         state.fired = true;
@@ -354,7 +354,7 @@ pub(crate) fn python_node(path: &Path, kind: &str, line: u64, start: u64, end: u
             "parser.python.visit_node",
             "unsupported",
         );
-        let key = crate::report_authority::path_key(&state.root, path);
+        let key = crate::identity::path_key(&state.root, path);
         let range = crate::report_authority::point_range(&key, line, 1, start, end);
         loss(
             state,
@@ -519,7 +519,7 @@ pub(crate) fn attribute_edge(location: &Location, origin: &str, name: &str) -> b
 }
 
 fn location_range(state: &State, path: &Path, line: u64, column: u64) -> Value {
-    let key = crate::report_authority::path_key(&state.root, path);
+    let key = crate::identity::path_key(&state.root, path);
     let start = state
         .sources
         .get(path)

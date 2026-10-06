@@ -46,7 +46,7 @@ impl LanguageAdapter for JsAdapter {
 
     fn can_handle(&self, path: &Path) -> bool {
         matches!(
-            crate::registry::language_id_for_path(path),
+            crate::language_metadata::language_id_for_path(path),
             Some("javascript" | "typescript")
         )
     }
@@ -1675,7 +1675,7 @@ fn collapse_signature_whitespace(s: &str) -> String {
 }
 
 fn is_typescript_file(path: &Path) -> bool {
-    crate::registry::language_id_for_path(path) == Some("typescript")
+    crate::language_metadata::language_id_for_path(path) == Some("typescript")
 }
 
 #[cfg(test)]

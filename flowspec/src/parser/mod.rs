@@ -155,9 +155,8 @@ pub trait LanguageAdapter: Send + Sync {
 }
 
 fn registry_grammar_source(path: &Path, content: &str) -> Option<(tree_sitter::Language, String)> {
-    let registry = crate::registry::Registry::default();
-    let descriptor = registry.language_for_path(path)?;
-    let language = match descriptor.grammar_version.as_str() {
+    let descriptor = crate::language_metadata::builtin_language_for_path(path)?;
+    let language = match descriptor.grammar_version {
         "tree-sitter-python/0.25.0" => tree_sitter_python::LANGUAGE.into(),
         "tree-sitter-rust/0.24.0" => tree_sitter_rust::LANGUAGE.into(),
         "tree-sitter-javascript/0.25.0" => tree_sitter_javascript::LANGUAGE.into(),

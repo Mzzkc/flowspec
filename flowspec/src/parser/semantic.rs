@@ -425,7 +425,7 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
     collector.file.normal_control = super::control::collect(source, root);
     (collector.file.signatures, collector.file.literal_calls) =
         super::contracts::collect(source, root);
-    let language_id = crate::registry::language_id_for_path(path);
+    let language_id = crate::language_metadata::language_id_for_path(path);
     let mut pending = vec![(root, 0usize)];
     while let Some((node, depth)) = pending.pop() {
         if depth > super::MAX_AST_DEPTH {
@@ -453,7 +453,7 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
             pending.push((child, depth + 1));
         }
     }
-    if crate::registry::language_id_for_path(path) == Some("rust") {
+    if crate::language_metadata::language_id_for_path(path) == Some("rust") {
         collector.file.executables = collect_rust_executables(source, path, root);
         collector.file.private_implementations = super::private_impl::collect(
             source,
@@ -461,13 +461,13 @@ pub(crate) fn collect(path: &Path, source: &str) -> SemanticFile {
             root,
         );
     }
-    if let Some(language) = crate::registry::language_id_for_path(path) {
+    if let Some(language) = crate::language_metadata::language_id_for_path(path) {
         collector.file.functions = super::normalization::collect(source, language, root);
     }
     // Value protocols currently cover ECMAScript lexical declarations only.
     // Other languages are handled by their executable graph prerequisites.
     if matches!(
-        crate::registry::language_id_for_path(path),
+        crate::language_metadata::language_id_for_path(path),
         Some("javascript" | "typescript")
     ) {
         collector.collect(root, 0, "", 0);

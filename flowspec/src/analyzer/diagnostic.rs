@@ -50,40 +50,7 @@ pub struct Evidence {
     pub context: Option<String>,
 }
 
-/// The 13 diagnostic patterns organized by failure pattern.
-///
-/// All 13 variants are defined for a stable contract even when only
-/// some are implemented. The pattern registry uses this enum for
-/// `--checks` filtering in the CLI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DiagnosticPattern {
-    /// Connected components with zero inbound external edges.
-    IsolatedCluster,
-    /// Symbols defined but never consumed.
-    DataDeadEnd,
-    /// Error handlers on some paths but not parallel ones.
-    PartialWiring,
-    /// Trait impls with no dispatch points, public methods with zero callers.
-    OrphanedImplementation,
-    /// Structural similarity in IR (not textual).
-    Duplication,
-    /// Serde annotations vs. API schemas, signatures vs. call sites.
-    ContractMismatch,
-    /// Cycles in the module dependency graph.
-    CircularDependency,
-    /// Cross-module references violating user-defined rules.
-    LayerViolation,
-    /// Old/new patterns coexisting with split callers.
-    IncompleteMigration,
-    /// Parallel functions with inconsistent treatment.
-    AsymmetricHandling,
-    /// Imports resolving to re-exports/shims/moved definitions.
-    StaleReference,
-    /// Imports where zero imported symbols are referenced downstream.
-    PhantomDependency,
-    /// Public symbols not re-exported through parent module.
-    MissingReexport,
-}
+pub use crate::catalog::DiagnosticPattern;
 
 /// Severity level of a diagnostic finding.
 ///
@@ -155,17 +122,6 @@ impl Confidence {
             "low" => Some(Confidence::Low),
             _ => None,
         }
-    }
-}
-
-impl DiagnosticPattern {
-    /// Returns the snake_case name of this pattern (for --checks filtering).
-    pub fn name(&self) -> &'static str {
-        crate::registry::pattern_descriptors()
-            .iter()
-            .find(|d| d.pattern == *self)
-            .expect("canonical diagnostic")
-            .id
     }
 }
 

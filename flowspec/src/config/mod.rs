@@ -112,7 +112,7 @@ fn read_config_file(path: &Path) -> Result<(ConfigFile, String), crate::error::F
         suggestion: "Correct the config YAML or pass a valid --config path".to_string(),
     };
     let bytes = std::fs::read(path).map_err(|e| failure(format!("read failed: {e}")))?;
-    let source_sha256 = crate::report_authority::digest(&bytes);
+    let source_sha256 = crate::identity::digest(&bytes);
     let content = std::str::from_utf8(&bytes).map_err(|e| failure(format!("read failed: {e}")))?;
 
     // Empty content or whitespace-only → defaults

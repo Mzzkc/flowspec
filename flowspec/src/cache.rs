@@ -261,7 +261,7 @@ pub(crate) fn reduce_parse_report(
     registry: &crate::registry::Registry,
     losses: &mut Vec<Value>,
 ) {
-    let path = crate::report_authority::path_key(root, file);
+    let path = crate::identity::path_key(root, file);
     for event in report["events"].as_array().into_iter().flatten() {
         let code = match event["code"].as_str().unwrap_or("unknown_event") {
             "parser_recovery" | "missing_node" => "parse_recovery",

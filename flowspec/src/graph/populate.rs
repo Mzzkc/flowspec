@@ -1091,7 +1091,7 @@ fn resolve_js_relative_import(
         .values()
         .filter(|path| {
             matches!(
-                crate::registry::language_id_for_path(path),
+                crate::language_metadata::language_id_for_path(path),
                 Some("javascript" | "typescript")
             )
         })
@@ -1507,7 +1507,7 @@ fn resolve_imports_impl(
     for (import_id, module_name, lookup_name, importing_file) in &imports_to_resolve {
         let binding_view = index.map(|index| index.binding_view(importing_file));
         let module_map = binding_view.as_ref().unwrap_or(module_map);
-        let language = crate::registry::language_id_for_path(importing_file);
+        let language = crate::language_metadata::language_id_for_path(importing_file);
         // Route to language-specific resolution based on module path format
         let target_file = if matches!(language, Some("javascript" | "typescript"))
             && (module_name.starts_with("./") || module_name.starts_with("../"))

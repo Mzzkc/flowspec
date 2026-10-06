@@ -1,195 +1,15 @@
-//! Authoritative language and diagnostic registry. Callbacks are runtime authority;
-//! explicit implementation IDs and versions bind them in deterministic metadata.
-use crate::analyzer::diagnostic::{Diagnostic, DiagnosticPattern};
-use crate::analyzer::patterns;
-use crate::parser::LanguageAdapter;
-use crate::{FlowspecError, Graph};
+//! Validated runtime registry: joins lower identities to actual callback wiring.
+pub use crate::catalog::{pattern_names, PATTERN_IDS};
+pub use crate::detector_registration::{pattern_descriptors, Detector, PatternDescriptor};
+use crate::error::FlowspecError;
+use crate::language_metadata::LanguageLookup;
+pub use crate::language_metadata::{language_id_for_path, language_names};
+use crate::language_registration::builtin_languages;
+pub use crate::language_registration::{
+    AdapterFactory, LanguageDescriptor, RecoveryProbe, RecoveryRange,
+};
 use serde_json::{json, Value};
-use std::path::Path;
-
-/// Adapter constructor used by ordinary analysis.
-pub type AdapterFactory = fn() -> Box<dyn LanguageAdapter>;
-/// Recovery observation in the actual grammar used by an adapter.
-pub type RecoveryProbe = fn(&Path, &str) -> bool;
-/// Concrete loss coordinates returned by a grammar probe.
-pub type RecoveryRange = fn(&Path, &str) -> Option<(u64, u64, u64, u64)>;
-/// Production detector callback.
-pub type Detector = fn(&Graph, &Path) -> Vec<Diagnostic>;
-
-/// An isolated adapter registration. Extensions omit dots. New languages must
-/// remain opt-in; registration does not qualify their semantics for launch.
-#[derive(Clone)]
-pub struct LanguageDescriptor {
-    pub id: String,
-    pub aliases: Vec<String>,
-    pub extensions: Vec<String>,
-    pub default_enabled: bool,
-    pub implementation_id: String,
-    pub adapter_version: String,
-    pub grammar_version: String,
-    pub capabilities: Vec<String>,
-    pub limitations: Vec<String>,
-    pub factory: Option<AdapterFactory>,
-    pub recovery_id: String,
-    pub recovery: Option<RecoveryProbe>,
-    pub recovery_range: Option<RecoveryRange>,
-}
-impl LanguageDescriptor {
-    /// Result-determining data only; no pointer addresses or map iteration order.
-    pub fn metadata(&self) -> Value {
-        json!({"id":self.id,"aliases":self.aliases,"extensions":self.extensions,
-        "default_enabled":self.default_enabled,"implementation_id":self.implementation_id,
-        "adapter_version":self.adapter_version,"grammar_version":self.grammar_version,
-        "capabilities":self.capabilities,"limitations":self.limitations,"recovery_id":self.recovery_id,
-        "recovery_available":self.recovery.is_some(),"recovery_range_available":self.recovery_range.is_some()})
-    }
-}
-
-/// Stable catalog order and preserved historical dispatch order are distinct.
-#[derive(Clone)]
-pub struct PatternDescriptor {
-    pub pattern: DiagnosticPattern,
-    pub id: &'static str,
-    pub dispatch_order: usize,
-    pub implementation_id: &'static str,
-    pub required_capabilities: &'static [&'static str],
-    pub applicability: &'static str,
-    pub detector: Option<Detector>,
-}
-impl PatternDescriptor {
-    pub fn metadata(&self) -> Value {
-        json!({"id":self.id,"dispatch_order":self.dispatch_order,"implementation_id":self.implementation_id,
-        "required_capabilities":self.required_capabilities,"applicability":self.applicability,"default_enabled":true,
-        "detector_version":env!("CARGO_PKG_VERSION")})
-    }
-}
-
-macro_rules! diagnostic_catalog {
-    ($(($variant:ident, $id:literal, $module:ident, $order:literal, [$($cap:literal),*], $app:literal)),*) => {
-        /// Canonical accepted catalog order.
-        pub const PATTERN_IDS: [&str;13] = [$($id),*];
-        /// Canonical descriptors bind each name to its actual production detector.
-        pub fn pattern_descriptors() -> Vec<PatternDescriptor> { vec![$(PatternDescriptor {
-            pattern:DiagnosticPattern::$variant, id:$id, dispatch_order:$order,
-            implementation_id:concat!("flowspec.detector.", $id), required_capabilities:&[$($cap),*],
-            applicability:$app, detector:Some(patterns::$module::detect)
-        }),*] }
-    }
-}
-diagnostic_catalog!(
-    (
-        IsolatedCluster,
-        "isolated_cluster",
-        isolated_cluster,
-        0,
-        ["symbols", "calls", "resolution"],
-        "selected_language"
-    ),
-    (
-        DataDeadEnd,
-        "data_dead_end",
-        data_dead_end,
-        1,
-        [
-            "symbols",
-            "calls",
-            "value_references",
-            "exports",
-            "registration",
-            "consumer_closure"
-        ],
-        "selected_language"
-    ),
-    (
-        PartialWiring,
-        "partial_wiring",
-        partial_wiring,
-        10,
-        ["symbols", "calls", "control_flow"],
-        "selected_language"
-    ),
-    (
-        OrphanedImplementation,
-        "orphaned_impl",
-        orphaned_implementation,
-        4,
-        ["symbols", "calls", "resolution", "types", "implementations"],
-        "selected_language"
-    ),
-    (
-        Duplication,
-        "duplication",
-        duplication,
-        11,
-        ["symbols", "binding_structure"],
-        "selected_language"
-    ),
-    (
-        ContractMismatch,
-        "contract_mismatch",
-        contract_mismatch,
-        8,
-        ["symbols", "calls", "control_flow", "types"],
-        "selected_language"
-    ),
-    (
-        CircularDependency,
-        "circular_dependency",
-        circular_dependency,
-        3,
-        ["imports", "dependency_edges"],
-        "selected_language"
-    ),
-    (
-        LayerViolation,
-        "layer_violation",
-        layer_violation,
-        6,
-        ["imports", "dependency_edges"],
-        "explicit_layer_policy"
-    ),
-    (
-        IncompleteMigration,
-        "incomplete_migration",
-        incomplete_migration,
-        9,
-        ["imports", "resolution"],
-        "selected_language"
-    ),
-    (
-        AsymmetricHandling,
-        "asymmetric_handling",
-        asymmetric_handling,
-        12,
-        ["symbols", "calls", "control_flow"],
-        "selected_language"
-    ),
-    (
-        StaleReference,
-        "stale_reference",
-        stale_reference,
-        7,
-        ["imports", "resolution"],
-        "selected_language"
-    ),
-    (
-        PhantomDependency,
-        "phantom_dependency",
-        phantom_dependency,
-        2,
-        ["imports", "exports", "value_references"],
-        "selected_language"
-    ),
-    (
-        MissingReexport,
-        "missing_reexport",
-        missing_reexport,
-        5,
-        ["imports", "exports", "value_references"],
-        "selected_language"
-    )
-);
-
+use std::path::{Path, PathBuf};
 /// Validated, instance-local registry. No global mutable registration state.
 #[derive(Clone)]
 pub struct Registry {
@@ -344,7 +164,7 @@ impl Registry {
         json!({"digest":self.digest()})
     }
     pub fn digest(&self) -> String {
-        crate::report_authority::hash("registry", &self.metadata())
+        crate::identity::hash("registry", &self.metadata())
     }
 }
 fn registry_error(reason: &str) -> FlowspecError {
@@ -353,113 +173,6 @@ fn registry_error(reason: &str) -> FlowspecError {
         suggestion: "provide a unique complete registration".into(),
     }
 }
-/// Canonical default names, used by help and error rendering.
-pub fn language_names() -> String {
-    default_registry()
-        .languages()
-        .iter()
-        .map(|d| d.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-pub fn pattern_names() -> String {
-    PATTERN_IDS.join(", ")
-}
-/// Default classification; extension-aware callers with custom registries use their instance.
-pub fn language_id_for_path(path: &Path) -> Option<&'static str> {
-    default_registry()
-        .language_for_path(path)
-        .map(|d| d.id.as_str())
-}
-fn python_factory() -> Box<dyn LanguageAdapter> {
-    Box::new(crate::parser::python::PythonAdapter::new())
-}
-fn js_factory() -> Box<dyn LanguageAdapter> {
-    Box::new(crate::parser::javascript::JsAdapter::new())
-}
-fn ts_factory() -> Box<dyn LanguageAdapter> {
-    Box::new(crate::parser::typescript::TsAdapter::new())
-}
-fn rust_factory() -> Box<dyn LanguageAdapter> {
-    Box::new(crate::parser::rust::RustAdapter::new())
-}
-fn builtin_languages() -> Vec<LanguageDescriptor> {
-    vec![
-        LanguageDescriptor {
-            id: "python".into(),
-            aliases: vec!["py".into()],
-            extensions: vec!["py".into()],
-            default_enabled: true,
-            implementation_id: "flowspec.adapter.python".into(),
-            adapter_version: "structured-v2".into(),
-            grammar_version: "tree-sitter-python/0.25.0".into(),
-            capabilities: crate::parser::report::implemented_capabilities("python")
-                .iter()
-                .map(|c| c.as_str().into())
-                .collect(),
-            limitations: vec![],
-            factory: Some(python_factory),
-            recovery_id: "flowspec.recovery.python".into(),
-            recovery: Some(crate::parser::source_has_parse_loss),
-            recovery_range: Some(crate::parser::source_parse_loss_range),
-        },
-        LanguageDescriptor {
-            id: "javascript".into(),
-            aliases: vec!["js".into()],
-            extensions: vec!["js".into(), "jsx".into(), "mjs".into(), "cjs".into()],
-            default_enabled: true,
-            implementation_id: "flowspec.adapter.js".into(),
-            adapter_version: "structured-v2".into(),
-            grammar_version: "tree-sitter-javascript/0.25.0".into(),
-            capabilities: crate::parser::report::implemented_capabilities("javascript")
-                .iter()
-                .map(|c| c.as_str().into())
-                .collect(),
-            limitations: vec![],
-            factory: Some(js_factory),
-            recovery_id: "flowspec.recovery.javascript".into(),
-            recovery: Some(crate::parser::source_has_parse_loss),
-            recovery_range: Some(crate::parser::source_parse_loss_range),
-        },
-        LanguageDescriptor {
-            id: "typescript".into(),
-            aliases: vec!["ts".into()],
-            extensions: vec!["ts".into(), "tsx".into()],
-            default_enabled: true,
-            implementation_id: "flowspec.adapter.typescript".into(),
-            adapter_version: "structured-v2".into(),
-            grammar_version: "tree-sitter-typescript/0.23.2+tsx".into(),
-            capabilities: crate::parser::report::implemented_capabilities("typescript")
-                .iter()
-                .map(|c| c.as_str().into())
-                .collect(),
-            limitations: vec!["advanced_type_evaluation_unavailable".into()],
-            factory: Some(ts_factory),
-            recovery_id: "flowspec.recovery.typescript".into(),
-            recovery: Some(crate::parser::source_has_parse_loss),
-            recovery_range: Some(crate::parser::source_parse_loss_range),
-        },
-        LanguageDescriptor {
-            id: "rust".into(),
-            aliases: vec!["rs".into()],
-            extensions: vec!["rs".into()],
-            default_enabled: true,
-            implementation_id: "flowspec.adapter.rust".into(),
-            adapter_version: "structured-v2".into(),
-            grammar_version: "tree-sitter-rust/0.24.0".into(),
-            capabilities: crate::parser::report::implemented_capabilities("rust")
-                .iter()
-                .map(|c| c.as_str().into())
-                .collect(),
-            limitations: vec![],
-            factory: Some(rust_factory),
-            recovery_id: "flowspec.recovery.rust".into(),
-            recovery: Some(crate::parser::source_has_parse_loss),
-            recovery_range: Some(crate::parser::source_parse_loss_range),
-        },
-    ]
-}
-
 /// Read-only built-in classification authority, shared by parser and detector callers.
 pub fn default_registry() -> &'static Registry {
     static REGISTRY: std::sync::LazyLock<Registry> = std::sync::LazyLock::new(Registry::default);
@@ -495,3 +208,16 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "dependency_edges",
     "resolution",
 ];
+
+impl LanguageLookup for Registry {
+    fn language_id_for_path(&self, path: &Path) -> Option<&str> {
+        self.language_for_path(path).map(|d| d.id.as_str())
+    }
+}
+// The preserved public constructor lives at the runtime composition boundary.
+// ModuleIndex itself depends only on lower language lookup and naming primitives.
+impl crate::graph::ModuleIndex {
+    pub fn new(root: &Path, files: &[PathBuf], registry: &Registry) -> Self {
+        Self::from_language_metadata(root, files, registry)
+    }
+}

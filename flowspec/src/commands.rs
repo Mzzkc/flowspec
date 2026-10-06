@@ -1933,7 +1933,7 @@ pub fn expand_graph_tables(packed: &serde_json::Value) -> Option<serde_json::Val
         };
         let kind = lookup("kinds", &row[3])?;
         let mut subject = json!({"path_key":path,"language":lookup("languages",&row[1])?,"qualified_name":qualified,"construct_kind":kind});
-        let key = crate::report_authority::hash("binding", &subject);
+        let key = crate::identity::hash("binding", &subject);
         subject["binding_id"] = json!(key);
         let r = lookup("ranges", &row[4])?;
         let range = json!({"path_key":path,"start_byte":r[0],"end_byte":r[1],"start_line":r[2],"start_column":r[3],"end_line":r[4],"end_column":r[5]});
@@ -1944,7 +1944,7 @@ pub fn expand_graph_tables(packed: &serde_json::Value) -> Option<serde_json::Val
         let source = entities.get(row[1].as_u64()? as usize)?["key"].clone();
         let target = entities.get(row[2].as_u64()? as usize)?["key"].clone();
         let kind = lookup("kinds", &row[0])?;
-        let key = crate::report_authority::hash(
+        let key = crate::identity::hash(
             "binding",
             &json!({"kind":kind,"source_key":source,"target_key":target}),
         );
@@ -1969,7 +1969,7 @@ pub fn expand_graph_tables(packed: &serde_json::Value) -> Option<serde_json::Val
             .iter()
             .map(|i| edges.get(i.as_u64()? as usize).map(|e| e["key"].clone()))
             .collect::<Option<_>>()?;
-        let key = crate::report_authority::hash(
+        let key = crate::identity::hash(
             "binding",
             &json!({"kind":"call","node_keys":nodes,"edge_keys":edge_keys}),
         );

@@ -74,7 +74,7 @@ pub enum FlowspecError {
     /// An unsupported language was requested.
     #[error(
         "unsupported language: {language} (fix: supported languages are {})",
-        crate::registry::language_names()
+        crate::language_metadata::language_names()
     )]
     UnsupportedLanguage {
         /// The language that was requested.
@@ -84,7 +84,7 @@ pub enum FlowspecError {
     /// An unknown diagnostic pattern was specified in --checks.
     #[error(
         "unknown diagnostic pattern: {pattern} (fix: valid patterns are {})",
-        crate::registry::pattern_names()
+        crate::catalog::pattern_names()
     )]
     UnknownPattern {
         /// The pattern name that was not recognized.

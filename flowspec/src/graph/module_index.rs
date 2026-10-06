@@ -1,6 +1,7 @@
 //! Qualified module identities for production import binding. A language name
 //! alone is insufficient: packages/crates may also contain same-name modules.
-use crate::registry::Registry;
+use crate::language_metadata::LanguageLookup;
+use crate::module_paths;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -17,48 +18,52 @@ pub struct ModuleIndex {
     files: BTreeMap<PathBuf, (String, PathBuf)>,
 }
 impl ModuleIndex {
-    pub fn new(root: &Path, files: &[PathBuf], registry: &Registry) -> Self {
+    pub(crate) fn from_language_metadata(
+        root: &Path,
+        files: &[PathBuf],
+        registry: &impl LanguageLookup,
+    ) -> Self {
         let mut index = Self {
             entries: BTreeMap::new(),
             files: BTreeMap::new(),
         };
         let mut groups: BTreeMap<(String, PathBuf), Vec<PathBuf>> = BTreeMap::new();
         for file in files {
-            let Some(language) = registry.language_for_path(file) else {
+            let Some(language) = registry.language_id_for_path(file) else {
                 continue;
             };
-            let package = package_anchor(root, file, &language.id);
+            let package = package_anchor(root, file, language);
             index
                 .files
-                .insert(file.clone(), (language.id.clone(), package.clone()));
+                .insert(file.clone(), (language.to_string(), package.clone()));
             groups
-                .entry((language.id.clone(), package))
+                .entry((language.to_string(), package))
                 .or_default()
                 .push(file.clone());
         }
         for ((language, package), files) in groups {
             let refs: Vec<_> = files.iter().collect();
             let prefix = if language == "python" {
-                crate::find_common_prefix(&refs)
+                module_paths::find_common_prefix(&refs)
             } else {
-                crate::find_js_common_prefix(&refs)
+                module_paths::find_js_common_prefix(&refs)
             };
             let crate_roots = if language == "rust" {
-                crate::find_rust_crate_roots(&refs)
+                module_paths::find_rust_crate_roots(&refs)
             } else {
                 Vec::new()
             };
             for path in files {
                 let anchor = if language == "rust" {
-                    crate::closest_rust_crate_root(&path, &crate_roots).unwrap_or(&prefix)
+                    module_paths::closest_rust_crate_root(&path, &crate_roots).unwrap_or(&prefix)
                 } else {
                     &prefix
                 };
                 let relative = path.strip_prefix(anchor).unwrap_or(&path);
                 let module = match language.as_str() {
-                    "python" => crate::path_to_module_name(relative),
-                    "javascript" | "typescript" => crate::js_path_to_module_key(relative),
-                    "rust" => crate::rust_path_to_module_key(relative),
+                    "python" => module_paths::path_to_module_name(relative),
+                    "javascript" | "typescript" => module_paths::js_path_to_module_key(relative),
+                    "rust" => module_paths::rust_path_to_module_key(relative),
                     _ => path.to_string_lossy().into_owned(),
                 };
                 if !module.is_empty() {
@@ -135,4 +140,40 @@ fn package_anchor(root: &Path, file: &Path, language: &str) -> PathBuf {
         }
     }
     root.to_path_buf()
+}
+
+#[cfg(test)]
+mod metadata_boundary_tests {
+    use super::*;
+
+    struct MetadataOnly;
+    impl LanguageLookup for MetadataOnly {
+        fn language_id_for_path(&self, path: &Path) -> Option<&str> {
+            match path.extension()?.to_str()? {
+                "py" => Some("python"),
+                "mjs" => Some("javascript"),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn source_module_binding_needs_metadata_without_any_callback_registry() {
+        let root = Path::new("/metadata-only");
+        let python = root.join("unit.py");
+        let javascript = root.join("unit.mjs");
+        let ignored = root.join("unit.unknown");
+        let index = ModuleIndex::from_language_metadata(
+            root,
+            &[python.clone(), javascript.clone(), ignored.clone()],
+            &MetadataOnly,
+        );
+        assert_eq!(index.binding_view(&python).get("unit"), Some(&python));
+        assert_eq!(
+            index.binding_view(&javascript).get("unit"),
+            Some(&javascript)
+        );
+        assert!(!index.files.contains_key(&ignored));
+        assert_eq!(index.files.len(), 2);
+    }
 }

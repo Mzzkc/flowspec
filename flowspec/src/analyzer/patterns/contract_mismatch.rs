@@ -214,7 +214,7 @@ fn detect_decorator_violations(
 /// - `"javascript"` for `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`
 /// - `"unknown"` for unrecognized or missing extensions
 fn language_from_path(path: &Path) -> &'static str {
-    crate::registry::language_id_for_path(path).unwrap_or("unknown")
+    crate::language_metadata::language_id_for_path(path).unwrap_or("unknown")
 }
 
 /// Phase 2: Cross-file same-name functions with different parameter counts.
