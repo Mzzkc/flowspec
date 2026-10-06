@@ -94,6 +94,46 @@ def run_json(binary, args, cwd):
     return value
 
 
+def third_party_files(root):
+    """Consume the existing selected dependency notices, byte for byte.
+
+    The committed source index determines the finite member set. A checksum or
+    path mismatch is a refusal, never an extra-member or missing-notice waiver.
+    This packages the source declaration; selected-graph release review is separate.
+    """
+    files = {name: regular_bytes(root / name, 1000000) for name in
+             ('THIRD-PARTY-NOTICES', 'THIRD-PARTY-LICENSES/index.json')}
+    index = json.loads(files['THIRD-PARTY-LICENSES/index.json'])
+    if index.get('missing_notice_packages') != [] or not index.get('packages'):
+        raise ValueError('source notice index has missing coverage')
+    packages = set()
+    for package in index['packages']:
+        identity = (package['name'], package['version'], package['source'])
+        if identity in packages or package['notice_status'] != 'copied_original_bytes' or not package['notice_files']:
+            raise ValueError('invalid or duplicate source notice package')
+        packages.add(identity)
+        for notice in package['notice_files']:
+            name = notice['path']
+            path = Path(name)
+            if (path.is_absolute() or path.as_posix() != name or '..' in path.parts
+                    or len(path.parts) < 3 or path.parts[0] != 'THIRD-PARTY-LICENSES'
+                    or name in files or not re.fullmatch('[a-f0-9]{64}', notice['sha256'])):
+                raise ValueError('invalid or duplicate source notice member')
+            value = regular_bytes(root / path, 1000000)
+            if sha256(value) != notice['sha256']:
+                raise ValueError('source notice checksum mismatch: ' + name)
+            files[name] = value
+    observed = set()
+    for path in (root / 'THIRD-PARTY-LICENSES').rglob('*'):
+        if path.is_symlink() or (not path.is_dir() and not path.is_file()):
+            raise ValueError('unsafe source notice member')
+        if path.is_file():
+            observed.add(path.relative_to(root).as_posix())
+    if observed != set(files) - {'THIRD-PARTY-NOTICES'}:
+        raise ValueError('source notice directory coverage mismatch')
+    return files
+
+
 def build_package(root, binary, out, expected_sha256):
     root, binary, out = Path(root).absolute(), Path(binary).absolute(), Path(out).absolute()
     validate_skill(root / 'skills/flowspec')
@@ -123,12 +163,15 @@ def build_package(root, binary, out, expected_sha256):
         raise ValueError('candidate producer does not match package source')
     if a['provenance']['registry']['digest'] != catalog['digest']:
         raise ValueError('candidate registry differs from public catalog')
-    source_paths = ['skills/flowspec', 'scripts/package-skill.py', 'LICENSE', 'LICENSE-AGPL']
+    source_paths = ['skills/flowspec', 'scripts/package-skill.py', 'LICENSE', 'LICENSE-AGPL',
+                    'THIRD-PARTY-NOTICES', 'THIRD-PARTY-LICENSES']
     dirty = subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain', '--', *source_paths], text=True)
     if dirty:
         raise ValueError('package source must be committed and clean')
     files = {name: regular_bytes(root / 'skills/flowspec' / name) for name in SKILL_FILES}
     files.update({name: regular_bytes(root / name, 1000000) for name in ('LICENSE','LICENSE-AGPL')})
+    notices = third_party_files(root)
+    files.update(notices)
     files['bin/flowspec'] = data
     manifest = {
         'schema': 'flowspec.skill-package.v1', 'release_qualified': False,
@@ -137,6 +180,8 @@ def build_package(root, binary, out, expected_sha256):
         'registry_digest': catalog['digest'],
         'preflight_config_digest': a['provenance']['config']['effective_digest'],
         'members': {name: sha256(value) for name,value in sorted(files.items())},
+        'third_party': {'index_sha256': sha256(notices['THIRD-PARTY-LICENSES/index.json']),
+                        'members': {name: sha256(value) for name, value in sorted(notices.items())}},
     }
     encoded = (json.dumps(manifest, sort_keys=True, indent=2)+'\n').encode()
     validate_text(encoded.decode())

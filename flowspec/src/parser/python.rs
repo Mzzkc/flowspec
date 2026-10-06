@@ -1572,7 +1572,10 @@ fn extract_all_calls(
                     to: SymbolId::default(),
                     kind: ReferenceKind::Call,
                     location: node_location(path, node),
-                    resolution: ResolutionStatus::Partial(format!("call:{}", name)),
+                    resolution: ResolutionStatus::Partial(format!(
+                        "call:{}",
+                        python_call_lookup(func_node, content, &name)
+                    )),
                 });
             }
         }
@@ -1583,6 +1586,121 @@ fn extract_all_calls(
     for child in node.children(&mut cursor) {
         extract_all_calls(result, content, path, child, depth + 1);
     }
+}
+
+/// Preserve Python's compile-time namespace decision at the source call site.
+/// A parameter or assigned local is not a same-name module function. Unknown
+/// callable values remain explicit unresolved calls; no executable edge is invented.
+fn python_call_lookup(node: Node, content: &[u8], name: &str) -> String {
+    if node.kind() != "identifier" {
+        return name.to_string();
+    }
+    let mut ancestor = node.parent();
+    while let Some(current) = ancestor {
+        if current.kind() == "lambda"
+            && current
+                .child_by_field_name("parameters")
+                .is_some_and(|p| parameter_contains_name(p, content, name))
+        {
+            return format!("python-local:{name}");
+        }
+        if current.kind() == "function_definition" {
+            // Defaults/annotations execute before this function's local namespace.
+            if current.child_by_field_name("parameters").is_some_and(|p| {
+                p.start_byte() <= node.start_byte() && node.end_byte() <= p.end_byte()
+            }) {
+                ancestor = current.parent();
+                continue;
+            }
+            let binding = current
+                .child_by_field_name("body")
+                .map(|body| python_body_lookup(body, content, name, 0))
+                .unwrap_or(0);
+            if binding == 4 {
+                return format!("python-global:{name}");
+            }
+            if binding == 3 {
+                ancestor = current.parent();
+                continue;
+            }
+            if binding == 2
+                || current
+                    .child_by_field_name("parameters")
+                    .is_some_and(|p| parameter_contains_name(p, content, name))
+            {
+                return format!("python-local:{name}");
+            }
+            // A nested definition is a real local callable. Stop before an
+            // outer parameter/global declaration with the same spelling.
+            if binding == 1 {
+                return name.to_string();
+            }
+        }
+        ancestor = current.parent();
+    }
+    name.to_string()
+}
+
+// 4 = global, 3 = nonlocal, 2 = assigned value, 1 = local definition.
+// Never inspect a nested function/class namespace when classifying its parent.
+fn python_body_lookup(node: Node, content: &[u8], name: &str, depth: usize) -> u8 {
+    if depth > super::MAX_AST_DEPTH {
+        return 0;
+    }
+    if matches!(node.kind(), "function_definition" | "class_definition") {
+        return u8::from(
+            node.child_by_field_name("name")
+                .is_some_and(|n| node_text(content, n) == name),
+        );
+    }
+    if node.kind() == "lambda" {
+        return 0;
+    }
+    if matches!(node.kind(), "global_statement" | "nonlocal_statement") {
+        let mut cursor = node.walk();
+        if node
+            .named_children(&mut cursor)
+            .any(|n| n.kind() == "identifier" && node_text(content, n) == name)
+        {
+            return if node.kind() == "global_statement" {
+                4
+            } else {
+                3
+            };
+        }
+        return 0;
+    }
+    if matches!(
+        node.kind(),
+        "assignment" | "augmented_assignment" | "for_statement"
+    ) && node
+        .child_by_field_name("left")
+        .is_some_and(|n| python_binding_target(n, content, name))
+    {
+        return 2;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .map(|n| python_body_lookup(n, content, name, depth + 1))
+        .max()
+        .unwrap_or(0)
+}
+
+fn python_binding_target(node: Node, content: &[u8], name: &str) -> bool {
+    if node.kind() == "identifier" {
+        return node_text(content, node) == name;
+    }
+    if !matches!(
+        node.kind(),
+        "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern"
+    ) {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|n| python_binding_target(n, content, name));
+    found
 }
 
 /// Extracts the callee name from a call expression's `function` field.

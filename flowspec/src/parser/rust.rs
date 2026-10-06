@@ -623,6 +623,7 @@ fn extract_use_tree(
                         .or_else(|| module_path.map(|s| s.to_string()));
                     add_import_symbol(
                         result,
+                        content,
                         &alias_name,
                         visibility,
                         path,
@@ -638,13 +639,22 @@ fn extract_use_tree(
                     match item.kind() {
                         "identifier" => {
                             let name = node_text(content, item).to_string();
-                            add_import_symbol(result, &name, visibility, path, item, module_path);
+                            add_import_symbol(
+                                result,
+                                content,
+                                &name,
+                                visibility,
+                                path,
+                                item,
+                                module_path,
+                            );
                         }
                         "use_as_clause" => {
                             if let Some(alias_node) = item.child_by_field_name("alias") {
                                 let alias_name = node_text(content, alias_node).to_string();
                                 add_import_symbol(
                                     result,
+                                    content,
                                     &alias_name,
                                     visibility,
                                     path,
@@ -660,6 +670,7 @@ fn extract_use_tree(
                             {
                                 add_import_symbol(
                                     result,
+                                    content,
                                     &parent_name,
                                     visibility,
                                     path,
@@ -688,7 +699,9 @@ fn extract_use_tree(
                                 } else {
                                     Some(extended_path.as_str())
                                 };
-                                add_import_symbol(result, &name, visibility, path, item, mp);
+                                add_import_symbol(
+                                    result, content, &name, visibility, path, item, mp,
+                                );
                             }
                         }
                         _ => {}
@@ -725,6 +738,7 @@ fn extract_use_tree(
                             let child_module_path = extract_module_path(content, child);
                             add_import_symbol(
                                 result,
+                                content,
                                 &name,
                                 visibility,
                                 path,
@@ -751,7 +765,7 @@ fn extract_use_tree(
             "identifier" if node.kind() == "use_declaration" => {
                 // Simple import: `use something;`, not a path segment.
                 let name = node_text(content, child).to_string();
-                add_import_symbol(result, &name, visibility, path, child, module_path);
+                add_import_symbol(result, content, &name, visibility, path, child, module_path);
             }
             _ => {}
         }
@@ -879,6 +893,7 @@ fn extract_module_path(content: &[u8], node: Node) -> Option<String> {
 /// the Python and JavaScript adapters.
 fn add_import_symbol(
     result: &mut ParseOutput,
+    content: &[u8],
     name: &str,
     visibility: Visibility,
     path: &Path,
@@ -894,6 +909,17 @@ fn add_import_symbol(
     if let Some(mp) = module_path {
         if !mp.is_empty() {
             annotations.push(format!("from:{}", mp));
+        }
+    }
+
+    // The bound name and original leaf are distinct for both standalone and
+    // grouped `use ... as ...` forms. Resolution must look up the original leaf.
+    if node.kind() == "use_as_clause" {
+        if let Some(original) = node.child_by_field_name("path").and_then(|n| {
+            last_identifier_segment(content, n)
+                .or_else(|| (n.kind() == "identifier").then(|| node_text(content, n).to_string()))
+        }) {
+            annotations.push(format!("original_name:{original}"));
         }
     }
 

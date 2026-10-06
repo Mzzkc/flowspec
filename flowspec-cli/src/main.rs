@@ -56,7 +56,7 @@ struct Cli {
 enum Commands {
     /// Print the actual language and diagnostic registry, including its digest.
     Registry,
-    /// Expand JSON report records from stdin using the public lossless reader.
+    /// Expand JSON report records from stdin (128 MiB raw acquisition capacity).
     ExpandReport,
     /// Full analysis — parse, build graph, produce manifest.
     Analyze {
@@ -432,7 +432,8 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
         }
         Commands::ExpandReport => {
             use std::io::Read;
-            const INPUT_LIMIT: u64 = 64 * 1024 * 1024;
+            // Raw acquisition capacity is separate from the decoded record-node budget.
+            const INPUT_LIMIT: u64 = 128 * 1024 * 1024;
             let mut input = Vec::new();
             std::io::stdin()
                 .take(INPUT_LIMIT + 1)
@@ -442,7 +443,7 @@ fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
                 })?;
             if input.len() as u64 > INPUT_LIMIT {
                 return Err(FlowspecError::Manifest {
-                    reason: "report input exceeds 64 MiB limit".into(),
+                    reason: "report input exceeds 128 MiB raw acquisition limit".into(),
                 });
             }
             let value: serde_json::Value =

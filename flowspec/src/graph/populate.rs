@@ -751,6 +751,13 @@ fn resolve_callee(
     symbol_id_map: &[(usize, SymbolId)],
     symbols: &[Symbol],
 ) -> SymbolId {
+    // Source-owned Python lookup markers are decisions about namespaces,
+    // not callable identities. Dynamic locals cannot fall back to module names.
+    if callee_name.starts_with("python-local:") {
+        return SymbolId::default();
+    }
+    let python_global = callee_name.strip_prefix("python-global:");
+    let callee_name = python_global.unwrap_or(callee_name);
     // A Rust associated consumer carries its explicit owner. Never replace
     // an unknown owner with an unrelated same-name method in this file.
     if let Some((owner, method)) = callee_name.rsplit_once("::") {
@@ -823,7 +830,11 @@ fn resolve_callee(
         .get_symbol(*from_id)
         .filter(|s| s.location.file.extension().is_some_and(|ext| ext == "py"))
     {
-        let mut namespace = from.qualified_name.as_str();
+        let mut namespace = if python_global.is_some() {
+            from.qualified_name.split("::").next().unwrap_or("")
+        } else {
+            from.qualified_name.as_str()
+        };
         loop {
             // Methods do not capture their class namespace as a lexical scope.
             let class_namespace = symbols
@@ -1154,6 +1165,45 @@ fn resolve_rust_module_path(
     }
 }
 
+/// Resolve an exact file module followed by source-declared inline namespaces.
+/// A longest file prefix alone is insufficient: every inline segment must have
+/// an actual module scope and the caller selects a fully qualified definition.
+fn rust_inline_binding(
+    graph: &Graph,
+    module: &str,
+    importing_file: &std::path::Path,
+    view: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> Option<(std::path::PathBuf, String)> {
+    let absolute = if module.starts_with("crate::") {
+        module.to_string()
+    } else if module.starts_with("self::") || module.starts_with("super::") {
+        resolve_relative_rust_path(module, &find_module_key_for_file(importing_file, view)?)
+    } else {
+        format!(
+            "{}::{module}",
+            find_module_key_for_file(importing_file, view)?
+        )
+    };
+    let parts: Vec<_> = absolute.split("::").collect();
+    for count in (1..parts.len()).rev() {
+        let Some(file) = view.get(&parts[..count].join("::")) else {
+            continue;
+        };
+        let suffix = parts[count..].join("::");
+        if !graph.declares_inline_namespace(file, &suffix) {
+            return None;
+        }
+        for n in 1..count {
+            let parent = view.get(&parts[..n].join("::"))?;
+            if !graph.declares_file_module(parent, parts[n]) {
+                return None;
+            }
+        }
+        return Some((file.clone(), suffix));
+    }
+    None
+}
+
 /// Finds the module map key for a given file path (reverse lookup).
 fn find_module_key_for_file(
     file: &std::path::Path,
@@ -1334,15 +1384,32 @@ pub fn resolve_qualified_imports(graph: &mut Graph, index: &super::ModuleIndex) 
             } else {
                 format!("{current}::{module}")
             };
-            let target_file = view.get(&absolute)?;
+            let inline = if view.contains_key(&absolute) {
+                None
+            } else {
+                rust_inline_binding(graph, &absolute, &call.location.file, &view)
+            };
+            let target_file = view
+                .get(&absolute)
+                .or_else(|| inline.as_ref().map(|(file, _)| file))?;
             let parts: Vec<_> = absolute.split("::").collect();
-            for n in 1..parts.len() {
+            let file_parts = if let Some((_, namespace)) = &inline {
+                parts.len() - namespace.split("::").count()
+            } else {
+                parts.len()
+            };
+            for n in 1..file_parts {
                 let parent = view.get(&parts[..n].join("::"))?;
                 if !graph.declares_file_module(parent, parts[n]) {
                     return None;
                 }
             }
-            let expected_name = format!("{}::{leaf}", target_file.file_name()?.to_string_lossy());
+            let stem = target_file.file_name()?.to_string_lossy();
+            let expected_name = if let Some((_, namespace)) = &inline {
+                format!("{stem}::{namespace}::{leaf}")
+            } else {
+                format!("{stem}::{leaf}")
+            };
             let candidates: Vec<_> = graph
                 .all_symbols()
                 .filter(|(_, symbol)| {
@@ -1473,7 +1540,18 @@ fn resolve_imports_impl(
                 None
             }
         };
-        let target_file = target_file.as_ref();
+        let inline_binding = if target_file.is_none() && language == Some("rust") {
+            rust_inline_binding(graph, module_name, importing_file, module_map)
+        } else {
+            None
+        };
+        let rust_namespace = inline_binding
+            .as_ref()
+            .map(|(_, namespace)| namespace.as_str())
+            .unwrap_or("");
+        let target_file = target_file
+            .as_ref()
+            .or_else(|| inline_binding.as_ref().map(|(file, _)| file));
 
         #[cfg(feature = "fault_probe")]
         if target_file.is_some()
@@ -1591,8 +1669,32 @@ fn resolve_imports_impl(
             // Find a symbol with matching name. Prefer Function/Method/Class over others.
             let mut best_match: Option<SymbolId> = None;
             let mut any_match: Option<SymbolId> = None;
+            let rust_expected = target_file.file_name().map(|stem| {
+                if rust_namespace.is_empty() {
+                    format!("{}::{lookup_name}", stem.to_string_lossy())
+                } else {
+                    format!(
+                        "{}::{rust_namespace}::{lookup_name}",
+                        stem.to_string_lossy()
+                    )
+                }
+            });
+            let mut rust_matches = 0;
 
             for (sym_id, sym_name, sym_kind) in symbols {
+                if language == Some("rust") {
+                    let Some(symbol) = graph.get_symbol(*sym_id) else {
+                        continue;
+                    };
+                    if symbol.annotations.iter().any(|a| a == "import")
+                        || Some(&symbol.qualified_name) != rust_expected.as_ref()
+                    {
+                        continue;
+                    }
+                    rust_matches += 1;
+                    any_match = Some(*sym_id);
+                    continue;
+                }
                 if sym_name == lookup_name {
                     if any_match.is_none() {
                         any_match = Some(*sym_id);
@@ -1607,7 +1709,11 @@ fn resolve_imports_impl(
                 }
             }
 
-            let target_id = best_match.or(any_match);
+            let target_id = if language == Some("rust") {
+                (rust_matches == 1).then_some(any_match).flatten()
+            } else {
+                best_match.or(any_match)
+            };
 
             if let Some(target_id) = target_id {
                 // Get the import symbol's location for the new reference

@@ -146,6 +146,25 @@ impl Graph {
         })
     }
 
+    /// Confirm the complete inline namespace from actual parser scope parents.
+    pub(crate) fn declares_inline_namespace(&self, path: &Path, namespace: &str) -> bool {
+        self.file_scopes.get(path).is_some_and(|ids| ids.iter().any(|id| {
+            let mut current = Some(*id);
+            let mut names = Vec::new();
+            while let Some(id) = current {
+                let scope = &self.scopes[id];
+                if scope.kind == ScopeKind::File {
+                    names.reverse();
+                    return names.join("::") == namespace;
+                }
+                if scope.kind != ScopeKind::Module { return false; }
+                names.push(scope.name.clone());
+                current = scope.parent;
+            }
+            false
+        }))
+    }
+
     pub(crate) fn record_dynamic_export(&mut self, path: PathBuf) {
         self.dynamic_exports.insert(path);
     }
