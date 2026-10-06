@@ -128,9 +128,11 @@ fn operation(
     result: &str,
 ) {
     let index = state.operations.len();
-    state.operations.push(json!({"index":index,"operation":name,"case":format!("{:?}",state.plan.case),
+    state.operations.push(
+        json!({"index":index,"operation":name,"case":format!("{:?}",state.plan.case),
         "gate_nonce":state.plan.nonce,"target_path_key":crate::identity::path_key(&state.root,path),
-        "line":line,"callsite":callsite,"result":result}));
+        "line":line,"callsite":callsite,"result":result}),
+    );
 }
 fn loss(
     state: &mut State,

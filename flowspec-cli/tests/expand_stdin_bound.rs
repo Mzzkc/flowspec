@@ -4,7 +4,12 @@ use std::process::{Command, Stdio};
 #[test]
 fn public_stdin_limit_is_inclusive_and_refuses_without_output() {
     let limit = 128 * 1024 * 1024;
-    for (size, expected) in [(2, 0), (64 * 1024 * 1024 + 39, 0), (limit, 0), (limit + 1, 1)] {
+    for (size, expected) in [
+        (2, 0),
+        (64 * 1024 * 1024 + 39, 0),
+        (limit, 0),
+        (limit + 1, 1),
+    ] {
         let mut file = tempfile::tempfile().unwrap();
         let mut input = vec![b' '; size];
         input[..2].copy_from_slice(b"{}");

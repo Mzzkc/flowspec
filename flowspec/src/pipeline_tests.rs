@@ -2516,9 +2516,17 @@ fn test_cross_file_flow_steps_have_file_attribution() {
     let flow = main_flow.unwrap();
 
     let import_step = flow.steps.iter().find(|s| s.entity.contains("import::"));
-    assert!(import_step.is_some(), "Source import binding must remain an actual ordered hop");
+    assert!(
+        import_step.is_some(),
+        "Source import binding must remain an actual ordered hop"
+    );
     assert_eq!(import_step.unwrap().action, "call");
-    assert!(flow.steps.iter().any(|s| s.entity.starts_with("utils.py::") && s.action == "references"), "Resolved worker binding must follow the genuine import reference hop");
+    assert!(
+        flow.steps
+            .iter()
+            .any(|s| s.entity.starts_with("utils.py::") && s.action == "references"),
+        "Resolved worker binding must follow the genuine import reference hop"
+    );
 }
 
 // T7: Circular import does not infinite-loop (adversarial)

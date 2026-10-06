@@ -24,28 +24,28 @@
 pub mod analyzer;
 /// Structured, content-addressed per-file IR storage.
 pub mod cache;
+/// Pure canonical diagnostic identities and metadata.
+pub mod catalog;
 /// Extracted CLI command logic — testable library functions for analyze, diagnose, trace, diff, init.
 pub mod commands;
 /// Configuration loading and validation.
 pub mod config;
+mod detector_registration;
 /// Library-level error types — `FlowspecError` and `ManifestError`.
 pub mod error;
 /// Persistent in-memory analysis graph — flat symbol tables with bidirectional edges.
 pub mod graph;
+mod identity;
+/// Pure language identities and source classification.
+pub mod language_metadata;
+mod language_registration;
 /// Output formatting — YAML, JSON, SARIF, summary. One formatter per output format.
 pub mod manifest;
+mod module_paths;
 /// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
 /// Validated language and diagnostic registration.
 pub mod registry;
-/// Pure canonical diagnostic identities and metadata.
-pub mod catalog;
-/// Pure language identities and source classification.
-pub mod language_metadata;
-mod language_registration;
-mod detector_registration;
-mod module_paths;
-mod identity;
 mod report_authority;
 mod report_records;
 

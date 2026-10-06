@@ -67,7 +67,15 @@ fn repeated_source_invocations_keep_both_call_sites() {
     )
     .unwrap();
     assert_eq!(public.paths.len(), 2);
-    assert_eq!(r.manifest.flows.iter().filter(|f| f.entry == "unit.py::main").count(), 2, "normal/library flow records retain both source invocations");
+    assert_eq!(
+        r.manifest
+            .flows
+            .iter()
+            .filter(|f| f.entry == "unit.py::main")
+            .count(),
+        2,
+        "normal/library flow records retain both source invocations"
+    );
     assert_ne!(public.paths[0].id, public.paths[1].id);
     let proxy = r
         .graph

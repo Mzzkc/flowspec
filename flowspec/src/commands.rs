@@ -16,10 +16,7 @@ use crate::error::{FlowspecError, ManifestError};
 use crate::manifest::types::{DiagnosticEntry, FlowEntry, Manifest};
 use crate::manifest::{validate_manifest_size, OutputFormatter};
 use crate::parser::ir::SymbolId;
-use crate::{
-    Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter,
-    YamlFormatter,
-};
+use crate::{Config, JsonFormatter, OutputFormat, SarifFormatter, SummaryFormatter, YamlFormatter};
 
 /// Valid diagnostic pattern names for `--checks` validation.
 const VALID_PATTERNS: &[&str] = &crate::registry::PATTERN_IDS;
@@ -2929,14 +2926,25 @@ pub fn exact_trace_output(
             let mut current = path.entry;
             let mut choices = Vec::new();
             for step in &path.steps {
-                let edges = if backward { graph.edges_to(current) } else { graph.edges_from(current) };
-                let references: Vec<_> = edges.iter().filter(|e| e.target == step.symbol && e.kind == step.edge_kind)
+                let edges = if backward {
+                    graph.edges_to(current)
+                } else {
+                    graph.edges_from(current)
+                };
+                let references: Vec<_> = edges
+                    .iter()
+                    .filter(|e| e.target == step.symbol && e.kind == step.edge_kind)
                     .filter_map(|e| e.reference_id.and_then(|r| graph.get_reference(r)))
                     .map(|r| {
                         let mut location = r.location.clone();
-                        location.file = location.file.strip_prefix(root).unwrap_or(&location.file).to_path_buf();
+                        location.file = location
+                            .file
+                            .strip_prefix(root)
+                            .unwrap_or(&location.file)
+                            .to_path_buf();
                         location
-                    }).collect();
+                    })
+                    .collect();
                 choices.push(references);
                 current = step.symbol;
             }
@@ -2950,8 +2958,13 @@ pub fn exact_trace_output(
                 }
             }
             sites.reverse();
-            let key = crate::report_authority::hash("trace-path", &serde_json::json!({"binding_path":key,"source_references":sites}));
-            if !seen.insert(key.clone()) { continue; }
+            let key = crate::report_authority::hash(
+                "trace-path",
+                &serde_json::json!({"binding_path":key,"source_references":sites}),
+            );
+            if !seen.insert(key.clone()) {
+                continue;
+            }
             if path.truncated {
                 continuation.push(key.clone());
             }
