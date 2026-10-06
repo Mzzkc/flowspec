@@ -28,12 +28,14 @@ fn primitive(s: &str) -> Option<String> {
     match s.trim().trim_start_matches(':').trim() {
         "bool" | "boolean" => Some("boolean".into()),
         "str" | "string" | "&str" => Some("string".into()),
+        "number" => Some("number".into()),
         _ => None,
     }
 }
 fn literal(n: Node<'_>, s: &str) -> Option<String> {
     match n.kind() {
         "true" | "false" | "boolean_literal" => Some("boolean".into()),
+        "number" => Some("number".into()),
         "string" | "string_literal"
             if !s[n.byte_range()].starts_with(['b', 'B'])
                 && !children(n).iter().any(|c| c.kind() == "interpolation") =>
@@ -43,6 +45,46 @@ fn literal(n: Node<'_>, s: &str) -> Option<String> {
         "identifier" if matches!(&s[n.byte_range()], "True" | "False") => Some("boolean".into()),
         _ => None,
     }
+}
+// JSDoc belongs to the immediately adjacent declaration, including an export
+// wrapper. Intervening statements or comments cannot donate an annotation.
+fn jsdoc_return(n: Node<'_>, source: &str) -> Option<String> {
+    if n.kind() != "function_declaration" {
+        return None;
+    }
+    let declaration = n
+        .parent()
+        .filter(|p| p.kind() == "export_statement")
+        .unwrap_or(n);
+    let comment = declaration.prev_named_sibling()?;
+    if comment.kind() != "comment"
+        || !source[comment.end_byte()..declaration.start_byte()]
+            .trim()
+            .is_empty()
+    {
+        return None;
+    }
+    let text = &source[comment.byte_range()];
+    if !text.starts_with("/**") || !text.ends_with("*/") {
+        return None;
+    }
+    let mut found = None;
+    for tag in ["@returns", "@return"] {
+        if let Some(at) = text.find(tag) {
+            let rest = text[at + tag.len()..].trim_start();
+            // @returns must not also be interpreted as @return.
+            if !rest.starts_with('{') {
+                continue;
+            }
+            let end = rest.find('}')?;
+            let ty = primitive(&rest[1..end])?;
+            if found.is_some() {
+                return None;
+            }
+            found = Some(ty);
+        }
+    }
+    found
 }
 pub(crate) fn collect(s: &str, root: Node<'_>) -> (Vec<SignatureFact>, Vec<LiteralCall>) {
     let mut signatures = Vec::new();
@@ -76,7 +118,8 @@ pub(crate) fn collect(s: &str, root: Node<'_>) -> (Vec<SignatureFact>, Vec<Liter
                 }
                 let ret = n
                     .child_by_field_name("return_type")
-                    .and_then(|t| primitive(&s[t.byte_range()]));
+                    .and_then(|t| primitive(&s[t.byte_range()]))
+                    .or_else(|| jsdoc_return(n, s));
                 let mut returns = Vec::new();
                 let mut literal_leaf = false;
                 if let Some(body) = n.child_by_field_name("body") {

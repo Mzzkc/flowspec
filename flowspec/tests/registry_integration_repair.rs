@@ -42,8 +42,10 @@ fn full_authority_sarif_obeys_preserved_rust_fixture_output_budget() {
     .unwrap();
     assert!(matches!(exit, 0 | 2 | 3));
     let output = std::fs::read_to_string(output_path).unwrap();
-    let raw: serde_json::Value = serde_json::from_str(&raw_output).unwrap();
-    let rendered: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let raw_wire: serde_json::Value = serde_json::from_str(&raw_output).unwrap();
+    let raw = flowspec::commands::expand_report_records(&raw_wire).unwrap();
+    let rendered_wire: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let rendered = flowspec::commands::expand_report_records(&rendered_wire).unwrap();
     let mut expected_ids: Vec<_> = result.manifest.authority.as_ref().unwrap()["findings"]["all"]
         .as_array()
         .unwrap()

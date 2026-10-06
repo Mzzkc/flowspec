@@ -44,7 +44,9 @@ fn report_exposes_result_determining_registry_descriptors() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v == "typescript_preprocessing"));
+        .any(|v| v == "advanced_type_evaluation_unavailable"));
+    assert_eq!(registry["languages"][2]["grammar_version"], "tree-sitter-typescript/0.23.2+tsx");
+    assert!(!registry["languages"][2]["limitations"].as_array().unwrap().iter().any(|v| v == "typescript_preprocessing"));
     assert!(registered.digest().starts_with("sha256:"));
 }
 

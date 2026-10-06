@@ -55,7 +55,25 @@ fn equal(a: Value, b: Value) {
     differences(&a, &b, "", &mut diff);
     assert!(a == b, "normalized equality drift: {diff:?}");
 }
-fn normal(mut report: Value) -> Value {
+fn normal(report: Value) -> Value {
+    // Compare the complete public value, not its encoded record-node numbering.
+    let mut report = flowspec::commands::expand_report_records(&report).unwrap();
+    let authority = &mut report["authority"];
+    assert_eq!(authority.as_object().unwrap().len(), 17);
+    // Independently check all fourteen result-determining fields before normalization.
+    use sha2::Digest;
+    let fields = ["schema_version", "producer_contract", "producer", "execution", "outcome", "findings_present", "gate", "findings", "scope", "provenance", "inventory", "losses", "pattern_state", "analysis_graph"];
+    let body: serde_json::Map<String, Value> = fields.iter().map(|key| ((*key).into(), authority[*key].clone())).collect();
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"flowspec/report/v1\0");
+    hasher.update(serde_json::to_vec(&Value::Object(body)).unwrap());
+    assert_eq!(authority["report_identity"], json!(format!("sha256:{:x}", hasher.finalize())));
+    assert_eq!(authority["execution"], "incomplete");
+    assert!(matches!(authority["provenance"]["cache"]["executed_mode"].as_str(), Some("full" | "incremental")));
+    // Physical cache execution is independently checked in the driver below.
+    // Only that observation and its identity are excluded from semantic equivalence.
+    authority["provenance"]["cache"]["executed_mode"] = json!("normalized-execution");
+    authority.as_object_mut().unwrap().remove("report_identity");
     report["metadata"]["analyzed_at"] = json!("clock");
     report["metadata"]["incremental"] = json!(false);
     report["metadata"]["files_changed"] = json!(0);
@@ -78,6 +96,7 @@ fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equiv
     };
     let compare = |config: &Config| {
         let full = analyze_with_options(dir.path(), config, &[], &full_options).unwrap();
+        assert_eq!(full.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"], "full");
         let before = PARSES.load(Ordering::SeqCst);
         let warm = analyze_with_options(dir.path(), config, &[], &options).unwrap();
         assert_eq!(
@@ -85,6 +104,7 @@ fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equiv
             before,
             "a cache hit must actually bypass parsing"
         );
+        assert_eq!(warm.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"], "incremental");
         equal(
             normal(serde_json::to_value(&full.manifest).unwrap()),
             normal(serde_json::to_value(&warm.manifest).unwrap()),
