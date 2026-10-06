@@ -45,7 +45,13 @@ impl OutputFormatter for SummaryFormatter {
             manifest.metadata.file_count,
             manifest.metadata.entity_count,
             manifest.metadata.flow_count,
-            manifest.metadata.diagnostic_count
+            manifest
+                .authority
+                .as_ref()
+                .map_or(manifest.metadata.diagnostic_count, |a| a["findings"]
+                    ["total"]
+                    .as_u64()
+                    .unwrap_or(0))
         ));
         if !manifest.metadata.languages.is_empty() {
             lines.push(format!(
@@ -64,7 +70,74 @@ impl OutputFormatter for SummaryFormatter {
 
         // Diagnostics summary
         let ds = &manifest.summary.diagnostic_summary;
-        if ds.critical > 0 || ds.warning > 0 || ds.info > 0 {
+        if let Some(authority) = &manifest.authority {
+            let counts = &authority["findings"]["by_severity"];
+            lines.push("--- Diagnostics ---".into());
+            lines.push(format!(
+                "Critical: {}  Warning: {}  Info: {}",
+                counts["critical"].as_u64().unwrap_or(0),
+                counts["warning"].as_u64().unwrap_or(0),
+                counts["info"].as_u64().unwrap_or(0)
+            ));
+            let findings = authority["findings"]["all"].as_array().ok_or_else(|| {
+                ManifestError::Serialization {
+                    reason: "summary requires the complete authority findings".into(),
+                }
+            })?;
+            let indices = authority["display"]["indices"].as_array().ok_or_else(|| {
+                ManifestError::Serialization {
+                    reason: "summary requires authority display indices".into(),
+                }
+            })?;
+            lines.push(format!(
+                "full_findings_total: {}  matched: {}  shown: {}",
+                authority["findings"]["total"],
+                indices.len(),
+                indices.len().min(10)
+            ));
+            lines.push(format!(
+                "gate: {}  qualifying_count: {}",
+                authority["gate"]["verdict"].as_str().unwrap_or("unknown"),
+                authority["gate"]["qualifying_count"]
+            ));
+            lines.push(String::new());
+            if !indices.is_empty() {
+                lines.push("--- Findings ---".into());
+                for index in indices.iter().take(10) {
+                    let finding = index
+                        .as_u64()
+                        .and_then(|i| findings.get(i as usize))
+                        .ok_or_else(|| ManifestError::Serialization {
+                            reason: "invalid authority display index".into(),
+                        })?;
+                    let range = &finding["range"];
+                    lines.push(format!(
+                        "  [{}] {} — {} (path_key: {} bytes: {}..{})",
+                        finding["severity"].as_str().unwrap_or("").to_uppercase(),
+                        finding["pattern_id"].as_str().unwrap_or(""),
+                        finding["subject"]["qualified_name"]
+                            .as_str()
+                            .or_else(|| finding["subject"]["name"].as_str())
+                            .unwrap_or("source finding"),
+                        range["path_key"].as_str().unwrap_or(""),
+                        range["start_byte"],
+                        range["end_byte"]
+                    ));
+                    lines.push(format!(
+                        "    semantic_id: {}  observation_id: {}",
+                        finding["semantic_id"].as_str().unwrap_or(""),
+                        finding["observation_id"].as_str().unwrap_or("")
+                    ));
+                    if let Some(suggestion) = finding["suggestion"].as_str() {
+                        lines.push(format!("    Fix: {suggestion}"));
+                    }
+                }
+                if indices.len() > 10 {
+                    lines.push(format!("  ... and {} more findings", indices.len() - 10));
+                }
+                lines.push(String::new());
+            }
+        } else if ds.critical > 0 || ds.warning > 0 || ds.info > 0 {
             lines.push("--- Diagnostics ---".to_string());
             lines.push(format!(
                 "Critical: {}  Warning: {}  Info: {}",
@@ -108,7 +181,7 @@ impl OutputFormatter for SummaryFormatter {
         }
 
         // Findings list (max 10)
-        if !manifest.diagnostics.is_empty() {
+        if manifest.authority.is_none() && !manifest.diagnostics.is_empty() {
             lines.push("--- Findings ---".to_string());
             for diag in manifest.diagnostics.iter().take(10) {
                 lines.push(format!(
@@ -277,5 +350,61 @@ mod tests {
         let output = result.unwrap();
         assert!(output.contains("0 finding(s)"));
         assert!(output.contains("No findings"));
+    }
+}
+
+#[cfg(test)]
+mod authority_summary_tests {
+    use super::*;
+
+    #[test]
+    fn summary_uses_complete_authority_catalog_and_unfiltered_gate() {
+        let input = tempfile::tempdir().unwrap();
+        std::fs::write(
+            input.path().join("unit.py"),
+            "def _hidden(value):\n    return value + 1\n",
+        )
+        .unwrap();
+        let report = crate::diagnose_report(
+            input.path(),
+            &crate::Config::default(),
+            &["python".into()],
+            &crate::ReportOptions::default(),
+        )
+        .unwrap();
+        let authority = report.authority.as_ref().unwrap();
+        assert_eq!(authority["findings"]["total"], 2);
+        let before = authority.clone();
+        let text = SummaryFormatter::new().format_manifest(&report).unwrap();
+        assert!(text.contains("Diagnostics: 2"), "{text}");
+        assert!(text.contains("Warning: 2"), "{text}");
+        assert!(text.contains("isolated_cluster"), "{text}");
+        assert!(text.contains("data_dead_end"), "{text}");
+        assert!(text.contains("gate: pass"), "{text}");
+        for finding in authority["findings"]["all"].as_array().unwrap() {
+            assert!(
+                text.contains(finding["semantic_id"].as_str().unwrap()),
+                "{text}"
+            );
+        }
+        assert_eq!(report.authority.as_ref().unwrap(), &before);
+
+        let filtered = crate::diagnose_report(
+            input.path(),
+            &crate::Config::default(),
+            &["python".into()],
+            &crate::ReportOptions {
+                severity: Some(crate::Severity::Critical),
+                gate_severity: crate::Severity::Warning,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = SummaryFormatter::new().format_manifest(&filtered).unwrap();
+        assert!(text.contains("Diagnostics: 2"), "{text}");
+        assert!(text.contains("matched: 0"), "{text}");
+        assert!(text.contains("gate: fail"), "{text}");
+        assert!(!text.contains("[WARNING]"), "{text}");
+        assert_eq!(crate::report_exit_code(&filtered, None), 2);
     }
 }
