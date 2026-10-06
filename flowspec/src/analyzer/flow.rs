@@ -626,3 +626,118 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod backward_binding_regressions {
+    use super::*;
+    use crate::parser::ir::{
+        Location, Reference, ReferenceId, ReferenceKind, ResolutionStatus, Symbol, Visibility,
+    };
+    use std::path::PathBuf;
+
+    fn symbol(name: &str, import: bool) -> Symbol {
+        Symbol {
+            id: SymbolId::default(),
+            kind: SymbolKind::Function,
+            name: name.into(),
+            qualified_name: format!("unit.rs::{name}"),
+            visibility: Visibility::Private,
+            signature: None,
+            location: Location {
+                file: PathBuf::from("unit.rs"),
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 8,
+            },
+            resolution: ResolutionStatus::Resolved,
+            scope: Default::default(),
+            annotations: if import {
+                vec!["import".into()]
+            } else {
+                vec![]
+            },
+        }
+    }
+    fn edge(graph: &mut Graph, from: SymbolId, to: SymbolId, kind: ReferenceKind) {
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from,
+            to,
+            kind,
+            location: Location {
+                file: PathBuf::from("unit.rs"),
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 8,
+            },
+            resolution: ResolutionStatus::Resolved,
+        });
+    }
+    #[test]
+    fn incoming_call_trace_selects_actual_caller_without_fabricated_self_cycle() {
+        let mut graph = Graph::new();
+        let caller = graph.add_symbol(symbol("caller", false));
+        let callee = graph.add_symbol(symbol("callee", false));
+        edge(&mut graph, caller, callee, ReferenceKind::Call);
+        assert_eq!(graph.edges_to(callee)[0].target, caller);
+        let trace = trace_report(&graph, callee, 8, true);
+        assert_eq!(trace.paths.len(), 1);
+        assert_eq!(
+            trace.paths[0].steps,
+            vec![FlowStep {
+                symbol: caller,
+                edge_kind: EdgeKind::Calls
+            }]
+        );
+        assert!(!trace.paths[0].is_cyclic);
+        assert!(!trace.incomplete);
+    }
+    #[test]
+    fn incoming_import_reference_preserves_source_proxy_and_forward_relation() {
+        let mut graph = Graph::new();
+        let caller = graph.add_symbol(symbol("main", false));
+        let proxy = graph.add_symbol(symbol("alias", true));
+        let callee = graph.add_symbol(symbol("implementation", false));
+        edge(&mut graph, caller, proxy, ReferenceKind::Call);
+        edge(&mut graph, proxy, callee, ReferenceKind::Read);
+        let trace = trace_report(&graph, callee, 8, true);
+        assert_eq!(trace.paths.len(), 1);
+        assert_eq!(
+            trace.paths[0].steps,
+            vec![
+                FlowStep {
+                    symbol: proxy,
+                    edge_kind: EdgeKind::References
+                },
+                FlowStep {
+                    symbol: caller,
+                    edge_kind: EdgeKind::Calls
+                }
+            ]
+        );
+        assert!(!trace.paths[0].is_cyclic);
+        let forward = trace_flows_from(&graph, caller, 8);
+        assert_eq!(
+            forward[0].steps,
+            vec![
+                FlowStep {
+                    symbol: proxy,
+                    edge_kind: EdgeKind::Calls
+                },
+                FlowStep {
+                    symbol: callee,
+                    edge_kind: EdgeKind::References
+                }
+            ]
+        );
+        // A non-import value read is not an eligible trace hop in either direction.
+        let rival = graph.add_symbol(symbol("value_reader", false));
+        edge(&mut graph, rival, callee, ReferenceKind::Read);
+        assert_eq!(
+            trace_report(&graph, callee, 8, true).paths[0].steps,
+            trace.paths[0].steps
+        );
+    }
+}
