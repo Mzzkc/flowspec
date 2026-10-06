@@ -53,7 +53,12 @@ pub fn detect(graph: &Graph, project_root: &Path) -> Vec<Diagnostic> {
         let has_entry_point = component.iter().any(|&id| {
             graph
                 .get_symbol(id)
-                .map(is_excluded_symbol)
+                .map(|s| {
+                    is_excluded_symbol(s)
+                        || (matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+                            && graph.effective_visibility(id)
+                                == Some(crate::parser::ir::Visibility::Public))
+                })
                 .unwrap_or(false)
         });
         if has_entry_point {

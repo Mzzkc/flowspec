@@ -2515,13 +2515,10 @@ fn test_cross_file_flow_steps_have_file_attribution() {
     assert!(main_flow.is_some(), "main flow must exist (precondition)");
     let flow = main_flow.unwrap();
 
-    let has_import_prefix = flow.steps.iter().any(|s| s.entity.contains("import::"));
-    assert!(
-        !has_import_prefix,
-        "Flow steps must not contain 'import::' prefix — that's an internal proxy. \
-         Got steps: {:?}",
-        flow.steps.iter().map(|s| &s.entity).collect::<Vec<_>>()
-    );
+    let import_step = flow.steps.iter().find(|s| s.entity.contains("import::"));
+    assert!(import_step.is_some(), "Source import binding must remain an actual ordered hop");
+    assert_eq!(import_step.unwrap().action, "call");
+    assert!(flow.steps.iter().any(|s| s.entity.starts_with("utils.py::") && s.action == "references"), "Resolved worker binding must follow the genuine import reference hop");
 }
 
 // T7: Circular import does not infinite-loop (adversarial)

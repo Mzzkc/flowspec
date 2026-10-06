@@ -147,9 +147,11 @@ fn analyze_yaml_flow_count_consistent() {
         .format_manifest(&result.manifest)
         .unwrap();
     let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_output).unwrap();
+    let public_wire = serde_json::to_value(parsed).unwrap();
+    let parsed = crate::commands::expand_report_records(&public_wire).unwrap();
 
     let metadata_flow_count = parsed["metadata"]["flow_count"].as_u64().unwrap();
-    let flows_array_len = parsed["flows"].as_sequence().unwrap().len() as u64;
+    let flows_array_len = parsed["flows"].as_array().unwrap().len() as u64;
 
     assert_eq!(
         metadata_flow_count, flows_array_len,
@@ -174,7 +176,8 @@ fn analyze_json_flow_count_consistent() {
     let json_output = crate::JsonFormatter
         .format_manifest(&result.manifest)
         .unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+    let public_wire: serde_json::Value = serde_json::from_str(&json_output).unwrap();
+    let parsed = crate::commands::expand_report_records(&public_wire).unwrap();
 
     let metadata_flow_count = parsed["metadata"]["flow_count"].as_u64().unwrap();
     let flows_array_len = parsed["flows"].as_array().unwrap().len() as u64;

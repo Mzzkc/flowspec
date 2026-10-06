@@ -13,6 +13,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 static PARSES: AtomicUsize = AtomicUsize::new(0);
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn structured(
     adapter: &dyn LanguageAdapter,
     path: &Path,
@@ -60,18 +61,86 @@ fn normal(report: Value) -> Value {
     let mut report = flowspec::commands::expand_report_records(&report).unwrap();
     let authority = &mut report["authority"];
     assert_eq!(authority.as_object().unwrap().len(), 17);
+    let keys: std::collections::BTreeSet<_> = authority
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<_> = [
+        "schema_version",
+        "producer_contract",
+        "producer",
+        "execution",
+        "outcome",
+        "findings_present",
+        "gate",
+        "findings",
+        "scope",
+        "provenance",
+        "inventory",
+        "losses",
+        "pattern_state",
+        "analysis_graph",
+        "display",
+        "continuation",
+        "report_identity",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        keys, expected,
+        "all seventeen authority keys must be the actual schema"
+    );
     // Independently check all fourteen result-determining fields before normalization.
     use sha2::Digest;
-    let fields = ["schema_version", "producer_contract", "producer", "execution", "outcome", "findings_present", "gate", "findings", "scope", "provenance", "inventory", "losses", "pattern_state", "analysis_graph"];
-    let body: serde_json::Map<String, Value> = fields.iter().map(|key| ((*key).into(), authority[*key].clone())).collect();
+    let fields = [
+        "schema_version",
+        "producer_contract",
+        "producer",
+        "execution",
+        "outcome",
+        "findings_present",
+        "gate",
+        "findings",
+        "scope",
+        "provenance",
+        "inventory",
+        "losses",
+        "pattern_state",
+        "analysis_graph",
+    ];
+    let body: serde_json::Map<String, Value> = fields
+        .iter()
+        .map(|key| ((*key).into(), authority[*key].clone()))
+        .collect();
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"flowspec/report/v1\0");
     hasher.update(serde_json::to_vec(&Value::Object(body)).unwrap());
-    assert_eq!(authority["report_identity"], json!(format!("sha256:{:x}", hasher.finalize())));
+    assert_eq!(
+        authority["report_identity"],
+        json!(format!("sha256:{:x}", hasher.finalize()))
+    );
     assert_eq!(authority["execution"], "incomplete");
-    assert!(matches!(authority["provenance"]["cache"]["executed_mode"].as_str(), Some("full" | "incremental")));
+    assert!(matches!(
+        authority["provenance"]["cache"]["requested_mode"].as_str(),
+        Some("full" | "incremental")
+    ));
+    assert!(matches!(
+        authority["provenance"]["cache"]["executed_mode"].as_str(),
+        Some("full" | "incremental")
+    ));
     // Physical cache execution is independently checked in the driver below.
-    // Only that observation and its identity are excluded from semantic equivalence.
+    // Only requested/executed mode observations and their identity are excluded.
+    // Every semantic field remains in exact entire-report equality.
+    // The corrupt-cache path below independently proves fallback and parser counts.
+    // Rebuild cause is physical cache provenance, not a semantic result.
+    assert!(
+        authority["provenance"]["cache"]["rebuild_reason"].is_null()
+            || authority["provenance"]["cache"]["rebuild_reason"].is_string()
+    );
+    authority["provenance"]["cache"]["rebuild_reason"] = Value::Null;
+    authority["provenance"]["cache"]["requested_mode"] = json!("normalized-request");
     authority["provenance"]["cache"]["executed_mode"] = json!("normalized-execution");
     authority.as_object_mut().unwrap().remove("report_identity");
     report["metadata"]["analyzed_at"] = json!("clock");
@@ -81,6 +150,7 @@ fn normal(report: Value) -> Value {
 }
 #[test]
 fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equivalence() {
+    let _serial = TEST_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("app.py");
     std::fs::write(&file, "def _first():\n    return 1\n").unwrap();
@@ -96,7 +166,14 @@ fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equiv
     };
     let compare = |config: &Config| {
         let full = analyze_with_options(dir.path(), config, &[], &full_options).unwrap();
-        assert_eq!(full.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"], "full");
+        assert_eq!(
+            full.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["requested_mode"],
+            "full"
+        );
+        assert_eq!(
+            full.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"],
+            "full"
+        );
         let before = PARSES.load(Ordering::SeqCst);
         let warm = analyze_with_options(dir.path(), config, &[], &options).unwrap();
         assert_eq!(
@@ -104,7 +181,14 @@ fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equiv
             before,
             "a cache hit must actually bypass parsing"
         );
-        assert_eq!(warm.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"], "incremental");
+        assert_eq!(
+            warm.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["requested_mode"],
+            "incremental"
+        );
+        assert_eq!(
+            warm.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"],
+            "incremental"
+        );
         equal(
             normal(serde_json::to_value(&full.manifest).unwrap()),
             normal(serde_json::to_value(&warm.manifest).unwrap()),
@@ -155,6 +239,18 @@ fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equiv
     let rebuilt = analyze_with_options(dir.path(), &config, &[], &options).unwrap();
     assert_eq!(rebuilt.cache_stats.hits, 0);
     assert!(!rebuilt.cache_stats.fallbacks.is_empty());
+    assert_eq!(
+        rebuilt.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["requested_mode"],
+        "incremental"
+    );
+    assert_eq!(
+        rebuilt.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["executed_mode"],
+        "full"
+    );
+    assert_eq!(
+        rebuilt.manifest.authority.as_ref().unwrap()["provenance"]["cache"]["rebuild_reason"],
+        json!(rebuilt.cache_stats.fallbacks.join(";"))
+    );
     let full = analyze_with_options(dir.path(), &config, &[], &full_options).unwrap();
     assert_eq!(
         normal(serde_json::to_value(&full.manifest).unwrap()),
@@ -196,6 +292,75 @@ fn ordinary_library_full_warm_edit_same_timestamp_rename_delete_and_policy_equiv
         equal(
             normal(serde_json::to_value(&full.manifest).unwrap()),
             normal(serde_json::to_value(&report.manifest).unwrap()),
+        );
+    }
+}
+
+#[test]
+fn valid_identity_semantic_rivals_survive_normalization_as_differences() {
+    let _serial = TEST_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.py"), "def _first():\n    return 1\n").unwrap();
+    let options = AnalysisOptions {
+        mode: AnalysisMode::Full,
+        structured_parser: Some(structured),
+        structured_parser_identity: Some("partial-capability-test-provider/v1"),
+        cache_dir: None,
+    };
+    let result = analyze_with_options(dir.path(), &Config::default(), &[], &options).unwrap();
+    let original =
+        flowspec::commands::expand_report_records(&serde_json::to_value(&result.manifest).unwrap())
+            .unwrap();
+    for field in [
+        "analysis_graph",
+        "losses",
+        "pattern_state",
+        "findings",
+        "scope",
+    ] {
+        let mut rival = original.clone();
+        let authority = &mut rival["authority"];
+        match field {
+            "analysis_graph" => authority[field]["type_flows"] = json!([{"type_name":"forged"}]),
+            "losses" => authority[field][0]["reason"] = json!("forged-cause"),
+            "pattern_state" => authority[field][0]["cells"][0]["state"] = json!("complete"),
+            "findings" => {
+                authority[field]["all"] =
+                    json!([{"cause":{"relation":"forged"},"range":{"start_byte":999}}])
+            }
+            _ => authority[field]["include_paths"] = json!(["forged.py"]),
+        }
+        // Independently refresh a valid fourteen-field identity. Refusal cannot
+        // be attributed merely to a stale hash on the malicious semantic rival.
+        use sha2::Digest;
+        let fields = [
+            "schema_version",
+            "producer_contract",
+            "producer",
+            "execution",
+            "outcome",
+            "findings_present",
+            "gate",
+            "findings",
+            "scope",
+            "provenance",
+            "inventory",
+            "losses",
+            "pattern_state",
+            "analysis_graph",
+        ];
+        let body: serde_json::Map<String, Value> = fields
+            .iter()
+            .map(|key| ((*key).into(), authority[*key].clone()))
+            .collect();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"flowspec/report/v1\0");
+        hasher.update(serde_json::to_vec(&Value::Object(body)).unwrap());
+        authority["report_identity"] = json!(format!("sha256:{:x}", hasher.finalize()));
+        assert_ne!(
+            normal(original.clone()),
+            normal(rival),
+            "valid-identity semantic rival normalized away: {field}"
         );
     }
 }

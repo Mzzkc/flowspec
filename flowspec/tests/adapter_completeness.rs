@@ -237,12 +237,33 @@ fn legacy_extension_cannot_turn_declared_capabilities_into_complete_reports() {
             && l["required_capabilities"]
                 .as_array()
                 .is_some_and(|caps| caps.iter().any(|c| c == "consumer_closure"))));
-    assert!(authority["pattern_state"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|p| p["pattern_id"] != "layer_violation")
-        .all(|p| p["cells"][0]["state"] == "incomplete"));
+    let states = authority["pattern_state"].as_array().unwrap();
+    assert_eq!(states.len(), 13);
+    let mut seen = std::collections::HashSet::new();
+    for pattern in states {
+        let id = pattern["pattern_id"].as_str().unwrap();
+        assert!(seen.insert(id));
+        assert_eq!(pattern["cells"].as_array().unwrap().len(), 1);
+        let cell = &pattern["cells"][0];
+        assert_eq!(cell["language"], "legacy");
+        if matches!(
+            id,
+            "partial_wiring"
+                | "layer_violation"
+                | "incomplete_migration"
+                | "asymmetric_handling"
+                | "missing_reexport"
+        ) {
+            // Absent caller policy means not-applicable; it cannot supply capability proof.
+            assert_eq!(cell["state"], "not_applicable");
+            let expected = serde_json::json!(["semantic_proof_unavailable", "policy_absent"]);
+            assert_eq!(cell["reason_codes"], expected);
+        } else {
+            assert_eq!(cell["state"], "incomplete");
+            assert!(!cell["reason_codes"].as_array().unwrap().is_empty());
+        }
+    }
+    assert_eq!(authority["gate"]["verdict"], "not_evaluated");
 }
 #[test]
 fn native_tsx_runtime_accepts_abi_and_original_recovery_free_source() {
