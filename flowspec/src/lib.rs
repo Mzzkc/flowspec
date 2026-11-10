@@ -34,6 +34,7 @@ pub mod graph;
 pub mod manifest;
 /// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
+pub mod pyrefs;
 mod report_authority;
 
 #[cfg(feature = "fault_probe")]

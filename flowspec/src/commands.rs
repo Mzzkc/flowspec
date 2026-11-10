@@ -523,6 +523,21 @@ pub fn run_trace(
 
     preflight_python_symbol(&canonical, symbol)?;
 
+    // Python symbols are answered from the reference index: one parse per file,
+    // no whole-program graph. Anything it cannot place falls through.
+    if let Some(output) = trace_python_references(
+        &canonical,
+        &config,
+        &normalized_languages,
+        symbol,
+        depth,
+        direction,
+        format,
+    )? {
+        write_output(&output, output_path)?;
+        return Ok(0);
+    }
+
     let result = crate::analyze(&canonical, &config, &normalized_languages)?;
 
     // Symbol matching: exact qualified name → name part → substring
@@ -599,6 +614,249 @@ pub fn run_trace(
     write_output(&output, output_path)?;
 
     Ok(0)
+}
+
+/// Answer a trace for a Python symbol from the reference index.
+///
+/// Returns `Ok(None)` when the request is not for Python or the symbol is not
+/// a Python definition and other languages are present, so the caller can use
+/// the graph-based path. A symbol that cannot be resolved in a Python-only
+/// project is an error that lists the nearest names, raised before any
+/// expensive analysis.
+fn trace_python_references(
+    root: &Path,
+    config: &Config,
+    languages: &[String],
+    symbol: &str,
+    depth: usize,
+    direction: TraceDirection,
+    format: OutputFormat,
+) -> Result<Option<String>, FlowspecError> {
+    use crate::pyrefs::{PyIndex, Site, SiteKind};
+
+    if !languages.is_empty() && !languages.iter().any(|l| l == "python") {
+        return Ok(None);
+    }
+    let (files, _, _, _) = crate::discover_source_files(root, &config.exclude);
+    let python: Vec<PathBuf> = files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "py"))
+        .cloned()
+        .collect();
+    if python.is_empty() {
+        return Ok(None);
+    }
+    let index = PyIndex::build(root, &python);
+    let target = match index.resolve_symbol(symbol) {
+        Ok(id) => id,
+        Err(_) if python.len() < files.len() => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let target_id = index.entity_id(target);
+    let stats = index.stats();
+
+    let describe = |sites: &[&Site]| -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for (certain, kind, word) in [
+            (true, SiteKind::Call, "call"),
+            (true, SiteKind::Reference, "reference"),
+            (true, SiteKind::Decorator, "decorator"),
+            (false, SiteKind::Call, "possible call"),
+            (false, SiteKind::Reference, "possible reference"),
+            (false, SiteKind::Decorator, "possible decorator"),
+        ] {
+            let hits: Vec<&&Site> = sites
+                .iter()
+                .filter(|s| s.certain == certain && s.kind == kind)
+                .collect();
+            if hits.is_empty() {
+                continue;
+            }
+            let places: Vec<String> = hits
+                .iter()
+                .map(|s| {
+                    let file = index.file_path(s.file);
+                    let short = file.rsplit('/').next().unwrap_or(file);
+                    format!("{}:{}", short, s.line)
+                })
+                .collect();
+            let mut part = format!("{} at {}", word, places.join(", "));
+            if !certain {
+                let mut whys: Vec<&str> = hits.iter().map(|s| s.why.as_str()).collect();
+                whys.dedup();
+                part.push_str(&format!(" ({})", whys.join("; ")));
+            }
+            parts.push(part);
+        }
+        parts.join("; ")
+    };
+    let step = |entity: String, action: String| crate::manifest::types::FlowStep {
+        entity,
+        action,
+        in_type: "unknown".to_string(),
+        out_type: "unknown".to_string(),
+    };
+
+    let mut flows: Vec<FlowEntry> = Vec::new();
+    let mut importers: Vec<String> = Vec::new();
+    let mut certain_direct = 0usize;
+    let mut possible_direct = 0usize;
+    let mut transitive = 0usize;
+
+    if matches!(direction, TraceDirection::Backward | TraceDirection::Both) {
+        let sites = index.sites_reaching(target);
+        for s in sites.iter().filter(|s| s.kind == SiteKind::Import) {
+            let file = index.file_path(s.file);
+            importers.push(format!("{}:{}", file, s.line));
+        }
+        let mut owners: Vec<usize> = Vec::new();
+        for s in sites.iter().filter(|s| s.kind != SiteKind::Import) {
+            if !owners.contains(&s.owner) {
+                owners.push(s.owner);
+            }
+        }
+        for owner in owners {
+            let mine: Vec<&Site> = sites
+                .iter()
+                .filter(|s| s.owner == owner && s.kind != SiteKind::Import)
+                .collect();
+            let certain = mine.iter().any(|s| s.certain);
+            if certain {
+                certain_direct += 1;
+            } else {
+                possible_direct += 1;
+            }
+            let owner_id = index.entity_id(owner);
+            flows.push(FlowEntry {
+                id: format!("F{:03}", flows.len() + 1),
+                description: if certain {
+                    "direct caller".to_string()
+                } else {
+                    "possible direct caller".to_string()
+                },
+                entry: target_id.clone(),
+                exit: owner_id.clone(),
+                steps: vec![step(owner_id, describe(&mine))],
+                issues: Vec::new(),
+            });
+        }
+        if depth > 1 {
+            for path in index.transitive_callers(target, depth) {
+                if path.len() < 2 {
+                    continue;
+                }
+                transitive += 1;
+                let exit = index.entity_id(path[path.len() - 1]);
+                flows.push(FlowEntry {
+                    id: format!("F{:03}", flows.len() + 1),
+                    description: format!("transitive caller, {} calls away", path.len()),
+                    entry: target_id.clone(),
+                    exit,
+                    steps: path
+                        .iter()
+                        .map(|d| step(index.entity_id(*d), "call".to_string()))
+                        .collect(),
+                    issues: Vec::new(),
+                });
+            }
+        }
+    }
+    if matches!(direction, TraceDirection::Forward | TraceDirection::Both) {
+        let sites = index.sites_within(target);
+        let mut callees: Vec<usize> = Vec::new();
+        for s in sites.iter().filter(|s| s.kind == SiteKind::Call) {
+            if !callees.contains(&s.target) {
+                callees.push(s.target);
+            }
+        }
+        for callee in callees {
+            let mine: Vec<&Site> = sites
+                .iter()
+                .filter(|s| s.target == callee && s.kind == SiteKind::Call)
+                .collect();
+            let callee_id = index.entity_id(callee);
+            flows.push(FlowEntry {
+                id: format!("F{:03}", flows.len() + 1),
+                description: "direct callee".to_string(),
+                entry: target_id.clone(),
+                exit: callee_id.clone(),
+                steps: vec![step(callee_id, describe(&mine))],
+                issues: Vec::new(),
+            });
+        }
+        if depth > 1 {
+            for path in index.transitive_callees(target, depth) {
+                if path.len() < 2 {
+                    continue;
+                }
+                let exit = index.entity_id(path[path.len() - 1]);
+                flows.push(FlowEntry {
+                    id: format!("F{:03}", flows.len() + 1),
+                    description: format!("transitive callee, {} calls away", path.len()),
+                    entry: target_id.clone(),
+                    exit,
+                    steps: path
+                        .iter()
+                        .map(|d| step(index.entity_id(*d), "call".to_string()))
+                        .collect(),
+                    issues: Vec::new(),
+                });
+            }
+        }
+    }
+
+    let output = match format {
+        OutputFormat::Yaml => {
+            serde_yaml::to_string(&flows).map_err(|e| FlowspecError::Manifest {
+                reason: format!("YAML serialization failed: {}", e),
+            })?
+        }
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(&flows).map_err(|e| FlowspecError::Manifest {
+                reason: format!("JSON serialization failed: {}", e),
+            })?
+        }
+        OutputFormat::Sarif => format_trace_sarif(&flows)?,
+        OutputFormat::Summary => {
+            let mut lines = vec![
+                format!("Trace: {} ({} flow(s) matched)", target_id, flows.len()),
+                String::new(),
+            ];
+            if matches!(direction, TraceDirection::Backward | TraceDirection::Both) {
+                lines.push(format!(
+                    "Direct callers: {} certain, {} possible. Transitive callers: {}.",
+                    certain_direct, possible_direct, transitive
+                ));
+                lines.push(String::new());
+            }
+            for flow in &flows {
+                lines.push(format!(
+                    "  {} -> {}  [{}]",
+                    flow.entry, flow.exit, flow.description
+                ));
+                for s in &flow.steps {
+                    lines.push(format!("    {} ({})", s.entity, s.action));
+                }
+            }
+            if !importers.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("Imported at: {}", importers.join(", ")));
+            }
+            lines.push(String::new());
+            lines.push(format!(
+                "Scope searched: {} Python file(s), {} definition(s), {} call site(s); {} call(s) had a receiver whose type could not be determined.",
+                stats.files, stats.definitions, stats.call_sites, stats.unknown_receiver_calls
+            ));
+            if stats.files_with_errors + stats.files_skipped > 0 {
+                lines.push(format!(
+                    "Incomplete: {} file(s) had syntax errors and {} could not be read; callers there may be missing.",
+                    stats.files_with_errors, stats.files_skipped
+                ));
+            }
+            lines.join("\n")
+        }
+    };
+    Ok(Some(output))
 }
 
 /// Find a SymbolId in the graph by matching qualified_name.
