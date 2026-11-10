@@ -105,7 +105,8 @@ fn backward_trace_marks_unproven_receiver_as_possible_with_site() {
     assert!(untyped.contains("user.py:13"), "untyped action: {untyped}");
     assert!(untyped.contains("possible"), "untyped action: {untyped}");
     let holder = find("Holder::go");
-    assert!(holder.contains("user.py:18"), "holder action: {holder}");
+    // The call expression is on line 19; line 18 is the `go` declaration.
+    assert!(holder.contains("user.py:19"), "holder action: {holder}");
     assert!(holder.contains("possible"), "holder action: {holder}");
 }
 
@@ -154,5 +155,82 @@ fn function_named_attribute_type_does_not_become_a_caller_edge() {
     assert!(
         !steps.iter().any(|(e, _)| e.ends_with("Holder::go")),
         "Holder.go only calls a method on the result; got {steps:?}"
+    );
+}
+
+#[test]
+fn python_symbol_forms_resolve_and_missing_member_is_reported_early() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_fixture(dir.path());
+    for query in [
+        "Sheet.template_variables",
+        "sheet.py::template_variables",
+        "pkg/sheet.py::Sheet::template_variables",
+    ] {
+        let flows = trace_json(dir.path(), query, TraceDirection::Backward);
+        assert_eq!(first_steps(&flows).len(), 4, "query {query}");
+    }
+    let err = run_trace(
+        dir.path(),
+        "pkg/sheet.py::Sheet::missing",
+        &[],
+        10,
+        TraceDirection::Backward,
+        OutputFormat::Summary,
+        Some(dir.path().join("missing.txt").as_path()),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("before project analysis"), "{err}");
+    assert!(err.contains("Available in this file"), "{err}");
+    assert!(err.contains("template_variables"), "{err}");
+}
+
+/// A real Python parse and graph build around the dense caller lattice that
+/// exhausted memory on Marianne. Keep the generated project below 200 files.
+#[test]
+fn mid_sized_python_project_has_bounded_backward_trace() {
+    let dir = tempfile::TempDir::new().unwrap();
+    for n in 0..120 {
+        std::fs::write(
+            dir.path().join(format!("filler_{n}.py")),
+            "def value():\n    return 1\n",
+        )
+        .unwrap();
+    }
+    for layer in 0..12 {
+        let mut source = String::new();
+        for branch in 0..3 {
+            source.push_str(&format!(
+                "class C{layer}_{branch}:\n    def step_{layer}(self, next):\n"
+            ));
+            if layer == 11 {
+                source.push_str("        return 1\n\n");
+            } else {
+                source.push_str(&format!("        return next.step_{}()\n\n", layer + 1));
+            }
+        }
+        std::fs::write(dir.path().join(format!("L{layer}.py")), source).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let flows = trace_json(
+        dir.path(),
+        "L11.py::C11_0::step_11",
+        TraceDirection::Backward,
+    );
+    let steps = first_steps(&flows);
+    for branch in 0..3 {
+        assert!(steps
+            .iter()
+            .any(|(name, _)| name.ends_with(&format!("C10_{branch}::step_10"))));
+    }
+    assert!(
+        flows.as_array().unwrap().len() < 500,
+        "trace path fan-out regressed"
+    );
+    assert!(
+        started.elapsed().as_secs() < 60,
+        "mid-sized trace exceeded 60 seconds"
     );
 }

@@ -521,6 +521,8 @@ pub fn run_trace(
 
     tracing::info!("Tracing symbol '{}' in {}", symbol, canonical.display());
 
+    preflight_python_symbol(&canonical, symbol)?;
+
     let result = crate::analyze(&canonical, &config, &normalized_languages)?;
 
     // Symbol matching: exact qualified name → name part → substring
@@ -1438,6 +1440,43 @@ pub fn find_matching_symbol(
     symbol: &str,
     entities: &[crate::manifest::types::EntityEntry],
 ) -> Result<String, FlowspecError> {
+    let normalized = if !symbol.contains(".py::") && symbol.contains('.') {
+        symbol.replace('.', "::")
+    } else {
+        symbol.to_string()
+    };
+    if let Some((requested_file, requested_member)) = normalized.split_once(".py::") {
+        let requested_file = format!("{requested_file}.py");
+        let requested_basename = Path::new(&requested_file)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&requested_file);
+        let matches: Vec<_> = entities
+            .iter()
+            .filter(|entity| {
+                let file = entity.loc.rsplit_once(':').map_or("", |(file, _)| file);
+                let file_matches = if requested_file.contains('/') {
+                    Path::new(file).ends_with(Path::new(&requested_file))
+                } else {
+                    Path::new(file)
+                        .file_name()
+                        .is_some_and(|n| n == requested_basename)
+                };
+                let member_matches = entity.id.ends_with(&format!("::{requested_member}"));
+                file_matches && member_matches
+            })
+            .collect();
+        return select_symbol_match(symbol, matches, entities);
+    }
+
+    if normalized != symbol {
+        let matches: Vec<_> = entities
+            .iter()
+            .filter(|entity| entity.id.ends_with(&format!("::{normalized}")))
+            .collect();
+        return select_symbol_match(symbol, matches, entities);
+    }
+
     // 1. Exact match on qualified name (e.g., "main.py::process")
     let exact_matches: Vec<&crate::manifest::types::EntityEntry> =
         entities.iter().filter(|e| e.id == symbol).collect();
@@ -1492,6 +1531,94 @@ pub fn find_matching_symbol(
     Err(FlowspecError::SymbolNotFound(format!(
         "Symbol '{}' not found. Run `flowspec analyze` to see available entities.",
         symbol
+    )))
+}
+
+fn select_symbol_match(
+    requested: &str,
+    matches: Vec<&crate::manifest::types::EntityEntry>,
+    entities: &[crate::manifest::types::EntityEntry],
+) -> Result<String, FlowspecError> {
+    match matches.as_slice() {
+        [entity] => Ok(entity.id.clone()),
+        [] => {
+            let available: Vec<_> = entities.iter().take(12).map(|e| e.id.as_str()).collect();
+            Err(FlowspecError::SymbolNotFound(format!(
+                "Symbol '{requested}' not found. Available symbols include: {}",
+                available.join(", ")
+            )))
+        }
+        _ => Err(FlowspecError::SymbolNotFound(format!(
+            "Symbol '{requested}' matches multiple entities: {}. Use a qualified path.",
+            matches
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// Validate an explicitly named Python file and member before building a graph.
+/// A basename may name several files; each is checked and the later graph match
+/// disambiguates them by source location.
+fn preflight_python_symbol(root: &Path, requested: &str) -> Result<(), FlowspecError> {
+    use crate::parser::python::PythonAdapter;
+    use crate::parser::LanguageAdapter;
+
+    let Some((file_prefix, member)) = requested.split_once(".py::") else {
+        return Ok(());
+    };
+    let file_suffix = format!("{file_prefix}.py");
+    let mut files = Vec::new();
+    let mut walker = ignore::WalkBuilder::new(root);
+    walker.git_ignore(true).git_global(true).git_exclude(true);
+    for entry in walker.build().flatten() {
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let file = entry.path();
+        if file_prefix.contains('/') {
+            if !file.ends_with(Path::new(&file_suffix)) {
+                continue;
+            }
+        } else if file
+            .file_name()
+            .is_none_or(|name| name != file_suffix.as_str())
+        {
+            continue;
+        }
+        files.push(file.to_path_buf());
+    }
+
+    let mut available = Vec::new();
+    for file in &files {
+        let source = std::fs::read_to_string(file).map_err(|source| FlowspecError::Io {
+            path: file.clone(),
+            source,
+        })?;
+        let parsed = PythonAdapter::new().parse_file(file, &source)?;
+        for symbol in parsed.symbols {
+            if symbol.qualified_name.ends_with(&format!("::{member}")) {
+                return Ok(());
+            }
+            available.push(symbol.qualified_name);
+        }
+    }
+
+    available.sort();
+    available.dedup();
+    Err(FlowspecError::SymbolNotFound(format!(
+        "Symbol '{requested}' not found before project analysis. Available in this file: {}",
+        if files.is_empty() {
+            "no matching Python file".to_string()
+        } else {
+            available
+                .into_iter()
+                .take(20)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     )))
 }
 
