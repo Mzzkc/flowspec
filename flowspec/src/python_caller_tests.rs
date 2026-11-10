@@ -137,3 +137,22 @@ fn zero_callers_states_what_was_searched() {
         "zero-flow summary must count call sites; got:\n{text}"
     );
 }
+
+/// Oracle-proved false positive: `self.sheet = make()` types the attribute by a
+/// *function* name, so `self.sheet.template_variables()` must not make `make`
+/// a callee of `Holder.go`. Only `Holder.__init__` calls `make()`.
+#[test]
+fn function_named_attribute_type_does_not_become_a_caller_edge() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_fixture(dir.path());
+    let flows = trace_json(dir.path(), "sheet.py::make", TraceDirection::Backward);
+    let steps = first_steps(&flows);
+    assert!(
+        steps.iter().any(|(e, _)| e.ends_with("Holder::__init__")),
+        "Holder.__init__ really calls make(); got {steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|(e, _)| e.ends_with("Holder::go")),
+        "Holder.go only calls a method on the result; got {steps:?}"
+    );
+}

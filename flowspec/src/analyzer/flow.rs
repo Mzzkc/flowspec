@@ -21,6 +21,9 @@ use crate::parser::ir::{EdgeKind, SymbolId, SymbolKind};
 /// is truncated and a `tracing::warn!` is emitted.
 const MAX_FLOW_DEPTH: usize = 64;
 
+/// Upper bound on paths returned for one symbol, either direction.
+const MAX_FLOW_PATHS: usize = 5000;
+
 /// A single step in a traced flow path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowStep {
@@ -66,8 +69,15 @@ pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId, max_depth: usize)
         return paths;
     }
 
-    // DFS: for each outgoing call edge, trace a path
+    // DFS: for each outgoing call edge, trace a path. A callee already expanded
+    // ends its path where it is met (see `trace_flows_to`): simple-path
+    // enumeration is exponential on dense call graphs.
+    let mut expanded = HashSet::new();
     for target in &call_targets {
+        if paths.len() >= MAX_FLOW_PATHS {
+            tracing::warn!("Flow trace path limit ({MAX_FLOW_PATHS}) reached");
+            break;
+        }
         let mut visited = HashSet::new();
         visited.insert(start_symbol);
         let mut current_steps = Vec::new();
@@ -77,6 +87,7 @@ pub fn trace_flows_from(graph: &Graph, start_symbol: SymbolId, max_depth: usize)
             *target,
             start_symbol,
             &mut visited,
+            &mut expanded,
             &mut current_steps,
             &mut paths,
             0,
@@ -158,11 +169,15 @@ fn dfs_trace(
     current: SymbolId,
     entry: SymbolId,
     visited: &mut HashSet<SymbolId>,
+    expanded: &mut HashSet<SymbolId>,
     current_steps: &mut Vec<FlowStep>,
     paths: &mut Vec<FlowPath>,
     depth: usize,
     max_depth: usize,
 ) {
+    if paths.len() >= MAX_FLOW_PATHS {
+        return;
+    }
     // Max depth enforcement
     if depth >= max_depth {
         tracing::warn!("Flow trace depth limit ({}) reached", max_depth);
@@ -199,7 +214,11 @@ fn dfs_trace(
     });
 
     // Find outgoing call edges, resolving import proxies transparently
-    let call_targets = resolve_call_targets(graph, current);
+    let call_targets = if expanded.insert(current) {
+        resolve_call_targets(graph, current)
+    } else {
+        Vec::new()
+    };
 
     if call_targets.is_empty() {
         // Terminal node — record the complete path
@@ -216,6 +235,7 @@ fn dfs_trace(
                 *target,
                 entry,
                 visited,
+                expanded,
                 current_steps,
                 paths,
                 depth + 1,
@@ -248,7 +268,17 @@ pub fn trace_flows_to(graph: &Graph, target_symbol: SymbolId, max_depth: usize) 
         return paths;
     }
 
+    // Each caller entity is expanded once per trace. Enumerating every simple
+    // path is exponential on a dense caller lattice (one untyped receiver fans
+    // out to several same-named methods), so a caller already expanded ends its
+    // path where it is met; its own callers are reported once, under the first
+    // path that reached it.
+    let mut expanded = HashSet::new();
     for caller in &caller_ids {
+        if paths.len() >= MAX_FLOW_PATHS {
+            tracing::warn!("Backward trace path limit ({MAX_FLOW_PATHS}) reached");
+            break;
+        }
         let mut visited = HashSet::new();
         visited.insert(target_symbol);
         let mut current_steps = Vec::new();
@@ -258,6 +288,7 @@ pub fn trace_flows_to(graph: &Graph, target_symbol: SymbolId, max_depth: usize) 
             *caller,
             target_symbol,
             &mut visited,
+            &mut expanded,
             &mut current_steps,
             &mut paths,
             0,
@@ -278,11 +309,15 @@ fn dfs_trace_backward(
     current: SymbolId,
     target: SymbolId,
     visited: &mut HashSet<SymbolId>,
+    expanded: &mut HashSet<SymbolId>,
     current_steps: &mut Vec<FlowStep>,
     paths: &mut Vec<FlowPath>,
     depth: usize,
     max_depth: usize,
 ) {
+    if paths.len() >= MAX_FLOW_PATHS {
+        return;
+    }
     if depth >= max_depth {
         tracing::warn!("Backward trace depth limit ({}) reached", max_depth);
         paths.push(FlowPath {
@@ -313,7 +348,12 @@ fn dfs_trace_backward(
         edge_kind: EdgeKind::Calls,
     });
 
-    let caller_ids = graph.callers(current);
+    let already_expanded = !expanded.insert(current);
+    let caller_ids = if already_expanded {
+        Vec::new()
+    } else {
+        graph.callers(current)
+    };
 
     if caller_ids.is_empty() {
         // Root node — no more callers, record the path
@@ -329,6 +369,7 @@ fn dfs_trace_backward(
                 *caller,
                 target,
                 visited,
+                expanded,
                 current_steps,
                 paths,
                 depth + 1,
@@ -383,6 +424,97 @@ mod tests {
             },
             resolution: ResolutionStatus::Resolved,
         });
+    }
+
+    // Bounded backward trace: a dense caller lattice must not enumerate every
+    // simple path (3^12 = 531,441 here; exponential on a real tree).
+    #[test]
+    fn test_backward_trace_is_bounded_on_dense_caller_lattice() {
+        let mut g = Graph::new();
+        let target = g.add_symbol(make_symbol("target", SymbolKind::Function, "t.py", 1));
+        let mut layer = vec![target];
+        let mut all_callers = Vec::new();
+        for depth in 0..12u32 {
+            let next: Vec<SymbolId> = (0..3u32)
+                .map(|w| {
+                    g.add_symbol(make_symbol(
+                        &format!("f_{depth}_{w}"),
+                        SymbolKind::Function,
+                        "t.py",
+                        10 + depth * 3 + w,
+                    ))
+                })
+                .collect();
+            for &callee in &layer {
+                for &caller in &next {
+                    add_call(&mut g, caller, callee, "t.py");
+                }
+            }
+            all_callers.extend(next.iter().copied());
+            layer = next;
+        }
+
+        let paths = trace_flows_to(&g, target, MAX_FLOW_DEPTH);
+
+        assert!(
+            paths.len() <= MAX_FLOW_PATHS,
+            "backward trace must be bounded; got {} paths",
+            paths.len()
+        );
+        // Every caller entity is still reported somewhere.
+        for caller in all_callers {
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.steps.iter().any(|s| s.symbol == caller)),
+                "caller {caller:?} dropped by the bound"
+            );
+        }
+    }
+
+    // Forward twin of the backward bound: `analyze` runs `trace_all_flows` from
+    // every `main`, so a dense callee lattice must not enumerate every simple path.
+    #[test]
+    fn test_forward_trace_is_bounded_on_dense_callee_lattice() {
+        let mut g = Graph::new();
+        let entry = g.add_symbol(make_symbol("main", SymbolKind::Function, "t.py", 1));
+        let mut layer = vec![entry];
+        let mut all_callees = Vec::new();
+        for depth in 0..12u32 {
+            let next: Vec<SymbolId> = (0..3u32)
+                .map(|w| {
+                    g.add_symbol(make_symbol(
+                        &format!("g_{depth}_{w}"),
+                        SymbolKind::Function,
+                        "t.py",
+                        10 + depth * 3 + w,
+                    ))
+                })
+                .collect();
+            for &caller in &layer {
+                for &callee in &next {
+                    add_call(&mut g, caller, callee, "t.py");
+                }
+            }
+            all_callees.extend(next.iter().copied());
+            layer = next;
+        }
+
+        let paths = trace_flows_from(&g, entry, MAX_FLOW_DEPTH);
+
+        assert!(
+            paths.len() <= MAX_FLOW_PATHS,
+            "forward trace must be bounded; got {} paths",
+            paths.len()
+        );
+        for callee in all_callees {
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.steps.iter().any(|s| s.symbol == callee)),
+                "callee {callee:?} dropped by the bound"
+            );
+        }
     }
 
     // T15: Linear path A→B→C

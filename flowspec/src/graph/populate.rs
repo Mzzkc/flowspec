@@ -386,7 +386,12 @@ fn insert_references(
                                 }
                                 None
                             });
-                            if let Some(type_name) = type_name {
+                            // `self.attr = make()` records the *function* `make` as the
+                            // attribute's type; only a class-like name may route a method
+                            // call through the import, or the function gains a false caller.
+                            if let Some(type_name) = type_name.filter(|t| {
+                                t.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                            }) {
                                 let import_id = symbol_id_map
                                     .iter()
                                     .find(|(idx, _)| {
