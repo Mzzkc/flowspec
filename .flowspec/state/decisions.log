@@ -211,3 +211,44 @@ alternatives_considered:
   - "Implement partial detection with heuristics (rejected — high FP risk, violates confidence-scored diagnostics principle)"
   - "Remove from roadmap entirely (rejected — both are valuable patterns, just need infrastructure that v1 doesn't have)"
   - "Defer to v1.1 with documented rationale (chosen)"
+
+---
+decision: "Narrow v1 to one promise — complete, fast Python symbol references — and build a real resolver on tree-sitter"
+date: 2026-11-10
+area: scope, architecture
+rationale: |
+  Measured on Marianne (334 Python files) by an independent ast-derived oracle:
+  flowspec found 309 of 380 certain direct callers; 136 of 137 missed call
+  expressions needed the receiver's type (annotation, constructor, self,
+  inheritance). 29 of 30 sampled diagnose findings were false, nearly all from
+  references the graph did not see. A patch that added "possible caller" edges to
+  the existing name-matching graph raised one trace from 343 MB to over 2 GB and
+  an uncapped run exhausted the host. The consumer (the Marianne conductor) asked
+  one question for three weeks, "which call sites reach this symbol", and grep
+  answered it faster every time. The composer delegated this decision on
+  2026-11-10 with the instruction: a good tool that does what it says on the tin.
+
+  Decided:
+  1. v1 promises one thing: for a Python symbol, every reference (call, read,
+     import), with file and line, certain separated from possible, direct
+     separated from transitive, and a statement of what was searched when the
+     answer is empty. Everything else is frozen until that clears the bar.
+  2. Tree-sitter only stays. No LSP, no external processes. Zero setup is the
+     reason to exist, so flowspec owns a real resolver: per-scope bindings,
+     import graph, class hierarchy with MRO, receiver types from annotations,
+     constructors and attribute assignments.
+  3. Analysis is indexed once and queried many times: persisted, incremental,
+     .gitignore honoured by default, a hard memory budget that fails loudly.
+  4. The bar is external and numeric, run in CI on real repositories: direct
+     certain-caller recall >= 98%, zero wrong certain callers, warm query under
+     2 s, cold index of a ~300-file project under 60 s, peak memory under 1 GB.
+  5. Diagnostic patterns keep running but a pattern is reported at high or
+     medium confidence only after it clears 90% precision on labelled findings;
+     until then its findings are low confidence and outside the default display,
+     with a count line saying how many were held back. Nothing is suppressed.
+  6. JavaScript/TypeScript and Rust adapters are frozen, not removed. Rust
+     resumes when Python clears the bar.
+alternatives_considered:
+  - "Keep patching edges into the name-matching graph (rejected — the 11:27Z memory exhaustion is what that costs)"
+  - "Wrap pyright/jedi or an LSP for Python (rejected — external process and setup; breaks the tree-sitter-only constraint and the zero-setup niche)"
+  - "Keep the full v1 surface and fix breadth-first (rejected — eleven rounds of method-dispatch correction did not make method callers work)"
