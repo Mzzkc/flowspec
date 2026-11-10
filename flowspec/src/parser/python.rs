@@ -1585,6 +1585,16 @@ fn extract_all_calls(
                     resolution: ResolutionStatus::Partial(format!("call:{}", name)),
                 });
             }
+            if let Some(hint) = method_call_hint(content, func_node) {
+                result.references.push(Reference {
+                    id: ReferenceId::default(),
+                    from: SymbolId::default(),
+                    to: SymbolId::default(),
+                    kind: ReferenceKind::Call,
+                    location: node_location(path, node),
+                    resolution: ResolutionStatus::Partial(hint),
+                });
+            }
         }
     }
 
@@ -1593,6 +1603,139 @@ fn extract_all_calls(
     for child in node.children(&mut cursor) {
         extract_all_calls(result, content, path, child, depth + 1);
     }
+}
+
+/// Builds the `method_call:<receiver>|<method>|<type>` hint for `recv.method(...)`.
+///
+/// `populate_graph` stores the hint as a pending method call; a project-level pass
+/// resolves it after every file is parsed, because the class that owns `method`
+/// usually lives in another file. `<type>` is the receiver's class name when it is
+/// provable from syntax (parameter annotation, local or module constructor call,
+/// annotated assignment, a class referenced directly); it is empty otherwise, and
+/// the call is then reported as a *possible* caller rather than dropped.
+///
+/// Returns `None` for `self.method` (resolved intra-class), for receivers that are
+/// not a plain identifier or `self.attr`, and for plain `module.func` shapes that
+/// cannot be told apart here — those stay with the import-based resolver.
+fn method_call_hint(content: &[u8], func_node: Node) -> Option<String> {
+    if func_node.kind() != "attribute" {
+        return None;
+    }
+    let object = func_node.child_by_field_name("object")?;
+    let method = node_text(content, func_node.child_by_field_name("attribute")?);
+    if method.is_empty() {
+        return None;
+    }
+    match object.kind() {
+        "identifier" => {
+            let recv = node_text(content, object);
+            if matches!(recv, "self" | "cls" | "super") {
+                return None;
+            }
+            let hint = receiver_class_hint(func_node, content, recv).unwrap_or_default();
+            Some(format!("method_call:{recv}|{method}|{hint}"))
+        }
+        "attribute" => {
+            // `self.attr.method(...)`: one attribute hop off `self`.
+            let base = object.child_by_field_name("object")?;
+            let attr = node_text(content, object.child_by_field_name("attribute")?);
+            if base.kind() == "identifier" && node_text(content, base) == "self" && !attr.is_empty()
+            {
+                Some(format!("method_call:self.{attr}|{method}|"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Finds the class name a receiver identifier provably holds, from syntax alone.
+///
+/// Search order: the enclosing function's parameter annotation, an annotated or
+/// constructor assignment in that function body, then the same at module level.
+/// Only a capitalised simple identifier counts as a class (`Sheet`, never `make`),
+/// so `x = make()` stays unproven instead of naming a function as a class.
+fn receiver_class_hint(from: Node, content: &[u8], recv: &str) -> Option<String> {
+    let mut ancestor = from.parent();
+    while let Some(current) = ancestor {
+        if current.kind() == "function_definition" {
+            if let Some(params) = current.child_by_field_name("parameters") {
+                if let Some(found) = parameter_class_hint(params, content, recv) {
+                    return Some(found);
+                }
+                if parameter_contains_name(params, content, recv) {
+                    return None; // untyped parameter shadows any outer binding
+                }
+            }
+            if let Some(body) = current.child_by_field_name("body") {
+                if let Some(found) = assignment_class_hint(body, content, recv) {
+                    return Some(found);
+                }
+                if body_binds_name(body, content, recv) {
+                    return None; // bound locally to something we cannot name
+                }
+            }
+        } else if current.kind() == "module" {
+            return assignment_class_hint(current, content, recv);
+        }
+        ancestor = current.parent();
+    }
+    None
+}
+
+fn is_class_like(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+fn parameter_class_hint(params: Node, content: &[u8], recv: &str) -> Option<String> {
+    let mut cursor = params.walk();
+    for param in params.named_children(&mut cursor) {
+        if !matches!(param.kind(), "typed_parameter" | "typed_default_parameter") {
+            continue;
+        }
+        let name_node = if param.kind() == "typed_parameter" {
+            param.named_child(0)
+        } else {
+            param.child_by_field_name("name")
+        }?;
+        if name_node.kind() != "identifier" || node_text(content, name_node) != recv {
+            continue;
+        }
+        let type_node = param.child_by_field_name("type")?;
+        return extract_simple_type_name(content, type_node).filter(|t| is_class_like(t));
+    }
+    None
+}
+
+/// Looks for `recv = ClassName(...)` or `recv: ClassName = ...` below `node`,
+/// without descending into nested functions or classes (other scopes).
+fn assignment_class_hint(node: Node, content: &[u8], recv: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "function_definition" | "class_definition" | "decorated_definition" | "lambda" => {
+                continue
+            }
+            "assignment" => {
+                let left = child.child_by_field_name("left");
+                if left.is_some_and(|l| l.kind() == "identifier" && node_text(content, l) == recv) {
+                    let annotated = child
+                        .child_by_field_name("type")
+                        .and_then(|t| extract_simple_type_name(content, t));
+                    let found = annotated.or_else(|| extract_constructor_type_name(content, child));
+                    if let Some(found) = found.filter(|t| is_class_like(t)) {
+                        return Some(found);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(found) = assignment_class_hint(child, content, recv) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Extracts the callee name from a call expression's `function` field.

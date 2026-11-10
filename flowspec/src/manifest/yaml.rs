@@ -40,7 +40,7 @@ impl OutputFormatter for YamlFormatter {
                     "full_findings_total",
                     "displayed_findings_total",
                 ] {
-                    fields.remove(&serde_yaml::Value::String(key.to_string()));
+                    fields.remove(serde_yaml::Value::String(key.to_string()));
                 }
             }
             return serde_yaml::to_string(&value).map_err(|e| ManifestError::Serialization {

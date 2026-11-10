@@ -577,6 +577,13 @@ pub fn run_trace(
                 flow_entries.len()
             ));
             lines.push(String::new());
+            if flow_entries.is_empty() {
+                lines.extend(zero_flow_scope_lines(
+                    &result.graph,
+                    &matched_entity,
+                    direction,
+                ));
+            }
             for flow in &flow_entries {
                 lines.push(format!("  {} -> {}", flow.entry, flow.exit));
                 for step in &flow.steps {
@@ -611,6 +618,101 @@ pub fn find_symbol_id_in_graph(
     )))
 }
 
+/// Describes how `caller` reaches `callee`: file:line of each call site, and
+/// whether the receiver's type was proven.
+///
+/// A site whose receiver type could not be proven reads `possible call at
+/// file:line (receiver type not proven)`; proven sites read `call at file:line`.
+/// Falls back to plain `call` when the graph holds no located edge.
+fn call_site_action(graph: &crate::Graph, caller: SymbolId, callee: SymbolId) -> String {
+    let mut proven: Vec<String> = Vec::new();
+    let mut possible: Vec<String> = Vec::new();
+    for edge in graph.edges_to(callee) {
+        if edge.kind != crate::parser::ir::EdgeKind::Calls || edge.target != caller {
+            continue;
+        }
+        let Some(reference) = edge.reference_id.and_then(|id| graph.get_reference(id)) else {
+            continue;
+        };
+        let site = format!(
+            "{}:{}",
+            reference
+                .location
+                .file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            reference.location.line
+        );
+        let is_possible = matches!(&reference.resolution,
+            crate::parser::ir::ResolutionStatus::Partial(info) if info == crate::graph::POSSIBLE_CALLER);
+        let bucket = if is_possible {
+            &mut possible
+        } else {
+            &mut proven
+        };
+        if !bucket.contains(&site) {
+            bucket.push(site);
+        }
+    }
+    // A site proven by one edge is not also "possible" from another.
+    possible.retain(|s| !proven.contains(s));
+    match (proven.is_empty(), possible.is_empty()) {
+        (false, true) => format!("call at {}", proven.join(", ")),
+        (true, false) => format!(
+            "possible call at {} (receiver type not proven)",
+            possible.join(", ")
+        ),
+        (false, false) => format!(
+            "call at {}; possible call at {} (receiver type not proven)",
+            proven.join(", "),
+            possible.join(", ")
+        ),
+        (true, true) => "call".to_string(),
+    }
+}
+
+/// Explains an empty trace: what was searched, and what could not be seen.
+///
+/// "Nothing calls this" and "the callers could not be seen" are different
+/// answers; method calls that share the traced name but could not be tied to a
+/// class are counted so the reader can tell which one this is.
+fn zero_flow_scope_lines(
+    graph: &crate::Graph,
+    matched_entity: &str,
+    direction: TraceDirection,
+) -> Vec<String> {
+    let direction_name = match direction {
+        TraceDirection::Forward => "forward (callees)",
+        TraceDirection::Backward => "backward (callers)",
+        TraceDirection::Both => "both directions",
+    };
+    let name = matched_entity.rsplit("::").next().unwrap_or(matched_entity);
+    let same_name = graph
+        .unattributed_method_calls()
+        .iter()
+        .filter(|c| c.method == name)
+        .count();
+    let mut lines = vec![format!(
+        "  searched: {} file(s), {} call site(s), direction {}; no call edge reaches this symbol",
+        graph.file_count(),
+        graph.examined_call_sites(),
+        direction_name
+    )];
+    if same_name > 0 {
+        lines.push(format!(
+            "  could not see callers: {} call site(s) of a method named '{}' have a receiver that maps to no project class",
+            same_name, name
+        ));
+    } else {
+        lines.push(format!(
+            "  no call site named '{}' was left unattributed, so this reads as no callers in the files searched",
+            name
+        ));
+    }
+    lines
+}
+
 /// Convert graph-level FlowPaths to manifest-level FlowEntries.
 ///
 /// Maps SymbolIds to qualified names via graph lookup, matching the conversion
@@ -635,17 +737,31 @@ pub fn flow_paths_to_entries(
                 .map(|s| s.qualified_name.clone())
                 .unwrap_or_else(|| entry_name.clone());
 
+            // Backward paths start at a caller of `entry`; forward paths start at
+            // `entry` itself. Only backward steps name the call site they came from.
+            let backward = path.steps.first().is_some_and(|s| s.symbol != path.entry);
             let steps: Vec<crate::manifest::types::FlowStep> = path
                 .steps
                 .iter()
-                .map(|step| {
+                .enumerate()
+                .map(|(k, step)| {
                     let entity = graph
                         .get_symbol(step.symbol)
                         .map(|s| s.qualified_name.clone())
                         .unwrap_or_else(|| "unknown".to_string());
+                    let action = if backward {
+                        let callee = if k == 0 {
+                            path.entry
+                        } else {
+                            path.steps[k - 1].symbol
+                        };
+                        call_site_action(graph, step.symbol, callee)
+                    } else {
+                        "call".to_string()
+                    };
                     crate::manifest::types::FlowStep {
                         entity,
-                        action: "call".to_string(),
+                        action,
                         in_type: "unknown".to_string(),
                         out_type: "unknown".to_string(),
                     }

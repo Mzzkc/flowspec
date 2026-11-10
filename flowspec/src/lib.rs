@@ -122,6 +122,8 @@ mod cycle21_analysis_tests;
 
 #[cfg(test)]
 mod cycle21_qa1_tests;
+#[cfg(test)]
+mod python_caller_tests;
 
 // Re-export key public types
 pub use analyzer::diagnostic::{Confidence, Diagnostic, DiagnosticPattern, Evidence, Severity};
@@ -479,6 +481,8 @@ fn analyze_core(
     if !module_map.is_empty() {
         resolve_cross_file_imports(&mut graph, &module_map);
     }
+    // Stage 1c: project-wide receiver.method() call resolution (needs all files).
+    graph::resolve_method_calls(&mut graph);
     for reference in graph.prerequisite_losses() {
         let parser::ir::ResolutionStatus::Partial(info) = &reference.resolution else {
             continue;

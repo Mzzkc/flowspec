@@ -303,7 +303,32 @@ fn insert_references(
                 graph.record_dynamic_export(reference.location.file.clone());
                 continue;
             }
+            ResolutionStatus::Partial(info) if info.starts_with("method_call:") => {
+                // `recv|method|type` hint from the parser; resolved project-wide
+                // by `resolve_method_calls` once every file is populated.
+                let mut parts = info["method_call:".len()..].splitn(3, '|');
+                let (Some(receiver), Some(method), Some(type_hint)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                graph.note_call_site_examined();
+                let from = find_containing_symbol(&reference.location, symbols, symbol_id_map)
+                    .unwrap_or_else(|| {
+                        *module_symbol_id
+                            .get_or_insert_with(|| create_module_symbol(graph, &reference.location))
+                    });
+                graph.record_pending_method_call(super::PendingMethodCall {
+                    from,
+                    location: reference.location.clone(),
+                    receiver: receiver.to_string(),
+                    method: method.to_string(),
+                    type_hint: type_hint.to_string(),
+                });
+                continue;
+            }
             ResolutionStatus::Partial(info) if info.starts_with("call:") => {
+                graph.note_call_site_examined();
                 let callee_name = &info[5..]; // after "call:"
 
                 // Resolve from: find the symbol whose location contains this call
@@ -1513,6 +1538,121 @@ pub fn resolve_cross_file_imports(
         });
     }
 }
+
+/// Resolves pending `receiver.method(...)` call sites across the whole project.
+///
+/// Runs once after every file is populated and cross-file imports are resolved.
+///
+/// - **Proven**: the receiver's class is known from syntax (annotation, local or
+///   module constructor). If exactly one project class has that name and a method
+///   `method`, a normal `Calls` edge is added.
+/// - **Possible**: the receiver's type is unknown (untyped parameter, `self.attr`).
+///   Every project method named `method` (at most [`MAX_POSSIBLE_TARGETS`]) gets a
+///   `Calls` edge whose resolution is `Partial("possible_caller")`, so the site is
+///   reported with lower confidence rather than dropped.
+/// - **Unattributed**: no project method has that name, or too many do. The site is
+///   recorded so a zero-caller answer can say it could not see the callers.
+///
+/// Idempotent: pending calls are consumed.
+pub fn resolve_method_calls(graph: &mut Graph) {
+    use std::collections::HashMap;
+
+    let pending = graph.take_pending_method_calls();
+    if pending.is_empty() {
+        return;
+    }
+
+    // method name -> [(method id, qualified class prefix)]
+    let mut methods: HashMap<String, Vec<(SymbolId, String)>> = HashMap::new();
+    // class name -> [class qualified name]
+    let mut classes: HashMap<String, Vec<String>> = HashMap::new();
+    for (id, sym) in graph.all_symbols() {
+        if sym.annotations.contains(&"import".to_string()) {
+            continue;
+        }
+        match sym.kind {
+            SymbolKind::Method => {
+                if let Some((class_qn, _)) = sym.qualified_name.rsplit_once("::") {
+                    methods
+                        .entry(sym.name.clone())
+                        .or_default()
+                        .push((id, class_qn.to_string()));
+                }
+            }
+            SymbolKind::Class => {
+                classes
+                    .entry(sym.name.clone())
+                    .or_default()
+                    .push(sym.qualified_name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut edges: Vec<(SymbolId, SymbolId, Location, bool)> = Vec::new();
+    let mut unattributed: Vec<super::PendingMethodCall> = Vec::new();
+
+    for call in pending {
+        let candidates = methods.get(&call.method).map(Vec::as_slice).unwrap_or(&[]);
+
+        if !call.type_hint.is_empty() {
+            if let Some(class_qns) = classes.get(&call.type_hint) {
+                let proven: Vec<SymbolId> = candidates
+                    .iter()
+                    .filter(|(_, class_qn)| class_qns.contains(class_qn))
+                    .map(|(id, _)| *id)
+                    .collect();
+                if !proven.is_empty() {
+                    // Several classes sharing a name stay possible, not proven.
+                    let certain = class_qns.len() == 1 && proven.len() == 1;
+                    for id in proven {
+                        edges.push((call.from, id, call.location.clone(), !certain));
+                    }
+                    continue;
+                }
+            }
+            // The named type is not a project class with that method: external
+            // or inherited. Do not guess a project target from the name alone.
+            unattributed.push(call);
+            continue;
+        }
+
+        if candidates.is_empty() || candidates.len() > MAX_POSSIBLE_TARGETS {
+            unattributed.push(call);
+            continue;
+        }
+        for (id, _) in candidates {
+            edges.push((call.from, *id, call.location.clone(), true));
+        }
+    }
+
+    for (from, to, location, possible) in edges {
+        graph.add_reference(Reference {
+            id: ReferenceId::default(),
+            from,
+            to,
+            kind: ReferenceKind::Call,
+            location,
+            resolution: if possible {
+                ResolutionStatus::Partial(POSSIBLE_CALLER.to_string())
+            } else {
+                ResolutionStatus::Resolved
+            },
+        });
+    }
+    for call in unattributed {
+        graph.record_unattributed_method_call(call);
+    }
+}
+
+/// Resolution marker on a `Calls` edge whose receiver type was not proven.
+pub const POSSIBLE_CALLER: &str = "possible_caller";
+
+/// Upper bound on same-named methods an untyped receiver may fan out to.
+///
+/// Past this, the name says too little (`get`, `run`) and the site is recorded
+/// as unattributed instead of creating a wall of low-value edges.
+pub const MAX_POSSIBLE_TARGETS: usize = 6;
 
 #[cfg(test)]
 mod tests {

@@ -25,6 +25,8 @@ pub use populate::resolve_cross_file_imports;
 #[allow(unused_imports)]
 // Used by cycle14_surface_tests via crate::graph::resolve_import_by_name
 pub(crate) use populate::resolve_import_by_name;
+pub use populate::resolve_method_calls;
+pub use populate::{MAX_POSSIBLE_TARGETS, POSSIBLE_CALLER};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -33,6 +35,24 @@ use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
 use crate::parser::ir::*;
+
+/// A `receiver.method(...)` call site waiting for the project-level resolver.
+///
+/// The class that owns `method` is usually defined in a different file than the
+/// call, so the call cannot be resolved while its own file is being populated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingMethodCall {
+    /// The function or method containing the call.
+    pub from: SymbolId,
+    /// Source location of the whole call expression.
+    pub location: Location,
+    /// Receiver text as written (`sheet`, `self.sheet`).
+    pub receiver: String,
+    /// The called method name.
+    pub method: String,
+    /// Class the receiver provably holds, or empty when it cannot be proven.
+    pub type_hint: String,
+}
 
 /// The core analysis graph — the source of truth for all Flowspec analysis.
 ///
@@ -73,6 +93,12 @@ pub struct Graph {
     prerequisite_losses: Vec<Reference>,
     #[serde(default)]
     dynamic_exports: HashSet<PathBuf>,
+    #[serde(default)]
+    pending_method_calls: Vec<PendingMethodCall>,
+    #[serde(default)]
+    unattributed_method_calls: Vec<PendingMethodCall>,
+    #[serde(default)]
+    examined_call_sites: usize,
 
     outgoing: HashMap<SymbolId, Vec<Edge>>,
     incoming: HashMap<SymbolId, Vec<Edge>>,
@@ -101,6 +127,40 @@ impl Graph {
 
     pub(crate) fn record_prerequisite_loss(&mut self, reference: Reference) {
         self.prerequisite_losses.push(reference);
+    }
+
+    /// Number of call sites the populate pass examined (resolved or not).
+    pub fn examined_call_sites(&self) -> usize {
+        self.examined_call_sites
+    }
+
+    pub(crate) fn note_call_site_examined(&mut self) {
+        self.examined_call_sites += 1;
+    }
+
+    /// Number of files that contributed symbols to this graph.
+    pub fn file_count(&self) -> usize {
+        self.file_symbols.len()
+    }
+
+    pub(crate) fn record_pending_method_call(&mut self, call: PendingMethodCall) {
+        self.pending_method_calls.push(call);
+    }
+
+    pub(crate) fn take_pending_method_calls(&mut self) -> Vec<PendingMethodCall> {
+        std::mem::take(&mut self.pending_method_calls)
+    }
+
+    pub(crate) fn record_unattributed_method_call(&mut self, call: PendingMethodCall) {
+        self.unattributed_method_calls.push(call);
+    }
+
+    /// Method calls whose receiver could not be tied to any project class.
+    ///
+    /// A backward trace uses these to say "could not see the callers" instead of
+    /// "nothing calls this" when a same-named method call exists somewhere.
+    pub fn unattributed_method_calls(&self) -> &[PendingMethodCall] {
+        &self.unattributed_method_calls
     }
 
     pub(crate) fn record_unresolved_call(&mut self, reference: Reference) {
@@ -523,6 +583,10 @@ impl Graph {
     /// If the file path is not in the graph, this is a no-op.
     pub fn remove_file(&mut self, path: &Path) {
         self.unresolved_calls
+            .retain(|call| call.location.file != path);
+        self.pending_method_calls
+            .retain(|call| call.location.file != path);
+        self.unattributed_method_calls
             .retain(|call| call.location.file != path);
         self.dynamic_exports.remove(path);
         // Collect symbol IDs for the file
