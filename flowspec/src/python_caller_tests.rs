@@ -107,7 +107,10 @@ fn backward_trace_marks_unproven_receiver_as_possible_with_site() {
     let holder = find("Holder::go");
     // The call expression is on line 19; line 18 is the `go` declaration.
     assert!(holder.contains("user.py:19"), "holder action: {holder}");
-    assert!(holder.contains("possible"), "holder action: {holder}");
+    // `self.sheet = make()` and `make` has a single `return Sheet()`: the
+    // reference index proves the receiver, so this site is certain. It was
+    // pinned "possible" while the graph could not follow a factory return.
+    assert!(!holder.contains("possible"), "holder action: {holder}");
 }
 
 #[test]

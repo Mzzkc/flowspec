@@ -849,7 +849,7 @@ fn trace_python_references(
             ));
             if stats.files_with_errors + stats.files_skipped > 0 {
                 lines.push(format!(
-                    "Incomplete: {} file(s) had syntax errors and {} could not be read; callers there may be missing.",
+                    "Incomplete: {} file(s) had syntax errors and {} were skipped (unreadable or nested too deeply); callers there may be missing.",
                     stats.files_with_errors, stats.files_skipped
                 ));
             }

@@ -218,6 +218,9 @@ pub struct PyIndex {
     stats: IndexStats,
 }
 
+/// Upper bound on (file, name) pairs tried while resolving one imported name.
+const MAX_EXPORT_STEPS: usize = 64;
+
 const BUILTINS: &[&str] = &[
     "abs",
     "all",
@@ -398,6 +401,12 @@ impl PyIndex {
                 idx.stats.files_skipped += 1;
                 continue;
             };
+            // Every walker below recurses along the tree; bounding the tree's
+            // depth here bounds all of them. A deeper file is skipped and counted.
+            if tree_depth_exceeds(&tree, crate::parser::MAX_AST_DEPTH) {
+                idx.stats.files_skipped += 1;
+                continue;
+            }
             let rel_path = path.strip_prefix(root).unwrap_or(path);
             let rel = rel_path.to_string_lossy().replace('\\', "/");
             let mut parts: Vec<String> = prefix.clone();
@@ -813,10 +822,23 @@ impl PyIndex {
     }
 
     fn resolve_import(&self, t: &ImportTarget, depth: u8) -> Val {
+        self.resolve_import_in(t, depth, &mut Vec::new())
+    }
+
+    fn resolve_export(&self, file: usize, name: &str, depth: u8) -> Val {
+        self.resolve_export_in(file, name, depth, &mut Vec::new())
+    }
+
+    fn resolve_import_in(
+        &self,
+        t: &ImportTarget,
+        depth: u8,
+        seen: &mut Vec<(usize, String)>,
+    ) -> Val {
         match (&t.name, self.module_file(&t.module)) {
             (None, Some(f)) => Val::one(Ty::Module(f)),
             (None, None) => Val::external(),
-            (Some(n), Some(f)) => self.resolve_export(f, n, depth),
+            (Some(n), Some(f)) => self.resolve_export_in(f, n, depth, seen),
             (Some(n), None) => match self.module_file(&format!("{}.{}", t.module, n)) {
                 Some(f) => Val::one(Ty::Module(f)),
                 None => Val::external(),
@@ -824,10 +846,25 @@ impl PyIndex {
         }
     }
 
-    fn resolve_export(&self, file: usize, name: &str, depth: u8) -> Val {
-        if depth > 8 {
+    /// Resolve `name` as exported by `file`.
+    ///
+    /// `seen` holds every (file, name) already tried in this resolution, so a
+    /// chain or fan of star imports is walked at most once per pair and the
+    /// whole resolution is capped at [`MAX_EXPORT_STEPS`] steps.
+    fn resolve_export_in(
+        &self,
+        file: usize,
+        name: &str,
+        depth: u8,
+        seen: &mut Vec<(usize, String)>,
+    ) -> Val {
+        if depth > 8
+            || seen.len() >= MAX_EXPORT_STEPS
+            || seen.iter().any(|(f, n)| *f == file && n == name)
+        {
             return Val::unknown();
         }
+        seen.push((file, name.to_string()));
         let md = self.files[file].module_def;
         if let Some(&d) = self.children.get(&md).and_then(|m| m.get(name)) {
             return Val::one(self.def_ty(d));
@@ -836,7 +873,7 @@ impl PyIndex {
             return v.clone();
         }
         if let Some(t) = self.imports.get(&md).and_then(|m| m.get(name)) {
-            return self.resolve_import(t, depth + 1);
+            return self.resolve_import_in(t, depth + 1, seen);
         }
         if self.files[file].is_package {
             let sub = if self.files[file].module.is_empty() {
@@ -850,7 +887,7 @@ impl PyIndex {
         }
         for star in &self.files[file].stars {
             if let Some(f) = self.module_file(star) {
-                let v = self.resolve_export(f, name, depth + 1);
+                let v = self.resolve_export_in(f, name, depth + 1, seen);
                 if v.has_project() {
                     return v;
                 }
@@ -1743,6 +1780,30 @@ impl PyIndex {
     }
 }
 
+/// Whether any node of `tree` sits deeper than `limit`, without recursion.
+fn tree_depth_exceeds(tree: &Tree, limit: usize) -> bool {
+    let mut cursor = tree.walk();
+    let mut depth = 0usize;
+    loop {
+        if cursor.goto_first_child() {
+            depth += 1;
+            if depth > limit {
+                return true;
+            }
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return false;
+            }
+            depth -= 1;
+        }
+    }
+}
+
 fn list_capped(items: &[String], cap: usize) -> String {
     if items.len() <= cap {
         items.join(", ")
@@ -2258,6 +2319,45 @@ mod tests {
             callers(&idx, "a.py::helper"),
             vec![("pkg/b.py::run".to_string(), 3, true)]
         );
+    }
+
+    #[test]
+    fn star_import_cycles_and_fans_terminate() {
+        let mut files: Vec<(String, String)> = vec![("pkg/__init__.py".into(), String::new())];
+        for n in 0..12 {
+            let body: String = (0..12)
+                .filter(|m| *m != n)
+                .map(|m| format!("from pkg.m{m} import *\n"))
+                .collect();
+            files.push((format!("pkg/m{n}.py"), body));
+        }
+        files.push((
+            "pkg/use.py".into(),
+            "from pkg.m0 import missing\n\ndef f():\n    return missing()\n".into(),
+        ));
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let started = std::time::Instant::now();
+        let (_d, idx) = index(&refs);
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "star-import fan must stay bounded"
+        );
+        assert!(idx.resolve_symbol("use.py::f").is_ok());
+    }
+
+    #[test]
+    fn a_file_nested_deeper_than_the_limit_is_skipped_and_counted() {
+        let deep = format!("x = {}1{}\n", "(".repeat(400), ")".repeat(400));
+        let (_d, idx) = index(&[
+            ("ok.py", "def f():\n    return 1\n"),
+            ("deep.py", deep.as_str()),
+        ]);
+        assert_eq!(idx.stats().files, 1);
+        assert_eq!(idx.stats().files_skipped, 1);
+        assert!(idx.resolve_symbol("ok.py::f").is_ok());
     }
 
     #[test]
