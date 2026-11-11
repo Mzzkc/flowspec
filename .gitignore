@@ -21,7 +21,9 @@ misc/
 
 # Flowspec analysis cache
 .flowspec/cache/
-.flowspec/index/
+# Index caches written by analysis, at the repo root and under any fixture
+# a test analyzes (the unanchored form matches at every depth).
+**/.flowspec/index/
 
 # Claude Code local settings
 .claude/settings.local.json
