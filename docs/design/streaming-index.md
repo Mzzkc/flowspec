@@ -83,7 +83,12 @@ in `api/handler.py` resolves to `repository/repo.py` beside `api/`. This is
 the `Exports::module_file_from` rule; the exact match still wins so package
 imports are never shadowed by a same-named sibling.
 
-The on-disk index may arrive with a checkout, so it is untrusted input:
+The on-disk index may arrive with a checkout, so it is untrusted input.
+Every cache file is `tag || payload`, the tag a SHA-256 over a per-user
+32-byte key (kept outside any repository, `~/.cache/flowspec/index.key` by
+default, created 0600), the file's name and the payload; a file whose tag
+does not verify was not written by this user and is treated as absent.
+Temporary files are created with `O_EXCL` and `O_NOFOLLOW`. Beyond that,
 every cache file is decoded under a fixed size bound, a fact set is rejected
 when any scope, owner, parent or class index falls outside its own
 definition list or a parent does not point strictly backwards, retained

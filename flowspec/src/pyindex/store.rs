@@ -112,41 +112,186 @@ fn cache_err(path: &Path, reason: String) -> FlowspecError {
     }
 }
 
-/// Write `value` to `path` through a temporary file unique to this process
-/// and call, so two concurrent builds of the same index (parallel tests,
-/// an editor and a CI job) never rename each other's half-written file.
+/// Largest cache file the store will decode. A `.flowspec/index` that came
+/// with a checkout is untrusted input; a length prefix in it must not be
+/// able to request an allocation larger than any index flowspec writes.
+const MAX_CACHE_BYTES: u64 = 256 << 20;
+
+/// Length of the authentication tag that prefixes every cache file.
+const TAG_LEN: usize = 32;
+
+/// The per-user cache key: 32 random bytes kept outside any repository
+/// (`$FLOWSPEC_CACHE_KEY`, else `$XDG_CACHE_HOME/flowspec/index.key`, else
+/// `~/.cache/flowspec/index.key`), created mode 0600 on first use.
+///
+/// Every cache file is tagged with SHA-256 over this key, the file's role
+/// and its payload. An index that arrives with a checkout, or that another
+/// user wrote, carries no valid tag and is rebuilt from source; nothing this
+/// user did not write is ever decoded. Without a usable key the store
+/// still works but trusts nothing on disk: every run is a cold build.
+fn cache_key() -> Option<&'static [u8; 32]> {
+    use std::sync::OnceLock;
+    static KEY: OnceLock<Option<[u8; 32]>> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let path = std::env::var_os("FLOWSPEC_CACHE_KEY")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("XDG_CACHE_HOME")
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+                    .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+                    .map(|c| c.join("flowspec").join("index.key"))
+            })?;
+        if let Ok(bytes) = fs::read(&path) {
+            if bytes.len() == 32 {
+                let mut k = [0u8; 32];
+                k.copy_from_slice(&bytes);
+                return Some(k);
+            }
+        }
+        let mut k = [0u8; 32];
+        getrandom::fill(&mut k).ok()?;
+        let dir = path.parent()?;
+        fs::create_dir_all(dir).ok()?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(&k).ok()?;
+                Some(k)
+            }
+            // Another process created it first: read theirs.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let bytes = fs::read(&path).ok()?;
+                (bytes.len() == 32).then(|| {
+                    let mut k = [0u8; 32];
+                    k.copy_from_slice(&bytes);
+                    k
+                })
+            }
+            Err(_) => None,
+        }
+    })
+    .as_ref()
+}
+
+fn tag(key: &[u8; 32], role: &str, payload: &[u8]) -> [u8; TAG_LEN] {
+    let mut h = Sha256::new();
+    h.update(key);
+    h.update([0u8]);
+    h.update(role.as_bytes());
+    h.update([0u8]);
+    h.update((payload.len() as u64).to_le_bytes());
+    h.update(payload);
+    h.finalize().into()
+}
+
+/// The role a cache file plays: its file name, so a tag made for one file
+/// is not valid for another.
+fn role_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Write `value` to `path` as `tag || payload`, through a temporary file
+/// created exclusively (`O_EXCL`, and `O_NOFOLLOW` on unix) and unique to
+/// this process and call, so a planted symlink is never followed and two
+/// concurrent builds never rename each other's half-written file.
 fn write_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), FlowspecError> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let bytes = bincode::serde::encode_to_vec(value, bincode::config::standard())
+    let payload = bincode::serde::encode_to_vec(value, bincode::config::standard())
         .map_err(|e| cache_err(path, format!("encode: {e}")))?;
+    let Some(key) = cache_key() else {
+        // No key: nothing written now could be trusted later.
+        return Ok(());
+    };
+    let mut bytes = Vec::with_capacity(TAG_LEN + payload.len());
+    bytes.extend_from_slice(&tag(key, &role_of(path), &payload));
+    bytes.extend_from_slice(&payload);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp{}-{seq}", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|e| io(&tmp, e))?;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc_o_nofollow());
+    }
+    let written = opts.open(&tmp).and_then(|mut f| {
+        use std::io::Write;
+        f.write_all(&bytes)
+    });
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(io(&tmp, e));
+    }
+    // rename replaces a planted symlink at `path` itself; it never writes
+    // through one.
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         io(path, e)
     })
 }
 
-/// Largest cache file the store will decode. A `.flowspec/index` that came
-/// with a checkout is untrusted input; a length prefix in it must not be
-/// able to request an allocation larger than any index flowspec writes.
-const MAX_CACHE_BYTES: u64 = 256 << 20;
+#[cfg(unix)]
+fn libc_o_nofollow() -> i32 {
+    // O_NOFOLLOW on Linux and the BSDs; the value is part of each platform ABI.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        0o400000
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        0x0100
+    }
+}
 
+/// Read and authenticate a cache file. A file with no valid tag for this
+/// user's key is reported as a cache error, which every caller treats as
+/// "absent": the data is rebuilt from source.
 fn read_bin<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, FlowspecError> {
+    let Some(key) = cache_key() else {
+        return Err(cache_err(
+            path,
+            "no cache key; cache not trusted".to_string(),
+        ));
+    };
     let meta = fs::symlink_metadata(path).map_err(|e| io(path, e))?;
     if !meta.is_file() {
         return Err(cache_err(path, "not a regular file".to_string()));
     }
-    if meta.len() > MAX_CACHE_BYTES {
+    if meta.len() > MAX_CACHE_BYTES + TAG_LEN as u64 {
         return Err(cache_err(
             path,
             format!("{} bytes exceeds the cache bound", meta.len()),
         ));
     }
     let bytes = fs::read(path).map_err(|e| io(path, e))?;
+    if bytes.len() < TAG_LEN {
+        return Err(cache_err(path, "too short to carry a tag".to_string()));
+    }
+    let (stored, payload) = bytes.split_at(TAG_LEN);
+    let expected = tag(key, &role_of(path), payload);
+    // Constant-time comparison: the tag is a secret-keyed value.
+    let diff = stored
+        .iter()
+        .zip(expected.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    if diff != 0 {
+        return Err(cache_err(
+            path,
+            "cache tag does not match this user's key; not written by this user".to_string(),
+        ));
+    }
     let config = bincode::config::standard().with_limit::<{ MAX_CACHE_BYTES as usize }>();
-    bincode::serde::decode_from_slice(&bytes, config)
+    bincode::serde::decode_from_slice(payload, config)
         .map(|(v, _)| v)
         .map_err(|e| cache_err(path, format!("decode: {e}")))
 }
@@ -337,7 +482,13 @@ impl Index {
                 .map(|e| (*e).clone());
             let (fact_set, entry) = match reuse {
                 Some(prev) => match read_facts(&facts_path) {
-                    Ok(f) => (Some(f), prev),
+                    Ok(f) if f.rel == rel && f.module == module_name(&prefix, &rel).0 => {
+                        (Some(f), prev)
+                    }
+                    Ok(_) => {
+                        changed.insert(fi);
+                        extract_one(&mut parser, &buf, &rel, &prefix, &facts_path, &mut stats)?
+                    }
                     Err(_) => {
                         changed.insert(fi);
                         extract_one(&mut parser, &buf, &rel, &prefix, &facts_path, &mut stats)?
@@ -946,6 +1097,20 @@ mod tests {
             .all_sites()
             .iter()
             .all(|s| s.target.0 == 0 && s.target.1 < 3));
+
+        // A cache file written by someone else carries no tag for this key:
+        // it is treated as absent and the file is re-extracted.
+        let raw = bincode::serde::encode_to_vec(&bad, bincode::config::standard()).unwrap();
+        fs::write(&fact_path, raw).unwrap();
+        let foreign = Index::build(dir.path(), &files).unwrap();
+        assert_eq!(
+            foreign.stats.parsed, 1,
+            "untagged fact file must be re-extracted"
+        );
+        assert_eq!(
+            callers(&foreign, "a.py::f"),
+            vec![("a.py::g".to_string(), 5, true)]
+        );
 
         let other = tempfile::TempDir::new().unwrap();
         fs::remove_dir_all(&facts_dir).unwrap();

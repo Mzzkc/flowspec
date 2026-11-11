@@ -11,8 +11,17 @@ fn flowspec() -> Command {
 
 /// A generated Python tree large enough to hold well over 1 MiB in the graph.
 fn mid_sized_project() -> TempDir {
+    generated_project(60)
+}
+
+/// `files` modules of twenty caller/callee pairs each.
+///
+/// The reference index keeps only the export table resident, so the tree
+/// behind a `trace` must be several times larger than the graph needs
+/// before 1 MiB is exceeded on every host; 60 files sits at the boundary.
+fn generated_project(files: usize) -> TempDir {
     let dir = TempDir::new().unwrap();
-    for n in 0..60 {
+    for n in 0..files {
         let mut src = String::new();
         for m in 0..20 {
             src.push_str(&format!("def f{n}_{m}(x):\n    return g{n}_{m}(x) + 1\n\ndef g{n}_{m}(x):\n    return x\n\n"));
@@ -43,7 +52,7 @@ fn analysis_over_budget_stops_with_named_stage_and_exit_1() {
 
 #[test]
 fn trace_over_budget_stops_the_same_way() {
-    let dir = mid_sized_project();
+    let dir = generated_project(400);
     let out = flowspec()
         .args([
             "trace",
