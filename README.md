@@ -214,39 +214,40 @@ Flowspec detects 13 structural patterns:
 
 ## Known Limitations
 
-- **Complex generic type annotations** — inner types in generics like `Dict[str, List[int]]` are not extracted; only the root type name (`Dict`) is recognized as a usage reference
 - **Dynamic `__all__` construction** — `__all__` must be a static list literal; computed values (`__all__ = get_exports()`) are not resolved
 - **TypeScript preprocessing** — TS files are preprocessed to strip type annotations rather than using a native tree-sitter-typescript grammar; complex TS patterns (mapped types, conditional types) may not be fully handled
 - **Dynamic JS imports** — `import()` expressions are not tracked
 - **Split Rust impl blocks** — multiple `impl` blocks for the same type do not share scope
 - **Flow type information** — `in_type`/`out_type` fields in flow output are populated from function signatures when available, but may show "unknown" for functions without parsed signatures
-- **Cross-file flow tracing** — import resolution creates graph edges, but the flow tracing engine does not yet follow these edges across module boundaries; cross-module data flows are largely untracked
-- **Instance-method dispatch** — `self.method()` calls resolve to the method on the same class, but `self.attr.method()` requires instance-attribute type resolution to connect the call to the correct target class; partial support added in v1 for simple typed attributes in `__init__`
+- **Cross-file flow tracing (JavaScript/TypeScript, Rust)** — import resolution creates graph edges, but the graph flow tracer does not follow them across module boundaries. Python flows come from the reference index and do cross files.
+- **Runtime dispatch (Python)** — a call through a base-typed receiver is `certain` for the base method and `possible` for each subclass override; an untyped receiver yields `possible` sites on every method of that name. Implicit protocol calls (`__enter__`, `__iter__`, operators) are not sites.
+- **Mixed-language trees (Python)** — `analyze` and `diagnose` use the reference index only when every selected file is Python; pass `--language python` otherwise (issue #37)
 - **`duplication` detection** — uses Jaccard similarity on callees sets (structural, not textual); functions sharing common utility calls may trigger false positives. Minimum union size of 3 callees required.
 - **`asymmetric_handling` detection** — groups functions by file, kind, and similar arity; consensus threshold is strict (N-1 of N), but groups of functions with legitimately different responsibilities may be incorrectly grouped
 
 ## Diagnostic Accuracy
 
-Field-tested against a real-world Python codebase (228 files, 13K+ entities). These are honest numbers — patterns vary widely in reliability:
+Python analysis runs on a streaming reference index (`flowspec/src/pyindex/`,
+design in `docs/design/streaming-index.md`): one parse per file, a resident
+export table, every call site resolved through scopes, imports, the class
+hierarchy and receiver typing. Accuracy is measured, not estimated, by an
+`ast`-derived oracle that knows nothing about flowspec (`scripts/oracle/`).
 
-| Pattern | Findings | TP Rate | Status |
-|---------|----------|---------|--------|
-| `isolated_cluster` | 35 | ~33% | **Most reliable.** Genuinely useful for finding disconnected code clusters. |
-| `data_dead_end` | 562 | ~13% | Improving. Method dedup (C20) helped. Instance-attribute resolution will help more. |
-| `missing_reexport` | 1,595 | ~13% | Python convention mismatch — methods on classes flagged as missing from `__init__.py`. Fix in progress. |
-| `orphaned_impl` | 1,070 | ~7% | Dominated by unresolved instance-method dispatch (`self.attr.method()`). |
-| `contract_mismatch` | 97 | ~7% | Name-based matching across namespaces produces false positives. |
-| `phantom_dependency` | 1,960 | ~0% | **Known broken.** Imports used as call targets (not just name references) are not tracked after resolution. Largest single source of false positives. |
-| `circular_dependency` | 0 | — | Fixed in C21. All previous false positives eliminated. |
-| `incomplete_migration` | 7 | ~0%→100% | Sequential version chains and sync/async wrappers now correctly excluded. |
-| `stale_reference` | 1 | ~0% | Too few findings to assess. Module-level import resolution gap. |
+| Measurement (2026-11-11) | Result |
+|---|---|
+| Certain callers, 40-symbol sample of a 323-file production codebase | 380 of 380 found, 0 wrong |
+| Committed fixture gate (`flowspec-cli/tests/oracle_gate.rs`, runs in CI) | 0 missed callers, 0 wrong callers |
+| Tolerance the gate enforces | false negatives and false positives each below 1% |
 
-**What this means for consumers:** Use `isolated_cluster` and `data_dead_end` findings with moderate confidence. Treat `phantom_dependency` findings as noise until the name-reference tracking gap is resolved. Filter by `--confidence high` to reduce false positives across all patterns.
-
-**Root causes of false positives (95% explained by three gaps):**
-1. No name-reference tracking after import resolution — imports resolve but downstream usage of imported names is not linked back
-2. No instance-method dispatch resolution — `self.x.method()` calls don't resolve through typed attributes
-3. Python convention mismatch — several patterns apply module-level expectations to class-internal structure
+Every caller answer is `certain` (one project definition proven) or
+`possible` (untyped receiver or an override candidate), with the file:line
+of each site and the reason it is not certain. An unresolved call is counted
+and named, never dropped. The thirteen diagnostic patterns read the same
+index; their false-positive rate is adjudicated per pattern with
+`scripts/oracle/adjudicate_diagnose.py` and the planted-shape fixtures under
+`tests/oracle/fixtures/`. In a tree that mixes Python with JavaScript or
+Rust files, pass `--language python` to get the index (issue #37 tracks the
+per-language split).
 
 ## CI Integration
 

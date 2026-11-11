@@ -239,9 +239,12 @@ rationale: |
      constructors and attribute assignments.
   3. Analysis is indexed once and queried many times: persisted, incremental,
      .gitignore honoured by default, a hard memory budget that fails loudly.
-  4. The bar is external and numeric, run in CI on real repositories: direct
-     certain-caller recall >= 98%, zero wrong certain callers, warm query under
-     2 s, cold index of a ~300-file project under 60 s, peak memory under 1 GB.
+  4. The bar is external and numeric, run in CI on real repositories: for
+     caller/reference answers and for every diagnostic pattern, false
+     negatives below 1% and false positives below 1% of labelled samples
+     (composer, 2026-11-11); warm query under 2 s, cold index of a ~300-file
+     project under 60 s, peak memory under 1 GB. The earlier draft of this
+     entry said 98% recall; the composer's bar is tighter and replaces it.
   5. Diagnostic patterns keep running but a pattern is reported at high or
      medium confidence only after it clears 90% precision on labelled findings;
      until then its findings are low confidence and outside the default display,

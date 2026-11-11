@@ -21,6 +21,7 @@ misc/
 
 # Flowspec analysis cache
 .flowspec/cache/
+.flowspec/index/
 
 # Claude Code local settings
 .claude/settings.local.json

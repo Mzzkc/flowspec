@@ -47,7 +47,20 @@ content:
       analysis. The complexity budget is better spent on making the custom
       semantic resolution layer good than on managing external processes.
 
+    streaming_index: |
+      (2026-11-11, supersedes persistent_graph for Python.) Analysis is a
+      two-level index: a per-file fact set produced by one parse of that file
+      alone and persisted under .flowspec/index/facts/<sha256>.bin, and a
+      resident export table derived from every fact set. Resolution runs per
+      file against the export table and emits sites into posting lists sorted
+      by target. Resident memory is the export table plus one file's facts;
+      the whole-program graph is never built for Python. Queries are lookups
+      in the posting index. Re-runs re-parse only changed files and
+      re-resolve only files whose imports name a changed module. Sizing,
+      measured on Django and CPython, is in docs/design/streaming-index.md.
+
     persistent_graph: |
+      (JavaScript/TypeScript and Rust only, until ported to the index.)
       The core data structure is an in-memory graph that serializes to a
       binary cache file (.flowspec/cache/). This is NOT an external database
       — no running services, no dependencies. It's an embedded data structure.
@@ -186,6 +199,19 @@ content:
       flowspec: "Library crate — engine, parser, analyzer, graph, manifest writer"
       flowspec-cli: "Binary crate — CLI interface, depends on flowspec library"
       flowspec-mcp: "Binary crate — MCP server, depends on flowspec library (future)"
+
+  index_structure:
+    location: ".flowspec/index/"
+    contents:
+      - "facts/<sha256>.bin — one FactSet per distinct Python file content"
+      - "exports.bin — per-file exports (the resident table)"
+      - "sites.bin — posting lists, sorted by target"
+      - "unknown.bin — calls with an unresolved receiver, by member name"
+      - "manifest.bin — files, hashes, import closure, format version"
+    invalidation: |
+      A file's facts are keyed by the hash of its bytes; unchanged files are
+      not parsed. Files whose imports name a changed module are re-resolved.
+      A format version mismatch rebuilds everything.
 
   cache_structure:
     location: ".flowspec/cache/"

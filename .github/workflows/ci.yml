@@ -28,3 +28,9 @@ jobs:
         run: cargo clippy -p flowspec --lib -- -D warnings
       - name: Tests
         run: cargo test --all
+      - name: Oracle gate (false negatives and false positives on the committed fixture)
+        run: cargo test -p flowspec-cli --test oracle_gate -- --nocapture
+      - name: Install cargo-tarpaulin
+        uses: taiki-e/install-action@cargo-tarpaulin
+      - name: Coverage (87% floor)
+        run: cargo tarpaulin --workspace --skip-clean --timeout 1200 --fail-under 87 --out Xml --exclude-files 'flowspec-cli/tests/*' 'flowspec/src/*tests*.rs'

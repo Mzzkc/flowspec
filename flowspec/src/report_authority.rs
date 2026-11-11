@@ -130,6 +130,62 @@ fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Valu
     blocked
 }
 
+/// The same proof as [`build_finding`], from an index subject instead of a
+/// graph symbol. Identity, cause and range are computed identically so a
+/// finding keeps its `semantic_id` across the two producers.
+fn build_index_finding(
+    root: &Path,
+    diagnostic: &DiagnosticEntry,
+    subjects: &[IndexSubject],
+    inputs: &[InputRecord],
+) -> Option<Value> {
+    if diagnostic.pattern != "data_dead_end" {
+        return None;
+    }
+    let subject = subjects.iter().find(|s| s.entity == diagnostic.entity)?;
+    let key = path_key(root, &root.join(&subject.rel));
+    let input = inputs
+        .iter()
+        .find(|input| path_key(root, &input.path) == key && input.parsed)?;
+    let content = input.content.as_deref()?;
+    let (line, column, end_line, end_column) = subject.range;
+    let range = offset_range(
+        &key,
+        content,
+        byte_at(content, line, column),
+        byte_at(content, end_line, end_column),
+    );
+    let subject_base = json!({"path_key":key,"language":"python",
+        "qualified_name":subject.qualified_name,"construct_kind":"function"});
+    let binding_id = hash("binding", &subject_base);
+    let mut subject_value = subject_base.clone();
+    subject_value["binding_id"] = json!(binding_id);
+    let cause = json!({"key_version":1,"parts":{"produced_binding_id":binding_id,
+        "produced_kind":"function","unconsumed_relation":"unconsumed_private_symbol"}});
+    let semantic_id = hash(
+        "finding.semantic",
+        &json!({"pattern_id":"data_dead_end","subject":subject_base,"cause":cause}),
+    );
+    let evidence: Vec<Value> = diagnostic
+        .evidence
+        .iter()
+        .map(|e| {
+            json!({"kind":"index_inbound_consumption",
+        "observation":e.observation,"range":Value::Null})
+        })
+        .collect();
+    let observation_id = hash(
+        "finding.observation",
+        &json!({"semantic_id":semantic_id,
+        "source_sha256":digest(content.as_bytes()),"range":range,"evidence":evidence}),
+    );
+    Some(json!({"identity_status":"stable","semantic_id":semantic_id,
+        "observation_id":observation_id,"pattern_id":"data_dead_end",
+        "severity":diagnostic.severity,"confidence":diagnostic.confidence,
+        "subject":subject_value,"cause":cause,"range":range,"evidence":evidence,
+        "suggestion":diagnostic.suggestion}))
+}
+
 fn consumer_closure_loss(finding: &Value, blockers: &[String]) -> Value {
     let mut paths = vec![finding["subject"]["path_key"]
         .as_str()
@@ -435,6 +491,24 @@ pub(crate) fn set_gate(authority: &mut Value, severity: &str, confidence: &str) 
     refresh_identity(authority);
 }
 
+/// A proven private-function subject supplied by the Python reference index.
+///
+/// The index resolves every reference through scopes, imports and receiver
+/// types, so a private top-level function with no site reaching it is a
+/// proven absence within the selected scope, with the same caveats the
+/// graph proof carried (consumer closure).
+pub struct IndexSubject {
+    /// Legacy entity spelling the diagnostic carries.
+    pub entity: String,
+    /// Root-relative file path.
+    pub rel: String,
+    /// `stem::name` qualified name as the graph spelled it.
+    pub qualified_name: String,
+    /// 1-based start line and column, end line and column.
+    pub range: (u32, u32, u32, u32),
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build(
     root: &Path,
     config: &Config,
@@ -442,12 +516,15 @@ pub(crate) fn build(
     inputs: &[InputRecord],
     diagnostics: &[DiagnosticEntry],
     graph: &Graph,
+    index_subjects: &[IndexSubject],
     mut losses: Vec<Value>,
 ) -> Value {
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
-        if let Some(finding) = build_finding(root, diagnostic, graph, inputs) {
+        let proven = build_finding(root, diagnostic, graph, inputs)
+            .or_else(|| build_index_finding(root, diagnostic, index_subjects, inputs));
+        if let Some(finding) = proven {
             if blockers.is_empty() {
                 findings.push(finding);
             } else {
@@ -459,8 +536,12 @@ pub(crate) fn build(
     }
     findings.sort_by(|a, b| a["semantic_id"].as_str().cmp(&b["semantic_id"].as_str()));
     // Legacy findings without an implemented cause proof are visible as debt,
-    // never promoted into the authoritative finding catalog.
-    if diagnostics.len() != findings.len() {
+    // never promoted into the authoritative finding catalog. A low-confidence
+    // observation claims no absence (it says the symbol *may* be consumed
+    // outside the indexed scope), so it is advisory and leaves execution
+    // complete; only moderate and high findings need a proof.
+    let claiming = diagnostics.iter().filter(|d| d.confidence != "low").count();
+    if claiming != findings.len() {
         losses.push(loss(
             "semantic_proof_unavailable",
             String::new(),
@@ -600,9 +681,12 @@ pub(crate) fn build(
                     capabilities.insert(capability.to_string());
                 }
                 for key in loss["scope_paths"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                    if key.is_empty() {
-                        affected_paths.extend(inputs.iter().filter(|input| input.disposition == "selected").map(|input| path_key(root, &input.path)));
-                    } else { affected_paths.insert(key.to_string()); }
+                    // A project-wide loss (empty scope path) affects every selected
+                    // file; listing them all per cell made pattern_state grow with the
+                    // project and pushed small manifests over the size bound. The
+                    // inventory already names every selected file; the cell records
+                    // the empty key and the consumer reads the inventory.
+                    affected_paths.insert(key.to_string());
                 }
             }
             if pattern == "layer_violation" { reasons.push("policy_absent".to_string()); }

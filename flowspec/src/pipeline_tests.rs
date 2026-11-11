@@ -3581,15 +3581,12 @@ def find_config(name: str) -> Optional[Path]:
         phantom_entities
     );
 
-    // Inner generic type Path in Optional[Path] is NOT extracted —
-    // known limitation. Path triggers phantom because only root type names
-    // are recognized. This test documents and guards the current behavior.
+    // Inner generic types are extracted since the reference index (2026-11-11):
+    // every identifier in an annotation counts as a use, so `Path` inside
+    // `Optional[Path]` is not phantom. The former "known limitation" is gone.
     assert!(
-        phantom_entities.iter().any(|e| e.contains("Path")),
-        "Path (inner generic in Optional[Path]) should trigger phantom — \
-         only root type names are extracted (Known Limitation). \
-         If this starts passing, inner generic extraction was implemented. \
-         Phantom: {:?}",
+        !phantom_entities.iter().any(|e| e.contains("Path")),
+        "Path (inner generic in Optional[Path]) is used in the annotation and must not be phantom. Phantom: {:?}",
         phantom_entities
     );
 

@@ -36,7 +36,8 @@ pub mod graph;
 pub mod manifest;
 /// Tree-sitter parsing and language adapters — Python, JavaScript/TypeScript, Rust.
 pub mod parser;
-pub mod pyrefs;
+/// Streaming Python reference index (facts per file, resident export table).
+pub mod pyindex;
 mod report_authority;
 
 #[cfg(feature = "fault_probe")]
@@ -593,12 +594,41 @@ fn analyze_core(
         }
     }
 
-    // Stage 2: Run diagnostic patterns on the populated graph
-    let raw_diagnostics = run_all_patterns(&graph, project_path);
+    // Stage 2: Run diagnostic patterns.
+    //
+    // Python findings come from the reference index: per-file facts and a
+    // resident export table, with every site resolved through scopes,
+    // imports, class hierarchy and receiver typing (see
+    // docs/design/streaming-index.md). The graph-based patterns remain for
+    // the other languages, whose adapters have not been ported.
+    let python_only = active_languages.iter().all(|l| l == "python")
+        && files
+            .iter()
+            .all(|f| f.extension().is_some_and(|e| e == "py"));
+    let mut py_index: Option<pyindex::store::Index> = None;
+    let raw_diagnostics = if python_only && !files.is_empty() {
+        // A single-file analysis roots the index at the file's directory so
+        // module names and relative paths are well formed.
+        let index_root = if project_path.is_file() {
+            project_path.parent().unwrap_or(project_path)
+        } else {
+            project_path
+        };
+        let index = pyindex::store::Index::build(index_root, &files)?;
+        budget::check("index")?;
+        let mut diags = pyindex::diagnostics::all(&index);
+        for (i, d) in diags.iter_mut().enumerate() {
+            d.id = format!("D{:03}", i + 1);
+        }
+        py_index = Some(index);
+        diags
+    } else {
+        run_all_patterns(&graph, project_path)
+    };
     budget::check("diagnostics")?;
     let diagnostics = to_manifest_entries(&raw_diagnostics);
 
-    // Stage 3: Build entity list from graph symbols
+    // Stage 3: Build entity list. Python: from the index. Others: from graph symbols.
     //
     // Two-pass approach for disambiguation: first collect qualified names
     // to detect collisions, then build entities with directory-prefixed IDs
@@ -636,9 +666,12 @@ fn analyze_core(
         .collect();
 
     // Pass 2: Build entities with disambiguated IDs
-    let mut entities = Vec::new();
+    let mut entities = match &py_index {
+        Some(index) => pyindex::manifest::entities(index),
+        None => Vec::new(),
+    };
     for (sym_id, symbol) in graph.all_symbols() {
-        if symbol.kind == SymbolKind::Module {
+        if py_index.is_some() || symbol.kind == SymbolKind::Module {
             continue;
         }
         let rel_path = symbol
@@ -701,10 +734,12 @@ fn analyze_core(
         });
     }
 
-    // Stage 4: Build module summaries from graph file data
+    // Stage 4: Build module summaries. Python: from the index.
     let mut file_set: HashSet<PathBuf> = HashSet::new();
-    for (_, sym) in graph.all_symbols() {
-        file_set.insert(sym.location.file.clone());
+    if py_index.is_none() {
+        for (_, sym) in graph.all_symbols() {
+            file_set.insert(sym.location.file.clone());
+        }
     }
     let mut modules: Vec<ModuleSummary> = file_set
         .iter()
@@ -731,10 +766,17 @@ fn analyze_core(
             }
         })
         .collect();
+    if let Some(index) = &py_index {
+        modules = pyindex::manifest::modules(index);
+    }
     modules.sort_by(|a, b| b.entity_count.cmp(&a.entity_count));
 
-    // Stage 4b: Trace data flows through the call graph
-    let flow_paths = trace_all_flows(&graph);
+    // Stage 4b: Trace data flows. Python: from the index; the graph is empty.
+    let flow_paths = if py_index.is_some() {
+        Vec::new()
+    } else {
+        trace_all_flows(&graph)
+    };
     budget::check("flow tracing")?;
     let flows: Vec<FlowEntry> = flow_paths
         .iter()
@@ -790,7 +832,10 @@ fn analyze_core(
         .collect();
 
     // Stage 4c: Deduplicate flows — hash-based dedup on (entry, exit, steps)
-    let flows = deduplicate_flows(flows);
+    let flows = match &py_index {
+        Some(index) => pyindex::manifest::flows(index),
+        None => deduplicate_flows(flows),
+    };
 
     // Stage 5: Assemble manifest
     let diagnostic_count = diagnostics.len() as u64;
@@ -819,17 +864,21 @@ fn analyze_core(
         .collect();
 
     // Exit points: public functions/methods with no outgoing call edges (data leaves through them)
-    let exit_points: Vec<String> = graph
-        .all_symbols()
-        .filter(|(id, sym)| {
-            sym.visibility == parser::ir::Visibility::Public
-                && matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
-                && graph.callees(*id).is_empty()
-                && !sym.annotations.contains(&"entry_point".to_string())
-                && !sym.annotations.contains(&"import".to_string())
-        })
-        .map(|(_, sym)| sym.qualified_name.clone())
-        .collect();
+    let exit_points: Vec<String> = if let Some(index) = &py_index {
+        pyindex::manifest::exit_points(index)
+    } else {
+        graph
+            .all_symbols()
+            .filter(|(id, sym)| {
+                sym.visibility == parser::ir::Visibility::Public
+                    && matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
+                    && graph.callees(*id).is_empty()
+                    && !sym.annotations.contains(&"entry_point".to_string())
+                    && !sym.annotations.contains(&"import".to_string())
+            })
+            .map(|(_, sym)| sym.qualified_name.clone())
+            .collect()
+    };
 
     // Key flows: top 5 flows by step count (most significant data flow paths)
     let key_flows: Vec<KeyFlow> = {
@@ -909,39 +958,49 @@ fn analyze_core(
         diagnostics,
         entities,
         flows,
-        boundaries: extract_boundaries(&graph, project_path),
-        dependency_graph: extract_dependency_graph(&graph)
-            .into_iter()
-            .map(|dep| {
-                let project_prefix = project_path.to_string_lossy();
-                let strip = |s: &str| -> String {
-                    s.strip_prefix(project_prefix.as_ref())
-                        .unwrap_or(s)
-                        .trim_start_matches('/')
-                        .trim_start_matches('\\')
-                        .to_string()
-                };
-                DependencyEdge {
-                    from: strip(&dep.from),
-                    to: strip(&dep.to),
-                    weight: dep.weight as u64,
-                    direction: match dep.direction {
-                        analyzer::extraction::DependencyDirection::Unidirectional => {
-                            "unidirectional".to_string()
-                        }
-                        analyzer::extraction::DependencyDirection::Bidirectional => {
-                            "bidirectional".to_string()
-                        }
-                    },
-                    issues: dep.issues,
-                }
-            })
-            .collect(),
+        boundaries: match &py_index {
+            Some(index) => pyindex::manifest::boundaries(index),
+            None => extract_boundaries(&graph, project_path),
+        },
+        dependency_graph: match &py_index {
+            Some(index) => pyindex::manifest::dependency_graph(index),
+            None => extract_dependency_graph(&graph),
+        }
+        .into_iter()
+        .map(|dep| {
+            let project_prefix = project_path.to_string_lossy();
+            let strip = |s: &str| -> String {
+                s.strip_prefix(project_prefix.as_ref())
+                    .unwrap_or(s)
+                    .trim_start_matches('/')
+                    .trim_start_matches('\\')
+                    .to_string()
+            };
+            DependencyEdge {
+                from: strip(&dep.from),
+                to: strip(&dep.to),
+                weight: dep.weight as u64,
+                direction: match dep.direction {
+                    analyzer::extraction::DependencyDirection::Unidirectional => {
+                        "unidirectional".to_string()
+                    }
+                    analyzer::extraction::DependencyDirection::Bidirectional => {
+                        "bidirectional".to_string()
+                    }
+                },
+                issues: dep.issues,
+            }
+        })
+        .collect(),
         type_flows: Vec::new(),
     };
 
     #[cfg(feature = "fault_probe")]
     losses.extend(fault_probe::drain_losses());
+    let index_subjects: Vec<report_authority::IndexSubject> = py_index
+        .as_ref()
+        .map(pyindex::diagnostics::proven_private_subjects)
+        .unwrap_or_default();
     let authority = report_authority::build(
         project_path,
         config,
@@ -949,6 +1008,7 @@ fn analyze_core(
         &input_records,
         &manifest.diagnostics,
         &graph,
+        &index_subjects,
         losses,
     );
     let mut manifest = manifest.with_report(completeness);

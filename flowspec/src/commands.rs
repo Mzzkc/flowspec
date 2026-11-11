@@ -632,7 +632,9 @@ fn trace_python_references(
     direction: TraceDirection,
     format: OutputFormat,
 ) -> Result<Option<String>, FlowspecError> {
-    use crate::pyrefs::{PyIndex, Site, SiteKind};
+    use crate::pyindex::facts::SiteKind;
+    use crate::pyindex::resolve::Site;
+    use crate::pyindex::store::Index;
 
     if !languages.is_empty() && !languages.iter().any(|l| l == "python") {
         return Ok(None);
@@ -646,15 +648,15 @@ fn trace_python_references(
     if python.is_empty() {
         return Ok(None);
     }
-    let index = PyIndex::build(root, &python);
+    let index = Index::build(root, &python)?;
     crate::budget::check("reference index")?;
     let target = match index.resolve_symbol(symbol) {
         Ok(id) => id,
         Err(_) if python.len() < files.len() => return Ok(None),
         Err(e) => return Err(e),
     };
-    let target_id = index.entity_id(target);
-    let stats = index.stats();
+    let target_id = index.exports.entity_id(target);
+    let stats = index.stats;
 
     let describe = |sites: &[&Site]| -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -676,7 +678,7 @@ fn trace_python_references(
             let places: Vec<String> = hits
                 .iter()
                 .map(|s| {
-                    let file = index.file_path(s.file);
+                    let file = index.exports.files[s.owner.0 as usize].rel.as_str();
                     let short = file.rsplit('/').next().unwrap_or(file);
                     format!("{}:{}", short, s.line)
                 })
@@ -707,10 +709,10 @@ fn trace_python_references(
     if matches!(direction, TraceDirection::Backward | TraceDirection::Both) {
         let sites = index.sites_reaching(target);
         for s in sites.iter().filter(|s| s.kind == SiteKind::Import) {
-            let file = index.file_path(s.file);
+            let file = index.exports.files[s.owner.0 as usize].rel.as_str();
             importers.push(format!("{}:{}", file, s.line));
         }
-        let mut owners: Vec<usize> = Vec::new();
+        let mut owners: Vec<(u32, u32)> = Vec::new();
         for s in sites.iter().filter(|s| s.kind != SiteKind::Import) {
             if !owners.contains(&s.owner) {
                 owners.push(s.owner);
@@ -727,7 +729,7 @@ fn trace_python_references(
             } else {
                 possible_direct += 1;
             }
-            let owner_id = index.entity_id(owner);
+            let owner_id = index.exports.entity_id(owner);
             flows.push(FlowEntry {
                 id: format!("F{:03}", flows.len() + 1),
                 description: if certain {
@@ -747,7 +749,7 @@ fn trace_python_references(
                     continue;
                 }
                 transitive += 1;
-                let exit = index.entity_id(path[path.len() - 1]);
+                let exit = index.exports.entity_id(path[path.len() - 1]);
                 flows.push(FlowEntry {
                     id: format!("F{:03}", flows.len() + 1),
                     description: format!("transitive caller, {} calls away", path.len()),
@@ -755,7 +757,7 @@ fn trace_python_references(
                     exit,
                     steps: path
                         .iter()
-                        .map(|d| step(index.entity_id(*d), "call".to_string()))
+                        .map(|d| step(index.exports.entity_id(*d), "call".to_string()))
                         .collect(),
                     issues: Vec::new(),
                 });
@@ -764,7 +766,7 @@ fn trace_python_references(
     }
     if matches!(direction, TraceDirection::Forward | TraceDirection::Both) {
         let sites = index.sites_within(target);
-        let mut callees: Vec<usize> = Vec::new();
+        let mut callees: Vec<(u32, u32)> = Vec::new();
         for s in sites.iter().filter(|s| s.kind == SiteKind::Call) {
             if !callees.contains(&s.target) {
                 callees.push(s.target);
@@ -775,7 +777,7 @@ fn trace_python_references(
                 .iter()
                 .filter(|s| s.target == callee && s.kind == SiteKind::Call)
                 .collect();
-            let callee_id = index.entity_id(callee);
+            let callee_id = index.exports.entity_id(callee);
             flows.push(FlowEntry {
                 id: format!("F{:03}", flows.len() + 1),
                 description: "direct callee".to_string(),
@@ -790,7 +792,7 @@ fn trace_python_references(
                 if path.len() < 2 {
                     continue;
                 }
-                let exit = index.entity_id(path[path.len() - 1]);
+                let exit = index.exports.entity_id(path[path.len() - 1]);
                 flows.push(FlowEntry {
                     id: format!("F{:03}", flows.len() + 1),
                     description: format!("transitive callee, {} calls away", path.len()),
@@ -798,7 +800,7 @@ fn trace_python_references(
                     exit,
                     steps: path
                         .iter()
-                        .map(|d| step(index.entity_id(*d), "call".to_string()))
+                        .map(|d| step(index.exports.entity_id(*d), "call".to_string()))
                         .collect(),
                     issues: Vec::new(),
                 });
@@ -848,10 +850,10 @@ fn trace_python_references(
                 "Scope searched: {} Python file(s), {} definition(s), {} call site(s); {} call(s) had a receiver whose type could not be determined.",
                 stats.files, stats.definitions, stats.call_sites, stats.unknown_receiver_calls
             ));
-            if stats.files_with_errors + stats.files_skipped > 0 {
+            if stats.with_errors + stats.skipped > 0 {
                 lines.push(format!(
                     "Incomplete: {} file(s) had syntax errors and {} were skipped (unreadable or nested too deeply); callers there may be missing.",
-                    stats.files_with_errors, stats.files_skipped
+                    stats.with_errors, stats.skipped
                 ));
             }
             lines.join("\n")
