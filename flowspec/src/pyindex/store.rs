@@ -128,11 +128,79 @@ fn write_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), FlowspecErro
     })
 }
 
+/// Largest cache file the store will decode. A `.flowspec/index` that came
+/// with a checkout is untrusted input; a length prefix in it must not be
+/// able to request an allocation larger than any index flowspec writes.
+const MAX_CACHE_BYTES: u64 = 256 << 20;
+
 fn read_bin<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, FlowspecError> {
+    let meta = fs::symlink_metadata(path).map_err(|e| io(path, e))?;
+    if !meta.is_file() {
+        return Err(cache_err(path, "not a regular file".to_string()));
+    }
+    if meta.len() > MAX_CACHE_BYTES {
+        return Err(cache_err(
+            path,
+            format!("{} bytes exceeds the cache bound", meta.len()),
+        ));
+    }
     let bytes = fs::read(path).map_err(|e| io(path, e))?;
-    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+    let config = bincode::config::standard().with_limit::<{ MAX_CACHE_BYTES as usize }>();
+    bincode::serde::decode_from_slice(&bytes, config)
         .map(|(v, _)| v)
         .map_err(|e| cache_err(path, format!("decode: {e}")))
+}
+
+/// Whether a decoded fact set is self-consistent: every scope, owner,
+/// parent and class index names a definition, and parent chains end at the
+/// module scope. A cache that fails this is rebuilt from source, never
+/// walked.
+fn facts_consistent(f: &FactSet) -> bool {
+    let n = f.defs.len() as u32;
+    if n == 0 || f.defs[0].parent.is_some() {
+        return false;
+    }
+    for (i, d) in f.defs.iter().enumerate() {
+        if d.parent.is_some_and(|p| p >= n) || d.class.is_some_and(|c| c >= n) {
+            return false;
+        }
+        // Parents must point strictly backwards: no cycle is possible then.
+        if i > 0 && d.parent.is_none_or(|p| p as usize >= i) {
+            return false;
+        }
+    }
+    f.imports.iter().all(|i| i.scope < n)
+        && f.binds
+            .iter()
+            .all(|b| b.scope < n && b.class.is_none_or(|c| c < n))
+        && f.refs.iter().all(|r| r.scope < n && r.owner < n)
+}
+
+/// Read a fact set, rejecting one whose indices are out of range.
+fn read_facts(path: &Path) -> Result<FactSet, FlowspecError> {
+    let f: FactSet = read_bin(path)?;
+    if facts_consistent(&f) {
+        Ok(f)
+    } else {
+        Err(cache_err(path, "inconsistent fact set".to_string()))
+    }
+}
+
+/// Refuse an index directory component that is a symlink: a checkout could
+/// point `.flowspec/index` at a directory flowspec must not write into or
+/// clean up. Returns the error a caller should surface.
+fn refuse_symlink(path: &Path) -> Result<(), FlowspecError> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(cache_err(
+            path,
+            "is a symlink; refusing to use it as the index directory".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn is_fact_file_name(name: &str) -> bool {
+    name.len() == 68 && name.ends_with(".bin") && name[..64].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Hex SHA-256 over the root-relative path and the file bytes, so the fact
@@ -181,6 +249,9 @@ impl Index {
     pub fn build(root: &Path, files: &[PathBuf]) -> Result<Index, FlowspecError> {
         let dir = Index::dir_for(root);
         let facts_dir = dir.join("facts");
+        for p in [root.join(".flowspec"), dir.clone(), facts_dir.clone()] {
+            refuse_symlink(&p)?;
+        }
         fs::create_dir_all(&facts_dir).map_err(|e| io(&facts_dir, e))?;
 
         let previous: Option<IndexManifest> =
@@ -265,7 +336,7 @@ impl Index {
                 .filter(|e| e.hash == hash && e.skipped.is_none() && facts_path.is_file())
                 .map(|e| (*e).clone());
             let (fact_set, entry) = match reuse {
-                Some(prev) => match read_bin::<FactSet>(&facts_path) {
+                Some(prev) => match read_facts(&facts_path) {
                     Ok(f) => (Some(f), prev),
                     Err(_) => {
                         changed.insert(fi);
@@ -330,11 +401,23 @@ impl Index {
             let keep: HashSet<u32> = (0..entries.len() as u32)
                 .filter(|fi| !to_resolve.contains(&(*fi as usize)))
                 .collect();
+            // A retained site must name definitions that exist in the
+            // rebuilt export table; anything else is a stale or hostile cache.
+            let in_table = |g: &GId| {
+                ex.files
+                    .get(g.0 as usize)
+                    .is_some_and(|f| (g.1 as usize) < f.defs.len())
+            };
             if let Ok(old) = read_bin::<Vec<Site>>(&dir.join("sites.bin")) {
-                sites.extend(old.into_iter().filter(|s| keep.contains(&s.owner.0)));
+                sites.extend(old.into_iter().filter(|s| {
+                    keep.contains(&s.owner.0) && in_table(&s.owner) && in_table(&s.target)
+                }));
             }
             if let Ok(old) = read_bin::<Vec<UnknownCall>>(&dir.join("unknown.bin")) {
-                unknown.extend(old.into_iter().filter(|u| keep.contains(&u.owner.0)));
+                unknown.extend(
+                    old.into_iter()
+                        .filter(|u| keep.contains(&u.owner.0) && in_table(&u.owner)),
+                );
             }
         }
         for &fi in &to_resolve {
@@ -343,7 +426,7 @@ impl Index {
                 continue;
             }
             let facts_path = facts_dir.join(format!("{}.bin", e.hash));
-            let f: FactSet = read_bin(&facts_path)?;
+            let f = read_facts(&facts_path)?;
             let r = resolve::resolve_file(&ex, fi as u32, &f);
             sites.extend(r.sites);
             unknown.extend(r.unknown_calls);
@@ -377,10 +460,12 @@ impl Index {
             .filter(|f| !f.hash.is_empty())
             .map(|f| format!("{}.bin", f.hash))
             .collect();
+        // Only regular files named like a fact file are ours to delete.
         if let Ok(rd) = fs::read_dir(&facts_dir) {
             for entry in rd.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".bin") && !live.contains(&name) {
+                let regular = fs::symlink_metadata(entry.path()).is_ok_and(|m| m.is_file());
+                if regular && is_fact_file_name(&name) && !live.contains(&name) {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -409,7 +494,7 @@ impl Index {
     /// Read a file's facts back from the store.
     pub fn facts_of(&self, fi: u32) -> Result<FactSet, FlowspecError> {
         let e = &self.manifest.files[fi as usize];
-        read_bin(&self.dir.join("facts").join(format!("{}.bin", e.hash)))
+        read_facts(&self.dir.join("facts").join(format!("{}.bin", e.hash)))
     }
 
     /// Every site reaching `target`, certain first, plus unknown-receiver
@@ -818,6 +903,58 @@ mod tests {
             owners("shapes.py::Modes::static_run", true),
             vec!["pkg/shapes.py::use"]
         );
+    }
+
+    #[test]
+    fn hostile_cache_is_rebuilt_not_trusted() {
+        // A fact file whose indices point outside its own definitions, a
+        // sites file naming definitions that do not exist, and a symlinked
+        // facts directory are each refused; the index still builds from
+        // source and answers correctly.
+        let (dir, idx) = build(&[(
+            "a.py",
+            "def f():\n    return 1\n\ndef g():\n    return f()\n",
+        )]);
+        let files = vec![dir.path().join("a.py")];
+        let facts_dir = idx.dir().join("facts");
+        let fact_path = fs::read_dir(&facts_dir)
+            .unwrap()
+            .flatten()
+            .next()
+            .unwrap()
+            .path();
+        let mut bad: FactSet = read_bin(&fact_path).unwrap();
+        bad.refs[0].owner = 999;
+        write_atomic(&fact_path, &bad).unwrap();
+        let sites_path = idx.dir().join("sites.bin");
+        let mut sites: Vec<Site> = read_bin(&sites_path).unwrap();
+        sites.push(Site {
+            target: (7, 7),
+            owner: (0, 1),
+            line: 1,
+            kind: SiteKind::Call,
+            certain: true,
+            why: String::new(),
+        });
+        write_atomic(&sites_path, &sites).unwrap();
+        let warm = Index::build(dir.path(), &files).unwrap();
+        assert_eq!(
+            callers(&warm, "a.py::f"),
+            vec![("a.py::g".to_string(), 5, true)]
+        );
+        assert!(warm
+            .all_sites()
+            .iter()
+            .all(|s| s.target.0 == 0 && s.target.1 < 3));
+
+        let other = tempfile::TempDir::new().unwrap();
+        fs::remove_dir_all(&facts_dir).unwrap();
+        std::os::unix::fs::symlink(other.path(), &facts_dir).unwrap();
+        let err = match Index::build(dir.path(), &files) {
+            Ok(_) => panic!("a symlinked facts directory must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("symlink"), "{err}");
     }
 
     #[test]

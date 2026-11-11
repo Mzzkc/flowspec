@@ -83,6 +83,14 @@ in `api/handler.py` resolves to `repository/repo.py` beside `api/`. This is
 the `Exports::module_file_from` rule; the exact match still wins so package
 imports are never shadowed by a same-named sibling.
 
+The on-disk index may arrive with a checkout, so it is untrusted input:
+every cache file is decoded under a fixed size bound, a fact set is rejected
+when any scope, owner, parent or class index falls outside its own
+definition list or a parent does not point strictly backwards, retained
+sites must name definitions present in the rebuilt export table, a symlinked
+index directory is refused, and garbage collection only deletes regular
+files named `<64 hex>.bin`. A rejected file is re-extracted from source.
+
 ### Resolution pass
 
 Files are resolved one at a time against the export table. Within a file the

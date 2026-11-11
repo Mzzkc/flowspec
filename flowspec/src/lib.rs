@@ -769,7 +769,7 @@ fn analyze_core(
     if let Some(index) = &py_index {
         modules = pyindex::manifest::modules(index);
     }
-    modules.sort_by(|a, b| b.entity_count.cmp(&a.entity_count));
+    modules.sort_by_key(|m| std::cmp::Reverse(m.entity_count));
 
     // Stage 4b: Trace data flows. Python: from the index; the graph is empty.
     let flow_paths = if py_index.is_some() {

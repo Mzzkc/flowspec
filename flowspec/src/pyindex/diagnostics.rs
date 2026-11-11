@@ -842,191 +842,6 @@ pub fn all(index: &Index) -> Vec<Diagnostic> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    fn build(files: &[(&str, &str)]) -> (tempfile::TempDir, Index) {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut paths = Vec::new();
-        for (rel, body) in files {
-            let p = dir.path().join(rel);
-            fs::create_dir_all(p.parent().unwrap()).unwrap();
-            fs::write(&p, body).unwrap();
-            paths.push(p);
-        }
-        let idx = Index::build(dir.path(), &paths).unwrap();
-        (dir, idx)
-    }
-
-    fn names(diags: &[Diagnostic]) -> Vec<String> {
-        let mut v: Vec<String> = diags.iter().map(|d| d.entity.clone()).collect();
-        v.sort();
-        v
-    }
-
-    #[test]
-    fn same_file_reads_annotations_and_local_imports_are_not_phantom() {
-        let src = "import os\nimport json\nfrom typing import Any, Optional\nfrom pkg.a import A, unused_one\n\n_LIMIT = 3\n\ndef f(x: Optional[A]) -> Any:\n    from pkg.b import helper\n    return helper(_LIMIT) + os.getcwd()\n\nclass C:\n    def m(self):\n        return f\"{json.dumps(1)}\"\n";
-        let (_d, idx) = build(&[
-            ("pkg/__init__.py", ""),
-            (
-                "pkg/a.py",
-                "class A:\n    pass\n\ndef unused_one():\n    pass\n",
-            ),
-            ("pkg/b.py", "def helper(n):\n    return n\n"),
-            ("pkg/m.py", src),
-        ]);
-        assert_eq!(names(&phantom_dependency(&idx)), vec!["m.py::unused_one"]);
-    }
-
-    #[test]
-    fn dead_end_counts_same_file_and_cross_file_consumers() {
-        let (_d, idx) = build(&[
-            ("pkg/__init__.py", ""),
-            ("pkg/a.py", "def _used():\n    return 1\n\ndef _dead():\n    return 2\n\ndef public_dead():\n    return 3\n\ndef caller():\n    return _used()\n"),
-            ("pkg/b.py", "from pkg.a import caller\n\ndef run():\n    return caller()\n"),
-        ]);
-        let diags = data_dead_end(&idx);
-        let by: HashMap<String, Confidence> = diags
-            .iter()
-            .map(|d| (d.entity.clone(), d.confidence))
-            .collect();
-        assert_eq!(by.get("a.py::_dead"), Some(&Confidence::High));
-        // Public top-level functions are importable API, never dead ends.
-        assert!(!by.contains_key("a.py::public_dead"));
-        assert!(!by.contains_key("b.py::run"));
-        assert!(!by.contains_key("a.py::_used"));
-        assert!(!by.contains_key("a.py::caller"));
-    }
-
-    #[test]
-    fn methods_called_through_self_or_typed_receivers_are_not_orphaned() {
-        let src = "class Base:\n    def hook(self):\n        return 0\n\nclass K(Base):\n    def hook(self):\n        return 1\n    def _helper(self):\n        return self.hook()\n    def _lonely(self):\n        return 2\n    def run(self):\n        return self._helper()\n\ndef use(k: K):\n    return k.run()\n";
-        let (_d, idx) = build(&[("m.py", src)]);
-        let diags = orphaned_impl(&idx);
-        assert_eq!(names(&diags), vec!["m.py::Base::hook", "m.py::K::_lonely"]);
-        let lonely = diags
-            .iter()
-            .find(|d| d.entity.ends_with("_lonely"))
-            .unwrap();
-        assert_eq!(lonely.confidence, Confidence::High);
-        let hook = diags
-            .iter()
-            .find(|d| d.entity.ends_with("Base::hook"))
-            .unwrap();
-        assert_eq!(hook.confidence, Confidence::Low);
-    }
-
-    #[test]
-    fn reexports_are_checked_only_against_curating_packages() {
-        let (_d, idx) = build(&[
-            ("curated/__init__.py", "from curated.a import A\n"),
-            (
-                "curated/a.py",
-                "class A:\n    pass\n\nclass B:\n    pass\n\ndef _p():\n    pass\n",
-            ),
-            ("plain/__init__.py", ""),
-            ("plain/x.py", "def visible():\n    pass\n"),
-            ("star/__init__.py", "from star.y import *\n"),
-            ("star/y.py", "def anything():\n    pass\n"),
-        ]);
-        assert_eq!(names(&missing_reexport(&idx)), vec!["a.py::B"]);
-    }
-
-    #[test]
-    fn import_cycles_are_found_including_relative_and_function_local() {
-        let (_d, idx) = build(&[
-            ("pkg/__init__.py", ""),
-            ("pkg/a.py", "from .b import f\n\ndef g():\n    return f()\n"),
-            (
-                "pkg/b.py",
-                "def f():\n    from pkg.a import g\n    return g\n",
-            ),
-            ("pkg/c.py", "from pkg.a import g\n"),
-        ]);
-        let diags = circular_dependency(&idx);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].entity, "pkg/a.py -> pkg/b.py");
-    }
-
-    #[test]
-    fn stale_imports_name_missing_members_but_not_submodules_aliases_or_star_sources() {
-        let (_d, idx) = build(&[
-            ("main.py", "from utils import old_function\nfrom utils import valid_function\nfrom helpers import removed_helper, another_removed\nfrom pkg import sub\nfrom pkg.sub import ALIAS, starred\n\ndef run():\n    return valid_function()\n"),
-            ("utils.py", "def new_function():\n    return 42\n\ndef valid_function():\n    return 'ok'\n"),
-            ("helpers.py", "def active_helper():\n    return True\n"),
-            ("pkg/__init__.py", ""),
-            ("pkg/sub.py", "from os import path\nfrom pkg.other import *\nALIAS = path\n"),
-            ("pkg/other.py", "def starred():\n    pass\n"),
-        ]);
-        assert_eq!(
-            names(&stale_reference(&idx)),
-            vec![
-                "main.py::another_removed",
-                "main.py::old_function",
-                "main.py::removed_helper"
-            ]
-        );
-    }
-
-    #[test]
-    fn ai_codebase_heuristics_fire_on_planted_shapes_and_stay_quiet_on_clean_ones() {
-        let (_d, idx) = build(&[
-            ("pkg/__init__.py", ""),
-            // incomplete migration: old_ and new spelling both with production callers; a shim pair excluded
-            ("pkg/db.py", "def query(sql):\n    return 1\n\ndef old_query(sql):\n    return 2\n\ndef legacy_fetch(x):\n    return fetch(x)\n\ndef fetch(x):\n    return x\n"),
-            ("pkg/h1.py", "from pkg.db import old_query\n\ndef a():\n    return old_query('x')\n"),
-            ("pkg/h2.py", "from pkg.db import query\n\ndef b():\n    return query('x')\n"),
-            // asymmetric handling: three handlers, one lacks the auth check
-            ("pkg/api.py", "def require_admin():\n    pass\n\ndef log(x):\n    pass\n\ndef create_user(u):\n    require_admin()\n    log(u)\n\ndef update_user(u):\n    require_admin()\n    log(u)\n\ndef delete_user(u):\n    log(u)\n"),
-            // duplication: two functions sharing 3 of 3 callees with one differing step each
-            ("pkg/norm.py", "def lower(s):\n    return s\n\ndef strip(s):\n    return s\n\ndef collapse(s):\n    return s\n\ndef decode(s):\n    return s\n\ndef normalize_query(q):\n    return collapse(strip(lower(q)))\n\ndef clean_query_string(q):\n    return collapse(strip(lower(decode(q))))\n"),
-            // contract mismatch: staticmethod with self
-            ("pkg/svc.py", "class S:\n    @staticmethod\n    def run(self, x):\n        return x\n    @classmethod\n    def make(cls):\n        return cls()\n"),
-            // partial wiring: imported by three files, used in one
-            ("pkg/util.py", "def helper():\n    return 1\n"),
-            ("pkg/u1.py", "from pkg.util import helper\n\ndef go():\n    return helper()\n"),
-            ("pkg/u2.py", "from pkg.util import helper\n"),
-            ("pkg/u3.py", "from pkg.util import helper\n"),
-        ]);
-        let mig = incomplete_migration(&idx);
-        assert_eq!(names(&mig), vec!["db.py::old_query, db.py::query"]);
-        let asym = asymmetric_handling(&idx);
-        assert_eq!(names(&asym), vec!["api.py::delete_user"]);
-        assert!(
-            asym[0].message.contains("require_admin"),
-            "{}",
-            asym[0].message
-        );
-        let dup = duplication(&idx);
-        assert_eq!(
-            names(&dup),
-            vec!["norm.py::normalize_query, norm.py::clean_query_string"]
-        );
-        let cm = contract_mismatch(&idx);
-        assert_eq!(names(&cm), vec!["run"]);
-        assert_eq!(cm[0].severity, Severity::Critical);
-        let pw = partial_wiring(&idx);
-        assert_eq!(names(&pw), vec!["util.py::helper"]);
-        assert_eq!(pw[0].confidence, Confidence::High);
-    }
-
-    #[test]
-    fn isolated_clusters_exclude_groups_reached_from_module_level_or_outside() {
-        let (_d, idx) = build(&[
-            ("m.py", "def _a():\n    return _b()\n\ndef _b():\n    return _a()\n\ndef _c():\n    return _d()\n\ndef _d():\n    return 1\n\n_c()\n"),
-        ]);
-        let diags = isolated_cluster(&idx);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0]
-            .message
-            .starts_with("Isolated cluster of 2 symbols"));
-        assert_eq!(diags[0].entity, "m.py::_a");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // AI-codebase heuristics
 // ---------------------------------------------------------------------------
@@ -1518,4 +1333,189 @@ pub fn partial_wiring(index: &Index) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn build(files: &[(&str, &str)]) -> (tempfile::TempDir, Index) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut paths = Vec::new();
+        for (rel, body) in files {
+            let p = dir.path().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, body).unwrap();
+            paths.push(p);
+        }
+        let idx = Index::build(dir.path(), &paths).unwrap();
+        (dir, idx)
+    }
+
+    fn names(diags: &[Diagnostic]) -> Vec<String> {
+        let mut v: Vec<String> = diags.iter().map(|d| d.entity.clone()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn same_file_reads_annotations_and_local_imports_are_not_phantom() {
+        let src = "import os\nimport json\nfrom typing import Any, Optional\nfrom pkg.a import A, unused_one\n\n_LIMIT = 3\n\ndef f(x: Optional[A]) -> Any:\n    from pkg.b import helper\n    return helper(_LIMIT) + os.getcwd()\n\nclass C:\n    def m(self):\n        return f\"{json.dumps(1)}\"\n";
+        let (_d, idx) = build(&[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/a.py",
+                "class A:\n    pass\n\ndef unused_one():\n    pass\n",
+            ),
+            ("pkg/b.py", "def helper(n):\n    return n\n"),
+            ("pkg/m.py", src),
+        ]);
+        assert_eq!(names(&phantom_dependency(&idx)), vec!["m.py::unused_one"]);
+    }
+
+    #[test]
+    fn dead_end_counts_same_file_and_cross_file_consumers() {
+        let (_d, idx) = build(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "def _used():\n    return 1\n\ndef _dead():\n    return 2\n\ndef public_dead():\n    return 3\n\ndef caller():\n    return _used()\n"),
+            ("pkg/b.py", "from pkg.a import caller\n\ndef run():\n    return caller()\n"),
+        ]);
+        let diags = data_dead_end(&idx);
+        let by: HashMap<String, Confidence> = diags
+            .iter()
+            .map(|d| (d.entity.clone(), d.confidence))
+            .collect();
+        assert_eq!(by.get("a.py::_dead"), Some(&Confidence::High));
+        // Public top-level functions are importable API, never dead ends.
+        assert!(!by.contains_key("a.py::public_dead"));
+        assert!(!by.contains_key("b.py::run"));
+        assert!(!by.contains_key("a.py::_used"));
+        assert!(!by.contains_key("a.py::caller"));
+    }
+
+    #[test]
+    fn methods_called_through_self_or_typed_receivers_are_not_orphaned() {
+        let src = "class Base:\n    def hook(self):\n        return 0\n\nclass K(Base):\n    def hook(self):\n        return 1\n    def _helper(self):\n        return self.hook()\n    def _lonely(self):\n        return 2\n    def run(self):\n        return self._helper()\n\ndef use(k: K):\n    return k.run()\n";
+        let (_d, idx) = build(&[("m.py", src)]);
+        let diags = orphaned_impl(&idx);
+        assert_eq!(names(&diags), vec!["m.py::Base::hook", "m.py::K::_lonely"]);
+        let lonely = diags
+            .iter()
+            .find(|d| d.entity.ends_with("_lonely"))
+            .unwrap();
+        assert_eq!(lonely.confidence, Confidence::High);
+        let hook = diags
+            .iter()
+            .find(|d| d.entity.ends_with("Base::hook"))
+            .unwrap();
+        assert_eq!(hook.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn reexports_are_checked_only_against_curating_packages() {
+        let (_d, idx) = build(&[
+            ("curated/__init__.py", "from curated.a import A\n"),
+            (
+                "curated/a.py",
+                "class A:\n    pass\n\nclass B:\n    pass\n\ndef _p():\n    pass\n",
+            ),
+            ("plain/__init__.py", ""),
+            ("plain/x.py", "def visible():\n    pass\n"),
+            ("star/__init__.py", "from star.y import *\n"),
+            ("star/y.py", "def anything():\n    pass\n"),
+        ]);
+        assert_eq!(names(&missing_reexport(&idx)), vec!["a.py::B"]);
+    }
+
+    #[test]
+    fn import_cycles_are_found_including_relative_and_function_local() {
+        let (_d, idx) = build(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "from .b import f\n\ndef g():\n    return f()\n"),
+            (
+                "pkg/b.py",
+                "def f():\n    from pkg.a import g\n    return g\n",
+            ),
+            ("pkg/c.py", "from pkg.a import g\n"),
+        ]);
+        let diags = circular_dependency(&idx);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].entity, "pkg/a.py -> pkg/b.py");
+    }
+
+    #[test]
+    fn stale_imports_name_missing_members_but_not_submodules_aliases_or_star_sources() {
+        let (_d, idx) = build(&[
+            ("main.py", "from utils import old_function\nfrom utils import valid_function\nfrom helpers import removed_helper, another_removed\nfrom pkg import sub\nfrom pkg.sub import ALIAS, starred\n\ndef run():\n    return valid_function()\n"),
+            ("utils.py", "def new_function():\n    return 42\n\ndef valid_function():\n    return 'ok'\n"),
+            ("helpers.py", "def active_helper():\n    return True\n"),
+            ("pkg/__init__.py", ""),
+            ("pkg/sub.py", "from os import path\nfrom pkg.other import *\nALIAS = path\n"),
+            ("pkg/other.py", "def starred():\n    pass\n"),
+        ]);
+        assert_eq!(
+            names(&stale_reference(&idx)),
+            vec![
+                "main.py::another_removed",
+                "main.py::old_function",
+                "main.py::removed_helper"
+            ]
+        );
+    }
+
+    #[test]
+    fn ai_codebase_heuristics_fire_on_planted_shapes_and_stay_quiet_on_clean_ones() {
+        let (_d, idx) = build(&[
+            ("pkg/__init__.py", ""),
+            // incomplete migration: old_ and new spelling both with production callers; a shim pair excluded
+            ("pkg/db.py", "def query(sql):\n    return 1\n\ndef old_query(sql):\n    return 2\n\ndef legacy_fetch(x):\n    return fetch(x)\n\ndef fetch(x):\n    return x\n"),
+            ("pkg/h1.py", "from pkg.db import old_query\n\ndef a():\n    return old_query('x')\n"),
+            ("pkg/h2.py", "from pkg.db import query\n\ndef b():\n    return query('x')\n"),
+            // asymmetric handling: three handlers, one lacks the auth check
+            ("pkg/api.py", "def require_admin():\n    pass\n\ndef log(x):\n    pass\n\ndef create_user(u):\n    require_admin()\n    log(u)\n\ndef update_user(u):\n    require_admin()\n    log(u)\n\ndef delete_user(u):\n    log(u)\n"),
+            // duplication: two functions sharing 3 of 3 callees with one differing step each
+            ("pkg/norm.py", "def lower(s):\n    return s\n\ndef strip(s):\n    return s\n\ndef collapse(s):\n    return s\n\ndef decode(s):\n    return s\n\ndef normalize_query(q):\n    return collapse(strip(lower(q)))\n\ndef clean_query_string(q):\n    return collapse(strip(lower(decode(q))))\n"),
+            // contract mismatch: staticmethod with self
+            ("pkg/svc.py", "class S:\n    @staticmethod\n    def run(self, x):\n        return x\n    @classmethod\n    def make(cls):\n        return cls()\n"),
+            // partial wiring: imported by three files, used in one
+            ("pkg/util.py", "def helper():\n    return 1\n"),
+            ("pkg/u1.py", "from pkg.util import helper\n\ndef go():\n    return helper()\n"),
+            ("pkg/u2.py", "from pkg.util import helper\n"),
+            ("pkg/u3.py", "from pkg.util import helper\n"),
+        ]);
+        let mig = incomplete_migration(&idx);
+        assert_eq!(names(&mig), vec!["db.py::old_query, db.py::query"]);
+        let asym = asymmetric_handling(&idx);
+        assert_eq!(names(&asym), vec!["api.py::delete_user"]);
+        assert!(
+            asym[0].message.contains("require_admin"),
+            "{}",
+            asym[0].message
+        );
+        let dup = duplication(&idx);
+        assert_eq!(
+            names(&dup),
+            vec!["norm.py::normalize_query, norm.py::clean_query_string"]
+        );
+        let cm = contract_mismatch(&idx);
+        assert_eq!(names(&cm), vec!["run"]);
+        assert_eq!(cm[0].severity, Severity::Critical);
+        let pw = partial_wiring(&idx);
+        assert_eq!(names(&pw), vec!["util.py::helper"]);
+        assert_eq!(pw[0].confidence, Confidence::High);
+    }
+
+    #[test]
+    fn isolated_clusters_exclude_groups_reached_from_module_level_or_outside() {
+        let (_d, idx) = build(&[
+            ("m.py", "def _a():\n    return _b()\n\ndef _b():\n    return _a()\n\ndef _c():\n    return _d()\n\ndef _d():\n    return 1\n\n_c()\n"),
+        ]);
+        let diags = isolated_cluster(&idx);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0]
+            .message
+            .starts_with("Isolated cluster of 2 symbols"));
+        assert_eq!(diags[0].entity, "m.py::_a");
+    }
 }
