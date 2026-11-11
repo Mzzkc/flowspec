@@ -94,6 +94,10 @@ content:
       acceptable: "Under 15 seconds"
     memory:
       guideline: "Should not exceed 2x the size of the source code in memory during analysis"
+      hard_limit: |
+        A run never exceeds its memory budget (default 2 GiB, --memory-limit) by
+        more than one stage's growth; crossing it is an error with the stage
+        name and exit 1, never a host-level out-of-memory event.
 
   platform_support:
     primary: "Linux (x86_64)"

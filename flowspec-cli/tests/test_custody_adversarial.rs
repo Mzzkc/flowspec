@@ -102,7 +102,7 @@ fn commit_all(repo: &Path, message: &str) -> String {
 }
 
 fn run_checker(repo: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new("python");
+    let mut command = Command::new("python3");
     command.arg(checker_path()).arg("--root").arg(repo);
     if !args.contains(&"--policy") {
         command.arg("--policy").arg(policy_file_path());
@@ -118,7 +118,7 @@ fn run_checker_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<Output, String> {
-    let mut command = Command::new("python");
+    let mut command = Command::new("python3");
     command.arg(checker_path()).arg("--root").arg(repo);
     if !args.contains(&"--policy") {
         command.arg("--policy").arg(policy_file_path());

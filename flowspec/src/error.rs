@@ -107,6 +107,17 @@ pub enum FlowspecError {
     /// A referenced symbol was not found in the graph.
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
+
+    /// Analysis stopped because it held more memory than the configured budget.
+    #[error("memory budget exceeded after {stage}: {held} held, limit {limit} (fix: narrow the path or raise --memory-limit; 0 disables the check)", held = crate::budget::format_size(*held), limit = crate::budget::format_size(*limit))]
+    MemoryBudgetExceeded {
+        /// The analysis stage that had just completed.
+        stage: String,
+        /// Bytes held when the check ran.
+        held: u64,
+        /// The budget in bytes.
+        limit: u64,
+    },
 }
 
 /// Error type specific to manifest formatting operations.

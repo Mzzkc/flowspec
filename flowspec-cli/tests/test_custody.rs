@@ -78,7 +78,7 @@ fn example_test() {
     let checker_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
-    let output = Command::new("python")
+    let output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
@@ -158,7 +158,7 @@ fn clean_test() {
     let checker_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
-    let output = Command::new("python")
+    let output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
@@ -237,7 +237,7 @@ test.skip('skipped test', () => {
     let checker_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
-    let output = Command::new("python")
+    let output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
@@ -312,7 +312,7 @@ test.skip('skipped typescript test', () => {
     let checker_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
-    let output = Command::new("python")
+    let output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
@@ -389,7 +389,7 @@ def example_test():
     let checker_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/check-test-custody.py");
 
-    let output = Command::new("python")
+    let output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
@@ -478,7 +478,7 @@ fn synthetic_test() {{
         .expect("RED: git commit failed");
 
     // Verify checker detects the synthetic marker
-    let synthetic_output = Command::new("python")
+    let synthetic_output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(repo)
@@ -497,7 +497,7 @@ fn synthetic_test() {{
     // This FAILS because 5 #[ignore] markers currently exist
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
 
-    let actual_output = Command::new("python")
+    let actual_output = Command::new("python3")
         .arg(&checker_path)
         .arg("--root")
         .arg(&repo_root)
@@ -568,7 +568,7 @@ fn recovery_commit_all(repo: &Path, message: &str) -> String {
 }
 
 fn recovery_run_checker(repo: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("python")
+    Command::new("python3")
         .arg(recovery_checker_path())
         .arg("--root")
         .arg(repo)

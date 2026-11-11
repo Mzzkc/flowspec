@@ -44,7 +44,21 @@ struct Cli {
     /// Path to .flowspec/config.yaml.
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+
+    /// Memory budget for this run (e.g. 512M, 2G; 0 disables the check).
+    /// Analysis stops with a clear error instead of exhausting the host.
+    #[arg(
+        long,
+        global = true,
+        env = "FLOWSPEC_MEMORY_LIMIT",
+        default_value = "2G",
+        value_name = "SIZE"
+    )]
+    memory_limit: String,
 }
+
+#[global_allocator]
+static ALLOCATOR: flowspec::budget::BudgetAlloc = flowspec::budget::BudgetAlloc;
 
 #[derive(Subcommand)]
 enum Commands {
@@ -285,6 +299,13 @@ fn setup_tracing(verbose: bool, quiet: bool) {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, FlowspecError> {
+    let limit = flowspec::budget::parse_size(&cli.memory_limit).map_err(|reason| {
+        FlowspecError::Config {
+            reason,
+            suggestion: "pass --memory-limit as a size such as 512M or 2G".to_string(),
+        }
+    })?;
+    flowspec::budget::set_budget(limit);
     let format = cli.format.to_output_format();
     let output_path = cli.output.as_deref();
     let config_path = cli.config.as_deref();

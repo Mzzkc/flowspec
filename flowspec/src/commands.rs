@@ -647,6 +647,7 @@ fn trace_python_references(
         return Ok(None);
     }
     let index = PyIndex::build(root, &python);
+    crate::budget::check("reference index")?;
     let target = match index.resolve_symbol(symbol) {
         Ok(id) => id,
         Err(_) if python.len() < files.len() => return Ok(None),

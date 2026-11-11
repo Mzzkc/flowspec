@@ -22,6 +22,8 @@
 
 /// Diagnostic detection, flow tracing, and boundary analysis.
 pub mod analyzer;
+/// Process-wide memory budget and the counting allocator behind it.
+pub mod budget;
 /// Extracted CLI command logic — testable library functions for analyze, diagnose, trace, diff, init.
 pub mod commands;
 /// Configuration loading and validation.
@@ -434,6 +436,7 @@ fn analyze_core(
             match adapter.parse_file(file, &content) {
                 Ok(result) => {
                     populate_graph(&mut graph, &result);
+                    budget::check("parse")?;
                     if parse_loss {
                         tracing::warn!("Parse recovery in {}", file.display());
                         completeness.reject(file.display().to_string(), "parse_error");
@@ -473,6 +476,7 @@ fn analyze_core(
     completeness
         .rejected_files
         .sort_by(|a, b| a.path.cmp(&b.path));
+    budget::check("parse")?;
 
     // Stage 1b: Cross-file import resolution
     // After all files are parsed, resolve import symbols that reference definitions
@@ -484,6 +488,7 @@ fn analyze_core(
     }
     // Stage 1c: project-wide receiver.method() call resolution (needs all files).
     graph::resolve_method_calls(&mut graph);
+    budget::check("resolve")?;
     for reference in graph.prerequisite_losses() {
         let parser::ir::ResolutionStatus::Partial(info) = &reference.resolution else {
             continue;
@@ -590,6 +595,7 @@ fn analyze_core(
 
     // Stage 2: Run diagnostic patterns on the populated graph
     let raw_diagnostics = run_all_patterns(&graph, project_path);
+    budget::check("diagnostics")?;
     let diagnostics = to_manifest_entries(&raw_diagnostics);
 
     // Stage 3: Build entity list from graph symbols
@@ -729,6 +735,7 @@ fn analyze_core(
 
     // Stage 4b: Trace data flows through the call graph
     let flow_paths = trace_all_flows(&graph);
+    budget::check("flow tracing")?;
     let flows: Vec<FlowEntry> = flow_paths
         .iter()
         .enumerate()

@@ -19,6 +19,13 @@ content:
     - flag: "--output, -o <path>"
       type: "optional path"
       description: "Write output to file instead of stdout"
+    - flag: "--memory-limit <size>"
+      type: "size, default 2G; env FLOWSPEC_MEMORY_LIMIT"
+      description: |
+        Memory budget for the run. Every allocation is counted; at each analysis
+        stage boundary the run stops with "memory budget exceeded after <stage>"
+        and exit 1 if the budget is crossed. 0 disables the check. Added
+        2026-11-11 after an uncapped run exhausted a 15 GB host.
       default: "stdout"
     - flag: "--format, -f <format>"
       type: "enum: yaml, json, sarif, summary"
