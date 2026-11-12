@@ -1162,20 +1162,21 @@ pub struct UnknownCall {
 /// Why a span of a file leaves a question open. Each maps onto one loss
 /// reason the report authority already understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum LossKind {
     /// An annotation whose contract no type-flow evidence backs
     /// (`capability_unavailable` / `type_flows`).
-    TypeFlows,
+    TypeFlows = 0,
     /// An annotation naming a type the resolver cannot bind
     /// (`unresolved_type` / `type_resolution`).
-    UnresolvedType,
+    UnresolvedType = 1,
     /// A runtime namespace lookup (`unresolved_reference` / `consumer_closure`).
-    DynamicNamespace,
+    DynamicNamespace = 2,
     /// A `match` statement (`unsupported_construct` / `control_flow`).
-    MatchStatement,
+    MatchStatement = 3,
     /// A relative import the resolver could not place in the project
     /// (`unresolved_import`).
-    UnresolvedImport,
+    UnresolvedImport = 4,
 }
 
 /// One open question, with the span it is about.

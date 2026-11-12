@@ -257,14 +257,32 @@ pub(crate) fn index_projection(
     let graph = json!({"entities":entities,"boundaries":boundaries,
         "dependency_graph":dependency_graph,"flows":flows,"type_flows":[]});
 
-    let mut losses = Vec::new();
+    // One loss per (file, kind) carrying every range: the obligation is per
+    // file and consumers key on path and reason, so a file with two hundred
+    // annotations is one `capability_unavailable` with two hundred ranges.
+    let mut grouped: BTreeMap<(u32, u8), Vec<Value>> = BTreeMap::new();
     for l in index.losses() {
         let f = &files[l.file as usize];
         let Some((key, content)) = content_of(&f.rel) else {
             continue;
         };
-        let range = offset_range(&key, content, l.start as u64, l.end as u64);
-        let (reason, capability, origin, stage) = match l.kind {
+        grouped
+            .entry((l.file, l.kind as u8))
+            .or_default()
+            .push(offset_range(&key, content, l.start as u64, l.end as u64));
+    }
+    let mut losses = Vec::new();
+    for ((file, kind), ranges) in grouped {
+        let f = &files[file as usize];
+        let key = path_key(root, &root.join(&f.rel));
+        let kind = match kind {
+            0 => LossKind::TypeFlows,
+            1 => LossKind::UnresolvedType,
+            2 => LossKind::DynamicNamespace,
+            3 => LossKind::MatchStatement,
+            _ => LossKind::UnresolvedImport,
+        };
+        let (reason, capability, origin, stage) = match kind {
             LossKind::TypeFlows => (
                 "capability_unavailable",
                 "type_flows",
@@ -286,10 +304,11 @@ pub(crate) fn index_projection(
             LossKind::MatchStatement => ("unsupported_construct", "control_flow", "Value", "parse"),
             LossKind::UnresolvedImport => ("unresolved_import", "resolution", "Value", "resolve"),
         };
-        let mut value = loss(reason, key, Some(range), stage);
-        value["required_capabilities"] = json!([capability]);
-        value["origin"] = json!(origin);
-        value["affected_patterns"] = if capability == "type_flows" {
+        let id = hash(
+            "loss",
+            &json!({"reason":reason,"scope_paths":[key],"ranges":ranges,"stage":stage}),
+        );
+        let affected = if capability == "type_flows" {
             json!(["contract_mismatch", "orphaned_impl"])
         } else {
             json!([
@@ -301,7 +320,12 @@ pub(crate) fn index_projection(
                 "orphaned_impl"
             ])
         };
-        losses.push(value);
+        losses.push(
+            json!({"id":id,"reason":reason,"scope_paths":[key],"ranges":ranges,
+            "symbols":[],"required_capabilities":[capability],"origin":origin,
+            "affected_patterns":affected,"stage":stage,
+            "continuation":"inspect the affected source and rerun analysis"}),
+        );
     }
     if binding_counts.values().any(|c| *c > 1) {
         losses.push(loss("identity_uncertain", String::new(), None, "binding"));
