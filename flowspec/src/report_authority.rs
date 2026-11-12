@@ -160,11 +160,16 @@ pub(crate) fn index_projection(
         .iter()
         .map(|i| (path_key(root, &i.path), i))
         .collect();
-    let content_of = |rel: &str| -> Option<(String, &str)> {
-        let key = path_key(root, &root.join(rel));
-        let input = by_key.get(&key)?;
-        Some((key, input.content.as_deref()?))
-    };
+    // One path key and one line table per indexed file.
+    let per_file: Vec<Option<(String, LineTable)>> = files
+        .iter()
+        .map(|f| {
+            let key = path_key(root, &root.join(&f.rel));
+            let input = by_key.get(&key)?;
+            let content = input.content.as_deref()?;
+            Some((key, LineTable::new(content)))
+        })
+        .collect();
     let construct = |kind: DefKind| match kind {
         DefKind::Function => "function",
         DefKind::Method => "method",
@@ -176,7 +181,7 @@ pub(crate) fn index_projection(
     let mut binding_counts: HashMap<String, usize> = HashMap::new();
     let mut bases: Vec<((u32, u32), Value, &str, String)> = Vec::new();
     for (fi, f) in files.iter().enumerate() {
-        let Some((key, _)) = content_of(&f.rel) else {
+        let Some((key, _)) = per_file[fi].as_ref() else {
             continue;
         };
         let file_name = f.rel.rsplit('/').next().unwrap_or(&f.rel);
@@ -198,15 +203,14 @@ pub(crate) fn index_projection(
             continue;
         }
         let f = &files[g.0 as usize];
-        let Some((key, content)) = content_of(&f.rel) else {
+        let Some((key, table)) = per_file[g.0 as usize].as_ref() else {
             continue;
         };
         let d = &f.defs[g.1 as usize];
-        let range = offset_range(
-            &key,
-            content,
-            byte_at(content, d.line, d.column),
-            byte_at(content, d.end_line, d.end_column),
+        let range = table.range(
+            key,
+            table.byte_at(d.line, d.column),
+            table.byte_at(d.end_line, d.end_column),
         );
         let mut subject = base;
         subject["binding_id"] = json!(id);
@@ -262,19 +266,20 @@ pub(crate) fn index_projection(
     // annotations is one `capability_unavailable` with two hundred ranges.
     let mut grouped: BTreeMap<(u32, u8), Vec<Value>> = BTreeMap::new();
     for l in index.losses() {
-        let f = &files[l.file as usize];
-        let Some((key, content)) = content_of(&f.rel) else {
+        let Some((key, table)) = per_file[l.file as usize].as_ref() else {
             continue;
         };
         grouped
             .entry((l.file, l.kind as u8))
             .or_default()
-            .push(offset_range(&key, content, l.start as u64, l.end as u64));
+            .push(table.range(key, l.start as u64, l.end as u64));
     }
     let mut losses = Vec::new();
     for ((file, kind), ranges) in grouped {
-        let f = &files[file as usize];
-        let key = path_key(root, &root.join(&f.rel));
+        let key = per_file[file as usize]
+            .as_ref()
+            .map(|(k, _)| k.clone())
+            .unwrap_or_default();
         let kind = match kind {
             0 => LossKind::TypeFlows,
             1 => LossKind::UnresolvedType,
@@ -432,6 +437,53 @@ fn language(path: &Path) -> Option<&'static str> {
         Some("ts" | "tsx") => Some("typescript"),
         Some("rs") => Some("rust"),
         _ => None,
+    }
+}
+
+/// Byte offset of the start of each 1-based line, so a (line, column) to
+/// offset conversion is one index and an offset to (line, column) one
+/// binary search, instead of a scan from the top of the file per call.
+struct LineTable {
+    starts: Vec<u64>,
+    len: u64,
+}
+
+impl LineTable {
+    fn new(content: &str) -> Self {
+        let mut starts = vec![0u64];
+        for (i, b) in content.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i as u64 + 1);
+            }
+        }
+        LineTable {
+            starts,
+            len: content.len() as u64,
+        }
+    }
+
+    fn byte_at(&self, line: u32, column: u32) -> u64 {
+        let idx = (line.saturating_sub(1) as usize).min(self.starts.len() - 1);
+        (self.starts[idx] + column.saturating_sub(1) as u64).min(self.len)
+    }
+
+    fn position_at(&self, offset: u64) -> (u64, u64) {
+        let offset = offset.min(self.len);
+        let idx = self
+            .starts
+            .partition_point(|s| *s <= offset)
+            .saturating_sub(1);
+        (idx as u64 + 1, offset - self.starts[idx] + 1)
+    }
+
+    fn range(&self, path_key: &str, start: u64, end: u64) -> Value {
+        let start = start.min(self.len);
+        let end = end.min(self.len).max(start);
+        let (start_line, start_column) = self.position_at(start);
+        let (end_line, end_column) = self.position_at(end);
+        json!({"path_key":path_key,"start_byte":start,"end_byte":end,
+            "start_line":start_line,"start_column":start_column,
+            "end_line":end_line,"end_column":end_column})
     }
 }
 
@@ -726,6 +778,7 @@ pub(crate) fn build(
     if let Some(p) = index {
         losses.extend(p.losses.iter().cloned());
     }
+    let clock = std::time::Instant::now();
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
@@ -797,6 +850,7 @@ pub(crate) fn build(
     }
     entries.sort_by(|a, b| a["path_key"].as_str().cmp(&b["path_key"].as_str()));
     provenance_inputs.sort_by(|a, b| a["path_key"].as_str().cmp(&b["path_key"].as_str()));
+    tracing::debug!("authority findings {:?}", clock.elapsed());
     let inventory = json!({"discovered":inputs.len(),"policy_excluded":counts.get("policy_excluded").copied().unwrap_or(0),
         "unsupported":counts.get("unsupported").copied().unwrap_or(0),"selected":counts.get("selected").copied().unwrap_or(0),
         "read":counts.get("read").copied().unwrap_or(0),"parsed":counts.get("parsed").copied().unwrap_or(0),
@@ -847,6 +901,7 @@ pub(crate) fn build(
     let tree_sha = option_env!("FLOWSPEC_SOURCE_TREE_SHA").unwrap_or("unbound");
     let producer = json!({"tool_version":env!("CARGO_PKG_VERSION"),"build_sha":build_sha,
         "source_tree_sha":tree_sha,"report_abi":"v1","generated_by":"analyzer"});
+    tracing::debug!("authority inventory {:?}", clock.elapsed());
     let provenance = json!({"config":config_provenance,"registry":{"digest":hash("registry",&registry)},
         "adapters":adapters,"controls":controls,"inputs":provenance_inputs,
         "cache":{"requested_mode":"full","executed_mode":"full","rebuild_reason":Value::Null},
@@ -881,6 +936,7 @@ pub(crate) fn build(
             }
         }
     }
+    tracing::debug!("authority provenance {:?}", clock.elapsed());
     let mut pattern_state = Vec::new();
     for pattern in PATTERNS {
         let pattern_losses: &[&Value] = losses_by_pattern
@@ -933,6 +989,7 @@ pub(crate) fn build(
     } else {
         "findings"
     };
+    tracing::debug!("authority pattern_state {:?}", clock.elapsed());
     let mut graph_state = graph_state(root, graph, inputs);
     if let Some(p) = index {
         // Merge the index projection with whatever the graph holds for the
@@ -953,7 +1010,9 @@ pub(crate) fn build(
         "pattern_state":pattern_state,"analysis_graph":graph_state,
         "display":{"filters":{"checks":[],"min_severity":Value::Null,"min_confidence":Value::Null},"indices":[]},
         "continuation":{"shown":0,"matched_total":0,"full":0,"truncated":false,"next_cursor":Value::Null}});
+    tracing::debug!("authority graph_state+assemble {:?}", clock.elapsed());
     set_gate(&mut authority, "critical", "low");
+    tracing::debug!("authority gate {:?}", clock.elapsed());
     authority
 }
 

@@ -1106,6 +1106,7 @@ fn analyze_core(
     let projection = py_index
         .as_ref()
         .map(|index| report_authority::index_projection(project_path, index, &input_records));
+    tracing::debug!("analyze index projection {:?}", stage_clock.elapsed());
     let authority = report_authority::build(
         project_path,
         config,
