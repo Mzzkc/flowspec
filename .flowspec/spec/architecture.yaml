@@ -59,6 +59,15 @@ content:
       re-resolve only files whose imports name a changed module. Sizing,
       measured on Django and CPython, is in docs/design/streaming-index.md.
 
+      (2026-11-12, resident and bidirectional, decision in
+      .flowspec/state/decisions.log.) The export table is snapshotted so a
+      warm process never decodes facts; sites are a struct-of-arrays with a
+      by-target offset array and a by-owner permutation, so a definition
+      reaches its callers and its callees in O(1) from the key, the way the
+      DDD hash-tree in clamonacc reaches a directory's parent and children
+      from one lookup; patterns read only the export table and posting
+      lists; `flowspec watch` keeps the index resident and current.
+
     persistent_graph: |
       (JavaScript/TypeScript and Rust only, until ported to the index.)
       The core data structure is an in-memory graph that serializes to a

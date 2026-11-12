@@ -255,3 +255,89 @@ alternatives_considered:
   - "Keep patching edges into the name-matching graph (rejected — the 11:27Z memory exhaustion is what that costs)"
   - "Wrap pyright/jedi or an LSP for Python (rejected — external process and setup; breaks the tree-sitter-only constraint and the zero-setup niche)"
   - "Keep the full v1 surface and fix breadth-first (rejected — eleven rounds of method-dispatch correction did not make method callers work)"
+---
+decision: "Make the Python index resident and bidirectional: export-table snapshot, forward posting list, patterns off the facts, then a watching process"
+date: 2026-11-12
+area: architecture, performance
+rationale: |
+  The composer pointed at the DDD structure they wrote for clamonacc
+  (clamav/clamonacc/inotif/hash.c, 2015): a hash table whose entries are
+  also tree nodes, so one key lookup lands on a node that already knows its
+  parent and its children, and any subtree can be expanded or collapsed from
+  that point. Its cost was paid once, at startup, by walking the tree; after
+  that every operation was constant time on resident data.
+
+  The reference index already has the key dimension (`(file, def)` through
+  the export table) and the upward dimension (sites sorted by target). What
+  it lacks is measured on Marianne, 323 files, warm, 2026-11-12:
+
+    trace of a symbol           6.4 s, 379 MB   (0.06 s only when page-cached
+                                                 and the budget check lands early)
+    diagnose, any single pattern 6.4 s, 379 MB
+    diagnose, data_dead_end      9.9 s           (forward scans over all sites)
+
+  Stage timing (added 2026-11-12, `-v`) puts the warm cost where it is.
+  Marianne, `diagnose --language python`, 6.4 s and 379 MB:
+
+    legacy graph parse of all 323 Python files   1.7 s   (never used)
+    index build, warm                            0.04 s
+    index diagnostics                            1.5 s   (entity ids rebuilt per finding)
+    manifest                                     0.05 s
+    authority: graph projection + 13,311 graph
+      losses + per-symbol byte ranges            2.6 s
+
+  `analyze` on the same tree writes 34 MB and exits 3 (incomplete) because
+  those 13,311 losses come from the graph parse the Python path never
+  needed. The index is already resident-shaped; the process around it is
+  not. `sites_within` is still a linear scan and every site carries a heap
+  String for its reason; those matter next, not first.
+
+  Decided, in this order, each measured on Marianne before the next:
+  1. Python never builds the graph. When the selected Python files go to
+     the index, the parse loop skips the Python adapter and the index
+     supplies what the authority needs: custody (read/parsed/rejected from
+     the index manifest), the finding proofs (already), the analysis-graph
+     projection (entities and edges from the export table and posting
+     lists) and the Python prerequisite losses the authority tests pin
+     (`unresolved_type` on an unknown annotation, `unresolved_reference` on
+     a dynamic namespace lookup, `capability_unavailable`/type_flows on an
+     annotated contract, `unsupported_construct` on `match`,
+     `unresolved_import` on a relative import the resolver cannot place),
+     emitted from the facts at build time, once, not per process. This is
+     also issue #37: with the graph gone for Python, a mixed tree sends
+     Python to the index and the rest to the graph, and merges. Warm
+     diagnose target: under 0.5 s and under 100 MB; `analyze` on a clean
+     tree exits 0.
+  2. Export-table snapshot (persist `Exports` with its derived indexes;
+     validate the manifest by mtime+size before hashing) and a forward
+     posting list. Store sites as struct-of-arrays (target, owner,
+     line, one packed byte for kind, certainty and a reason code), with an
+     offset array by target and a permutation sorted by owner, so "who do I
+     reach" is an O(1) slice like "who reaches me". Reason strings become an
+     enum rendered at output time. At the measured 385 calls and 813 loads
+     per kLOC, 3 MLOC is ~2 M sites: ~35 MB both ways, half that delta-coded.
+  3. Patterns read only the export table and the posting lists, with entity
+     ids computed once per run. The three
+     patterns that read per-file facts (phantom_dependency, missing_reexport,
+     stale_reference) get the few per-file facts they need (names used per
+     scope, `__all__`, import list) folded into the export table at build.
+     Diagnose target: within 2x of trace, same memory.
+  4. A resident process. `flowspec watch` (already in cli.yaml) keeps the
+     index hot, re-extracts a changed file on an inotify event and
+     re-resolves its import closure, and answers trace/diagnose/query over a
+     local socket; the MCP server in integration.yaml sits on the same
+     process. Startup cost returns to where DDD put it: once, at the front.
+  5. Issue #37 (per-language split so mixed trees use the index) lands before
+     step 4 so there is one engine to keep hot.
+
+  Carried over from DDD on purpose: the key stays `(file, def)` and never a
+  name, because 43% of method definitions share their name with another
+  class; the name-to-ids list is a secondary index. The map is a sorted
+  array or a studied hasher, not a fixed-size table: a code index knows its
+  size at build time. Resident budget for 3 MLOC: ~50 MB export table,
+  ~35 MB sites, buffers; ~100 MB, inside the mid-range laptop target with
+  the memory limit idle.
+alternatives_considered:
+  - "Memory-map the existing bincode files (rejected — bincode is not a zero-copy layout; the decode is the cost)"
+  - "Keep facts resident instead of snapshotting exports (rejected — facts are ~4 KB/file and 80% of the index; the export table is what queries need)"
+  - "Build the daemon first (rejected — a hot process over a 6 s cold path still pays 6 s per restart and hides the per-process cost from CI users)"

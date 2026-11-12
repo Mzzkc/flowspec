@@ -145,6 +145,33 @@ facts are under 100 MB; the export table scales linearly in files at ~0.6 KB
 per file. For 3 MLOC (80k files): ~50 MB + ~100 MB + buffers, well under
 500 MB. The `--memory-limit` budget stays as the hard stop.
 
+## Resident and bidirectional (plan of 2026-11-12)
+
+Measured on Marianne warm with `-v` stage timing, 2026-11-12: the index
+itself builds in 37 ms (323 files reused, 10 ms export table, 11 ms
+resolve) and a warm `trace` takes 80 ms and 17 MB. `diagnose --language
+python` takes 6.4 s and 379 MB, none of it in the index: 1.7 s parsing every
+file into the legacy graph that the Python path then ignores, 1.5 s in the
+index diagnostics (entity ids rebuilt per finding), 2.6 s in the authority
+building a graph projection and 13,311 graph-derived losses. The plan,
+recorded in the decision log, takes the process to the shape of the DDD
+hash-tree in clamonacc: one key lookup lands on a node that already knows
+both directions, startup is paid once.
+
+1. Python never builds the graph. The index supplies custody, finding
+   proofs, the analysis-graph projection and the Python prerequisite losses
+   the authority tests pin, computed once at build. Mixed trees send Python
+   to the index and other languages to the graph (issue #37). Target: warm
+   diagnose under 0.5 s and 100 MB; `analyze` exits 0 on a clean tree.
+2. Export-table snapshot and a forward posting list: sites as
+   struct-of-arrays with a by-target offset array and a by-owner
+   permutation; reason codes instead of strings.
+3. Patterns read only the export table and posting lists, entity ids
+   computed once per run; the per-file facts the three remaining patterns
+   need are folded into the export table at build time.
+4. `flowspec watch`: resident index, inotify-driven re-extraction of changed
+   files, local socket for trace/diagnose/query, MCP on the same process.
+
 ## Diagnostics on the index
 
 All thirteen patterns run on the index for Python-only analyses

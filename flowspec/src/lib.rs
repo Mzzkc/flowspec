@@ -367,6 +367,7 @@ fn analyze_core(
             .collect()
     };
 
+    let stage_clock = std::time::Instant::now();
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
     let mut source_bytes: u64 = 0;
@@ -479,6 +480,11 @@ fn analyze_core(
         .sort_by(|a, b| a.path.cmp(&b.path));
     budget::check("parse")?;
 
+    tracing::debug!(
+        "analyze stage 1 (graph parse of {} files) {:?}",
+        parsed_file_count,
+        stage_clock.elapsed()
+    );
     // Stage 1b: Cross-file import resolution
     // After all files are parsed, resolve import symbols that reference definitions
     // in other files. This creates real edges with actual SymbolIds instead of
@@ -490,6 +496,10 @@ fn analyze_core(
     // Stage 1c: project-wide receiver.method() call resolution (needs all files).
     graph::resolve_method_calls(&mut graph);
     budget::check("resolve")?;
+    tracing::debug!(
+        "analyze stage 1b/1c (graph resolve) {:?}",
+        stage_clock.elapsed()
+    );
     for reference in graph.prerequisite_losses() {
         let parser::ir::ResolutionStatus::Partial(info) = &reference.resolution else {
             continue;
@@ -616,7 +626,12 @@ fn analyze_core(
         };
         let index = pyindex::store::Index::build(index_root, &files)?;
         budget::check("index")?;
+        tracing::debug!("analyze stage 2a (index built) {:?}", stage_clock.elapsed());
         let mut diags = pyindex::diagnostics::all(&index);
+        tracing::debug!(
+            "analyze stage 2b (index diagnostics) {:?}",
+            stage_clock.elapsed()
+        );
         for (i, d) in diags.iter_mut().enumerate() {
             d.id = format!("D{:03}", i + 1);
         }
@@ -626,6 +641,7 @@ fn analyze_core(
         run_all_patterns(&graph, project_path)
     };
     budget::check("diagnostics")?;
+    tracing::debug!("analyze stage 2 (diagnostics) {:?}", stage_clock.elapsed());
     let diagnostics = to_manifest_entries(&raw_diagnostics);
 
     // Stage 3: Build entity list. Python: from the index. Others: from graph symbols.
@@ -1001,6 +1017,7 @@ fn analyze_core(
         .as_ref()
         .map(pyindex::diagnostics::proven_private_subjects)
         .unwrap_or_default();
+    tracing::debug!("analyze stages 3-5 (manifest) {:?}", stage_clock.elapsed());
     let authority = report_authority::build(
         project_path,
         config,
@@ -1011,6 +1028,7 @@ fn analyze_core(
         &index_subjects,
         losses,
     );
+    tracing::debug!("analyze authority {:?}", stage_clock.elapsed());
     let mut manifest = manifest.with_report(completeness);
     manifest.execution = Some(if authority["execution"] == "incomplete" {
         Execution::Incomplete

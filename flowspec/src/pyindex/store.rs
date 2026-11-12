@@ -392,6 +392,7 @@ impl Index {
     /// `files` are absolute paths of the Python files to index. The index on
     /// disk, if any, is reused for unchanged files.
     pub fn build(root: &Path, files: &[PathBuf]) -> Result<Index, FlowspecError> {
+        let t0 = std::time::Instant::now();
         let dir = Index::dir_for(root);
         let facts_dir = dir.join("facts");
         for p in [root.join(".flowspec"), dir.clone(), facts_dir.clone()] {
@@ -517,6 +518,12 @@ impl Index {
             crate::budget::check("index facts")?;
         }
         stats.files = entries.len();
+        tracing::debug!(
+            "index pass 1 (read, hash, facts) {:?}; parsed {} reused {}",
+            t0.elapsed(),
+            stats.parsed,
+            entries.len() - stats.parsed
+        );
 
         // Which files must be re-resolved: changed ones, plus any file that
         // imports a module whose file changed (or appeared, or vanished).
@@ -542,7 +549,9 @@ impl Index {
             }
         }
 
+        let t1 = std::time::Instant::now();
         let ex = Exports::build(exports, root_tail);
+        tracing::debug!("index export table {:?}", t1.elapsed());
         crate::budget::check("index exports")?;
 
         // Pass 2: resolve. Reuse prior sites for untouched files.
@@ -584,6 +593,7 @@ impl Index {
             stats.resolved += 1;
             crate::budget::check("index resolve")?;
         }
+        tracing::debug!("index resolve {} files {:?}", stats.resolved, t1.elapsed());
         sites.sort_by_key(|s| (s.target, s.owner.0, s.line));
         unknown.sort_by(|a, b| {
             a.name
@@ -603,6 +613,7 @@ impl Index {
         write_atomic(&dir.join("unknown.bin"), &unknown)?;
         write_atomic(&dir.join("exports.bin"), &ex.files)?;
         write_atomic(&dir.join("manifest.bin"), &manifest)?;
+        tracing::debug!("index written; total {:?}", t0.elapsed());
 
         // Drop fact files no current file uses.
         let live: HashSet<String> = manifest
