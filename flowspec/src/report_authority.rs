@@ -936,3 +936,61 @@ pub(crate) fn build(
 pub(crate) fn language_for(path: &Path) -> Option<String> {
     language(path).map(str::to_string)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_projection_keys_bindings_like_the_graph_and_carries_losses() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let src = "def _helper():\n    return 1\n\ndef api(x: Missing):\n    return _helper()\n";
+        std::fs::write(root.join("m.py"), src).unwrap();
+        let index = crate::pyindex::store::Index::build(root, &[root.join("m.py")]).unwrap();
+        let mut record = InputRecord::new(root.join("m.py"), "selected", Some("python".into()));
+        record.content = Some(src.to_string());
+        record.read = true;
+        record.parsed = true;
+        let p = index_projection(root, &index, &[record]);
+        let entities = p.graph["entities"].as_array().unwrap();
+        let names: Vec<&str> = entities
+            .iter()
+            .filter_map(|e| e["subject"]["qualified_name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"m.py::_helper") && names.contains(&"m.py::api"),
+            "{names:?}"
+        );
+        for e in entities {
+            let expected = hash(
+                "binding",
+                &json!({"path_key":e["subject"]["path_key"],
+                "language":"python","qualified_name":e["subject"]["qualified_name"],
+                "construct_kind":e["kind"]}),
+            );
+            assert_eq!(e["key"], expected, "binding key is the graph's key");
+            assert!(
+                e["range"]["end_byte"].as_u64().unwrap()
+                    > e["range"]["start_byte"].as_u64().unwrap()
+            );
+        }
+        let flows = p.graph["flows"].as_array().unwrap();
+        assert_eq!(flows.len(), 1, "api -> _helper is the one call flow");
+        let reasons: Vec<&str> = p
+            .losses
+            .iter()
+            .filter_map(|l| l["reason"].as_str())
+            .collect();
+        assert!(reasons.contains(&"capability_unavailable"), "{reasons:?}");
+        assert!(reasons.contains(&"unresolved_type"), "{reasons:?}");
+        let unresolved = p
+            .losses
+            .iter()
+            .find(|l| l["reason"] == "unresolved_type")
+            .unwrap();
+        assert_eq!(unresolved["origin"], "Annotation");
+        assert_eq!(unresolved["ranges"][0]["start_line"], 4);
+        assert!(!reasons.contains(&"identity_uncertain"));
+    }
+}

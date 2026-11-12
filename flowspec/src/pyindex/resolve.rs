@@ -1130,6 +1130,9 @@ pub struct Site {
     pub owner: GId,
     /// Line in the owner's file.
     pub line: u32,
+    /// Column in that line (1-based); two sites on one line are distinct.
+    #[serde(default)]
+    pub column: u32,
     /// Kind of use.
     pub kind: SiteKind,
     /// Whether the target was proven.
@@ -1283,11 +1286,12 @@ pub fn resolve_file(ex: &Exports, fi: u32, facts: &FactSet) -> Resolved {
     }
     let empty = Env::default();
     let mut push =
-        |target: GId, owner: GId, line: u32, kind: SiteKind, certain: bool, why: &str| {
+        |target: GId, owner: GId, at: (u32, u32), kind: SiteKind, certain: bool, why: &str| {
             out.sites.push(Site {
                 target,
                 owner,
-                line,
+                line: at.0,
+                column: at.1,
                 kind,
                 certain,
                 why: if certain {
@@ -1307,17 +1311,32 @@ pub fn resolve_file(ex: &Exports, fi: u32, facts: &FactSet) -> Resolved {
         // registers nothing, so it consumes nothing.
         if r.kind == SiteKind::Decorator && ex.eval(&r.expr, fi, r.scope, env).has_project() {
             let enclosing = (fi, facts.defs[r.owner as usize].parent.unwrap_or(0));
-            push(owner, enclosing, r.line, SiteKind::Reference, true, "");
+            push(
+                owner,
+                enclosing,
+                (r.line, r.column),
+                SiteKind::Reference,
+                true,
+                "",
+            );
         }
         match &r.expr {
             Expr::Name(_) => {
                 let v = ex.eval(&r.expr, fi, r.scope, env);
-                record_named(ex, &v, owner, r.line, r.kind, &mut push);
+                record_named(ex, &v, owner, (r.line, r.column), r.kind, &mut push);
             }
             Expr::Attr(obj, name) => {
                 let recv = ex.eval(obj, fi, r.scope, env);
                 if recv.has_project() {
-                    record_member(ex, &recv, name, owner, r.line, r.kind, &mut push);
+                    record_member(
+                        ex,
+                        &recv,
+                        name,
+                        owner,
+                        (r.line, r.column),
+                        r.kind,
+                        &mut push,
+                    );
                 } else if r.kind == SiteKind::Call && recv.unknown && ex.is_method_name(name) {
                     out.unknown_calls.push(UnknownCall {
                         name: name.clone(),
@@ -1338,13 +1357,13 @@ pub fn resolve_file(ex: &Exports, fi: u32, facts: &FactSet) -> Resolved {
             .tys
         {
             if let Ty::Func(d) | Ty::Class(d) = ty {
-                push(d, (fi, i.scope), i.line, SiteKind::Import, true, "");
+                push(d, (fi, i.scope), (i.line, 1), SiteKind::Import, true, "");
             }
         }
     }
     let mut seen = HashSet::new();
     out.sites
-        .retain(|s| seen.insert((s.target, s.owner, s.line, s.kind)));
+        .retain(|s| seen.insert((s.target, s.owner, s.line, s.column, s.kind)));
     // Open questions. A relative import the table cannot place is an
     // obligation the file declared; an unknown annotation root is a contract
     // the resolver cannot bind; every annotation lacks type-flow evidence.
@@ -1422,9 +1441,9 @@ fn record_named(
     ex: &Exports,
     v: &Val,
     owner: GId,
-    line: u32,
+    at: (u32, u32),
     kind: SiteKind,
-    push: &mut impl FnMut(GId, GId, u32, SiteKind, bool, &str),
+    push: &mut impl FnMut(GId, GId, (u32, u32), SiteKind, bool, &str),
 ) {
     // A variable alongside the value it aliases is one certain reference to
     // each, not an ambiguity.
@@ -1441,7 +1460,7 @@ fn record_named(
             Ty::Var(d) => push(
                 *d,
                 owner,
-                line,
+                at,
                 SiteKind::Reference,
                 certain,
                 "more than one possible target",
@@ -1449,7 +1468,7 @@ fn record_named(
             Ty::Func(d) => push(
                 *d,
                 owner,
-                line,
+                at,
                 kind,
                 certain,
                 "more than one possible target",
@@ -1458,7 +1477,7 @@ fn record_named(
                 push(
                     *c,
                     owner,
-                    line,
+                    at,
                     kind,
                     certain,
                     "more than one possible target",
@@ -1468,7 +1487,7 @@ fn record_named(
                         push(
                             init,
                             owner,
-                            line,
+                            at,
                             kind,
                             certain,
                             "more than one possible target",
@@ -1486,9 +1505,9 @@ fn record_member(
     recv: &Val,
     name: &str,
     owner: GId,
-    line: u32,
+    at: (u32, u32),
     kind: SiteKind,
-    push: &mut impl FnMut(GId, GId, u32, SiteKind, bool, &str),
+    push: &mut impl FnMut(GId, GId, (u32, u32), SiteKind, bool, &str),
 ) {
     let certain = recv.sure();
     for ty in &recv.tys {
@@ -1497,7 +1516,7 @@ fn record_member(
             Ty::Super(c) => (*c, true),
             Ty::Module(f) => {
                 let v = ex.resolve_export(*f, name);
-                record_named(ex, &v, owner, line, kind, push);
+                record_named(ex, &v, owner, at, kind, push);
                 continue;
             }
             _ => continue,
@@ -1505,7 +1524,7 @@ fn record_member(
         let found = ex.find_member(class, name, skip_self);
         if let Some(d) = found {
             if ex.def(d).kind == DefKind::Class {
-                record_named(ex, &Val::one(Ty::Class(d)), owner, line, kind, push);
+                record_named(ex, &Val::one(Ty::Class(d)), owner, at, kind, push);
             } else {
                 // A property read runs the getter: that is a call.
                 let k = if kind == SiteKind::Reference && ex.is_property(d) {
@@ -1516,7 +1535,7 @@ fn record_member(
                 push(
                     d,
                     owner,
-                    line,
+                    at,
                     k,
                     certain,
                     "receiver has more than one possible type",
@@ -1530,7 +1549,7 @@ fn record_member(
             if let Some(o) = ex.find_member(sub, name, false) {
                 if Some(o) != found && o.0 == sub.0 && ex.def(o).parent == Some(sub.1) {
                     let why = format!("receiver typed as base class {}", ex.def(class).name);
-                    push(o, owner, line, kind, false, &why);
+                    push(o, owner, at, kind, false, &why);
                 }
             }
         }
@@ -1538,7 +1557,7 @@ fn record_member(
             for &m in ex.methods_named(name) {
                 if Some(m) != found {
                     let why = format!("receiver typed as protocol {}", ex.def(class).name);
-                    push(m, owner, line, kind, false, &why);
+                    push(m, owner, at, kind, false, &why);
                 }
             }
         }

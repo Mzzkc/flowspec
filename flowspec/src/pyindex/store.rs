@@ -32,7 +32,7 @@ use super::facts::{self, DefKind, FactSet, SiteKind};
 use super::resolve::{self, Exports, FileExports, GId, Loss, Site, UnknownCall};
 use crate::error::FlowspecError;
 
-const INDEX_VERSION: u32 = 4;
+const INDEX_VERSION: u32 = 5;
 
 /// Per-file record in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,7 +614,7 @@ impl Index {
             crate::budget::check("index resolve")?;
         }
         tracing::debug!("index resolve {} files {:?}", stats.resolved, t1.elapsed());
-        sites.sort_by_key(|s| (s.target, s.owner.0, s.line));
+        sites.sort_by_key(|s| (s.target, s.owner.0, s.line, s.column));
         unknown.sort_by(|a, b| {
             a.name
                 .cmp(&b.name)
@@ -704,6 +704,7 @@ impl Index {
                     target,
                     owner: u.owner,
                     line: u.line,
+                    column: 0,
                     kind: SiteKind::Call,
                     certain: false,
                     why: "receiver type not proven".to_string(),
@@ -1133,6 +1134,7 @@ mod tests {
             target: (7, 7),
             owner: (0, 1),
             line: 1,
+            column: 1,
             kind: SiteKind::Call,
             certain: true,
             why: String::new(),
@@ -1170,6 +1172,62 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn resolver_losses_name_annotations_dynamic_lookups_match_and_relative_imports() {
+        use super::super::resolve::LossKind;
+        let src = "from .nowhere import x\nfrom builtins import getattr as lookup\nimport helpers\n\ndef getattr(o, n):\n    return 1\n\nclass Known:\n    pass\n\ndef api(a: Known, b: Missing, c: int) -> Known:\n    getattr(a, 'x')\n    lookup(helpers, 'y')\n    eval('1')\n    match c:\n        case 1:\n            pass\n    return a\n";
+        let (_d, idx) = build(&[("pkg/__init__.py", ""), ("pkg/m.py", src)]);
+        let kinds: Vec<LossKind> = idx.losses().iter().map(|l| l.kind).collect();
+        let count = |k: LossKind| kinds.iter().filter(|x| **x == k).count();
+        // Four annotations (a, b, c, return): each lacks type-flow evidence.
+        assert_eq!(count(LossKind::TypeFlows), 4, "{kinds:?}");
+        // Only `Missing` is an unbound annotation root; `Known` and `int` are not.
+        assert_eq!(count(LossKind::UnresolvedType), 1, "{kinds:?}");
+        // `getattr` is shadowed by a local definition (no loss); `lookup` is
+        // an alias of the builtin getattr (loss); `eval` is the builtin (loss).
+        assert_eq!(count(LossKind::DynamicNamespace), 2, "{kinds:?}");
+        assert_eq!(count(LossKind::MatchStatement), 1, "{kinds:?}");
+        // `from .nowhere import x` names a sibling module that does not exist.
+        assert_eq!(count(LossKind::UnresolvedImport), 1, "{kinds:?}");
+        for l in idx.losses() {
+            assert!(l.start < l.end && (l.end as usize) <= src.len(), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn forward_slice_matches_backward_slice_and_ids_are_cached() {
+        let (_d, idx) = build(&[(
+            "a.py",
+            "def f():\n    return 1\n\ndef g():\n    return f() + f()\n\ndef h():\n    return g()\n",
+        )]);
+        let f = idx.resolve_symbol("a.py::f").unwrap();
+        let g = idx.resolve_symbol("a.py::g").unwrap();
+        let h = idx.resolve_symbol("a.py::h").unwrap();
+        let within_g: Vec<_> = idx
+            .sites_within(g)
+            .into_iter()
+            .filter(|s| s.kind == SiteKind::Call)
+            .map(|s| s.target)
+            .collect();
+        assert_eq!(within_g, vec![f, f]);
+        assert!(idx.sites_within(h).iter().any(|s| s.target == g));
+        assert!(idx.sites_within(f).is_empty());
+        // Every site is reachable from both directions.
+        for s in idx.all_sites() {
+            assert!(idx.sites_within(s.owner).contains(s), "{s:?}");
+            assert!(idx
+                .sites_reaching(s.target)
+                .iter()
+                .any(|r| r.owner == s.owner && r.line == s.line));
+        }
+        let ids = idx.entity_ids();
+        assert_eq!(ids.get(&g).map(String::as_str), Some("a.py::g"));
+        assert!(
+            std::ptr::eq(ids, idx.entity_ids()),
+            "entity ids are computed once"
+        );
     }
 
     #[test]

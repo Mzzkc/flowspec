@@ -152,6 +152,9 @@ pub struct RefFact {
     pub scope: u32,
     /// 1-based line.
     pub line: u32,
+    /// 1-based column, so two sites on one line stay distinct.
+    #[serde(default)]
+    pub column: u32,
     /// Call, reference or decorator.
     pub kind: SiteKind,
     /// The callee (for a call) or the value expression.
@@ -651,6 +654,7 @@ impl Extractor<'_> {
             owner,
             scope,
             line: line_of(node),
+            column: node.start_position().column as u32 + 1,
             kind,
             expr,
         });
