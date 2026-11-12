@@ -168,7 +168,9 @@ both directions, startup is paid once.
    permutation; reason codes instead of strings.
 3. Patterns read only the export table and posting lists, entity ids
    computed once per run; the per-file facts the three remaining patterns
-   need are folded into the export table at build time.
+   need are folded into the export table at build time. (Done 2026-11-12:
+   `FileExports` carries the import list, reads per scope, `__all__` names
+   and module-scope bindings; no pattern calls `facts_of`.)
 4. `flowspec watch`: resident index, inotify-driven re-extraction of changed
    files, local socket for trace/diagnose/query, MCP on the same process.
 

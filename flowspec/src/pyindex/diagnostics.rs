@@ -239,32 +239,17 @@ pub fn orphaned_impl(index: &Index) -> Vec<Diagnostic> {
 pub fn phantom_dependency(index: &Index) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let files = &index.exports.files;
-    for (fi, f) in files.iter().enumerate() {
+    for f in files.iter() {
         if is_test_path(&f.rel) {
             continue;
         }
-        let Ok(facts) = index.facts_of(fi as u32) else {
-            continue;
-        };
         // An `__init__.py` imports to re-export; those are not phantom.
-        if facts.is_package {
+        if f.is_package {
             continue;
         }
-        // Names used anywhere in the file, by scope chain: a reference in a
-        // nested scope reaches names bound in enclosing scopes.
-        let mut used_by_scope: HashMap<u32, HashSet<&str>> = HashMap::new();
-        for r in &facts.refs {
-            let mut e = &r.expr;
-            while let super::facts::Expr::Attr(inner, _) | super::facts::Expr::Call(inner) = e {
-                e = inner;
-            }
-            if let super::facts::Expr::Name(n) = e {
-                used_by_scope.entry(r.scope).or_default().insert(n.as_str());
-            }
-        }
-        // Annotations and base-class texts also use names.
+        // Annotations, base-class, decorator and default texts also use names.
         let mut text_uses: HashSet<String> = HashSet::new();
-        for d in &facts.defs {
+        for d in &f.defs {
             for (_, ann) in &d.params {
                 if let Some(a) = ann {
                     collect_idents(a, &mut text_uses);
@@ -280,38 +265,39 @@ pub fn phantom_dependency(index: &Index) -> Vec<Diagnostic> {
                 collect_idents(dec, &mut text_uses);
             }
         }
-        for b in &facts.binds {
-            if let Some(a) = &b.annotation {
+        for (_, _, ann, _) in &f.class_attrs {
+            if let Some(a) = ann {
                 collect_idents(a, &mut text_uses);
             }
         }
-        // `__all__` entries re-export by name.
-        let exported: HashSet<String> = all_names(&facts);
+        for (_, _, ann, _, _) in &f.self_attrs {
+            if let Some(a) = ann {
+                collect_idents(a, &mut text_uses);
+            }
+        }
         let scope_chain = |scope: u32| -> Vec<u32> {
             let mut chain = vec![scope];
             let mut cur = scope;
-            while let Some(p) = facts.defs[cur as usize].parent {
+            while let Some(p) = f.defs[cur as usize].parent {
                 chain.push(p);
                 cur = p;
             }
             chain
         };
-        for i in &facts.imports {
-            let local = i.local.as_str();
-            if text_uses.contains(local) || exported.contains(local) {
+        for (scope, local, _, _, line) in &f.import_list {
+            let local = local.as_str();
+            if text_uses.contains(local) || f.all_names.contains(local) {
                 continue;
             }
             // Used in the binding scope or any scope nested in it.
-            let used = facts.defs.iter().enumerate().any(|(di, _)| {
-                let di = di as u32;
-                scope_chain(di).contains(&i.scope)
-                    && used_by_scope.get(&di).is_some_and(|u| u.contains(local))
+            let used = (0..f.defs.len() as u32).any(|di| {
+                scope_chain(di).contains(scope)
+                    && f.reads_by_scope.get(&di).is_some_and(|u| u.contains(local))
             });
             if used {
                 continue;
             }
-            // `import a.b` binds `a`; a use of `a` anywhere counts.
-            let location = line_loc(&f.rel, i.line);
+            let location = line_loc(&f.rel, *line);
             out.push(Diagnostic {
                 id: String::new(),
                 pattern: DiagnosticPattern::PhantomDependency,
@@ -365,11 +351,6 @@ fn collect_idents(text: &str, out: &mut HashSet<String>) {
     }
 }
 
-/// Names listed in a literal `__all__`, if the file has one.
-fn all_names(facts: &super::facts::FactSet) -> HashSet<String> {
-    facts.all_names.iter().cloned().collect()
-}
-
 /// `missing_reexport`: a public top-level definition in a submodule that the
 /// package's `__init__.py` does not import.
 pub fn missing_reexport(index: &Index) -> Vec<Diagnostic> {
@@ -384,21 +365,18 @@ pub fn missing_reexport(index: &Index) -> Vec<Diagnostic> {
         if !pkg.is_package {
             continue;
         }
-        let Ok(pfacts) = index.facts_of(pi as u32) else {
-            continue;
-        };
         // A star import re-exports everything; nothing to report.
-        if !pfacts.stars.is_empty() {
+        if !pkg.stars.is_empty() {
             continue;
         }
         // Only packages that re-export *something* declare a curated API; an
         // empty `__init__.py` is a namespace marker and exports nothing by
         // intent.
-        let reexports: HashSet<&str> = pfacts
-            .imports
+        let reexports: HashSet<&str> = pkg
+            .import_list
             .iter()
-            .filter(|i| i.scope == 0)
-            .map(|i| i.local.as_str())
+            .filter(|(scope, ..)| *scope == 0)
+            .map(|(_, local, ..)| local.as_str())
             .collect();
         if reexports.is_empty() {
             continue;
@@ -724,20 +702,17 @@ pub fn stale_reference(index: &Index) -> Vec<Diagnostic> {
         if is_test_path(&f.rel) {
             continue;
         }
-        let Ok(facts) = index.facts_of(fi as u32) else {
-            continue;
-        };
-        for i in &facts.imports {
-            let Some(member) = &i.member else {
+        for (_, _, module, member, line) in &f.import_list {
+            let Some(member) = member else {
                 continue;
             };
-            let Some(target) = index.exports.module_file_from(&i.module, fi as u32) else {
+            let Some(target) = index.exports.module_file_from(module, fi as u32) else {
                 continue;
             };
             // A submodule import (`from pkg import mod`) is a module, not a name.
             if index
                 .exports
-                .module_file_from(&format!("{}.{}", i.module, member), fi as u32)
+                .module_file_from(&format!("{}.{}", module, member), fi as u32)
                 .is_some()
             {
                 continue;
@@ -754,20 +729,15 @@ pub fn stale_reference(index: &Index) -> Vec<Diagnostic> {
             }
             // The target module binds the name some other way (assignment to a
             // non-alias value, loop, `try`/`except` import): not stale.
-            let Ok(tfacts) = index.facts_of(target) else {
-                continue;
-            };
-            let bound_in_target = tfacts.binds.iter().any(|b| {
-                b.scope == 0
-                    && matches!(&b.target, super::facts::BindTarget::Local(n) if n == member)
-            }) || tfacts
-                .imports
-                .iter()
-                .any(|ti| ti.scope == 0 && ti.local == *member);
-            if bound_in_target || !tfacts.stars.is_empty() {
+            let t = &files[target as usize];
+            let bound_in_target = t.module_bound.contains(member)
+                || t.import_list
+                    .iter()
+                    .any(|(scope, local, ..)| *scope == 0 && local == member);
+            if bound_in_target || !t.stars.is_empty() {
                 continue;
             }
-            let location = line_loc(&f.rel, i.line);
+            let location = line_loc(&f.rel, *line);
             out.push(Diagnostic {
                 id: String::new(),
                 pattern: DiagnosticPattern::StaleReference,
@@ -776,7 +746,7 @@ pub fn stale_reference(index: &Index) -> Vec<Diagnostic> {
                 entity: format!("{}::{}", file_name_of(&f.rel), member),
                 message: format!(
                     "Stale reference: import '{}' from module '{}' targets a symbol that no longer exists",
-                    member, i.module
+                    member, module
                 ),
                 evidence: vec![Evidence {
                     observation: format!(

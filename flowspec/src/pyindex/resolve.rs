@@ -75,6 +75,19 @@ pub struct FileExports {
     /// Identifier-shaped string literals (name-based dispatch tables).
     #[serde(default)]
     pub named_strings: HashSet<String>,
+    /// Every import in the file: (scope, local, module, member, line), for
+    /// the import-centred patterns.
+    #[serde(default)]
+    pub import_list: Vec<(u32, String, String, Option<String>, u32)>,
+    /// Root names read per scope (the head of each reference expression).
+    #[serde(default)]
+    pub reads_by_scope: HashMap<u32, HashSet<String>>,
+    /// Names listed in a literal `__all__`.
+    #[serde(default)]
+    pub all_names: HashSet<String>,
+    /// Names bound at module scope by any assignment.
+    #[serde(default)]
+    pub module_bound: HashSet<String>,
 }
 
 impl FileExports {
@@ -121,11 +134,46 @@ impl FileExports {
                 _ => {}
             }
         }
+        let mut reads_by_scope: HashMap<u32, HashSet<String>> = HashMap::new();
+        for r in &f.refs {
+            let mut e = &r.expr;
+            while let Expr::Attr(inner, _) | Expr::Call(inner) = e {
+                e = inner;
+            }
+            if let Expr::Name(n) = e {
+                reads_by_scope.entry(r.scope).or_default().insert(n.clone());
+            }
+        }
+        let module_bound: HashSet<String> = f
+            .binds
+            .iter()
+            .filter(|b| b.scope == 0)
+            .filter_map(|b| match &b.target {
+                BindTarget::Local(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
         FileExports {
             rel: f.rel.clone(),
             module: f.module.clone(),
             is_package: f.is_package,
             named_strings: f.named_strings.iter().cloned().collect(),
+            import_list: f
+                .imports
+                .iter()
+                .map(|i| {
+                    (
+                        i.scope,
+                        i.local.clone(),
+                        i.module.clone(),
+                        i.member.clone(),
+                        i.line,
+                    )
+                })
+                .collect(),
+            reads_by_scope,
+            all_names: f.all_names.iter().cloned().collect(),
+            module_bound,
             defs: f
                 .defs
                 .iter()

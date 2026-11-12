@@ -32,7 +32,7 @@ use super::facts::{self, DefKind, FactSet, SiteKind};
 use super::resolve::{self, Exports, FileExports, GId, Loss, Site, UnknownCall};
 use crate::error::FlowspecError;
 
-const INDEX_VERSION: u32 = 5;
+const INDEX_VERSION: u32 = 6;
 
 /// Per-file record in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
