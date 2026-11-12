@@ -238,6 +238,22 @@ value names a definition (`handler = helper`) also forwards that value, so
 `handler`. Entities report them as `var` or `const` (upper-case names);
 `data_dead_end` covers them with the same confidence rules as functions.
 
+## The orphaned_impl tail (measured 2026-11-12)
+
+On Marianne after plan step 3, 460 `orphaned_impl` findings are low
+confidence. By the receiver shape of same-name calls in the source
+(ast, not flowspec): 197 have no same-name call anywhere in the tree
+(correct at low confidence: public methods with no project caller), 199
+are called through a bare name the resolver could not type
+(`sheet.record_attempt(event)` where `sheet` came from a container, an
+untyped parameter or a loop), 37 through `self.attr` with an untyped
+attribute, 13 through `self`, 9 through a dotted expression, 3 through a
+call result. Only 18 are methods of a `Protocol` class and 4 of an ABC.
+So the next accuracy step is not protocol typing but flow-typing of local
+names: a parameter whose only call sites pass a known class, a loop over a
+typed container, an attribute assigned once from a constructor in another
+method. Each of those is a receiver rule the oracle can score.
+
 ## What is not claimed
 
 - Runtime dispatch through subclasses is reported as `possible` on the
