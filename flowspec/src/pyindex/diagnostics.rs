@@ -16,9 +16,11 @@ use super::resolve::GId;
 use super::store::Index;
 
 /// Entity spelling, `file.py::Class::method`, used by the manifest and the
-/// authority finding proof. Shared with `manifest::entity_ids`.
+/// authority finding proof. Shared with `manifest::entity_ids`; the table
+/// is computed once per index and cached on it.
 fn legacy_entity(index: &Index, g: GId) -> String {
-    super::manifest::entity_ids(index)
+    index
+        .entity_ids()
         .get(&g)
         .cloned()
         .unwrap_or_else(|| index.exports.entity_id(g))
@@ -789,7 +791,7 @@ pub fn stale_reference(index: &Index) -> Vec<Diagnostic> {
 /// admission rule (`report_authority::build_finding`): Python, function,
 /// private by naming, exactly one definition of that qualified name.
 pub fn proven_private_subjects(index: &Index) -> Vec<crate::report_authority::IndexSubject> {
-    let ids = super::manifest::entity_ids(index);
+    let ids = index.entity_ids();
     let files = &index.exports.files;
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for f in files {

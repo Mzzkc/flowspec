@@ -108,7 +108,7 @@ fn signature(index: &Index, g: GId) -> String {
 
 /// The entity list.
 pub fn entities(index: &Index) -> Vec<EntityEntry> {
-    let ids = entity_ids(index);
+    let ids = index.entity_ids();
     let files = &index.exports.files;
     let mut out = Vec::new();
     for (fi, f) in files.iter().enumerate() {
@@ -222,7 +222,7 @@ pub fn modules(index: &Index) -> Vec<ModuleSummary> {
 /// Flows from every entry point, following certain call sites depth-first,
 /// each callee expanded once.
 pub fn flows(index: &Index) -> Vec<FlowEntry> {
-    let ids = entity_ids(index);
+    let ids = index.entity_ids();
     let files = &index.exports.files;
     let mut entries: Vec<GId> = Vec::new();
     for (fi, f) in files.iter().enumerate() {
@@ -304,7 +304,7 @@ pub fn flows(index: &Index) -> Vec<FlowEntry> {
 fn cross_file_edges(
     index: &Index,
 ) -> BTreeMap<(String, String), (usize, bool, Vec<CrossingPoint>)> {
-    let ids = entity_ids(index);
+    let ids = index.entity_ids();
     let files = &index.exports.files;
     let mut map: BTreeMap<(String, String), (usize, bool, Vec<CrossingPoint>)> = BTreeMap::new();
     for s in index.all_sites() {
@@ -375,7 +375,7 @@ pub fn dependency_graph(index: &Index) -> Vec<ModuleDependency> {
 
 /// Public functions and methods that call nothing in the project.
 pub fn exit_points(index: &Index) -> Vec<String> {
-    let ids = entity_ids(index);
+    let ids = index.entity_ids();
     let files = &index.exports.files;
     let mut out = Vec::new();
     for (fi, f) in files.iter().enumerate() {

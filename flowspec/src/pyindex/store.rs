@@ -92,12 +92,16 @@ pub struct Index {
     /// The export table.
     pub exports: Exports,
     sites: Vec<Site>,
+    /// Indices into `sites` ordered by owner, so "what does this definition
+    /// reach" is a binary-searched slice like "what reaches it".
+    by_owner: Vec<u32>,
     unknown: Vec<UnknownCall>,
     losses: Vec<Loss>,
     manifest: IndexManifest,
     /// Counts from the last build (zeros when loaded without building).
     pub stats: BuildStats,
     dir: PathBuf,
+    entity_ids: std::sync::OnceLock<HashMap<GId, String>>,
 }
 
 fn io(path: &Path, e: std::io::Error) -> FlowspecError {
@@ -344,6 +348,15 @@ fn refuse_symlink(path: &Path) -> Result<(), FlowspecError> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Indices of `sites` sorted by owner, then by the site's position in the
+/// by-target order, so a forward slice lists a definition's sites in a
+/// stable order.
+fn owner_permutation(sites: &[Site]) -> Vec<u32> {
+    let mut perm: Vec<u32> = (0..sites.len() as u32).collect();
+    perm.sort_by_key(|i| (sites[*i as usize].owner, *i));
+    perm
 }
 
 fn is_fact_file_name(name: &str) -> bool {
@@ -642,12 +655,15 @@ impl Index {
             }
         }
 
+        let by_owner = owner_permutation(&sites);
         Ok(Index {
             exports: ex,
             sites,
+            by_owner,
             unknown,
             losses,
             manifest,
+            entity_ids: std::sync::OnceLock::new(),
             stats,
             dir,
         })
@@ -700,10 +716,12 @@ impl Index {
 
     /// Every site inside `owner`.
     pub fn sites_within(&self, owner: GId) -> Vec<Site> {
-        self.sites
+        let key = |i: &u32| self.sites[*i as usize].owner;
+        let lo = self.by_owner.partition_point(|i| key(i) < owner);
+        let hi = self.by_owner.partition_point(|i| key(i) <= owner);
+        self.by_owner[lo..hi]
             .iter()
-            .filter(|s| s.owner == owner)
-            .cloned()
+            .map(|i| self.sites[*i as usize].clone())
             .collect()
     }
 
@@ -720,6 +738,12 @@ impl Index {
     /// Every open question the resolver recorded, sorted by file and span.
     pub fn losses(&self) -> &[Loss] {
         &self.losses
+    }
+
+    /// Manifest entity ids by definition, computed once per index.
+    pub fn entity_ids(&self) -> &HashMap<GId, String> {
+        self.entity_ids
+            .get_or_init(|| super::manifest::entity_ids(self))
     }
 
     /// Resolve a user-supplied symbol to one definition.
