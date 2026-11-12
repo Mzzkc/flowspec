@@ -1412,6 +1412,21 @@ mod tests {
     }
 
     #[test]
+    fn alias_chain_read_is_certain_for_the_named_variable() {
+        // Adjudicated on Marianne 2026-11-12: `SkipTarget = SheetSpan`, both
+        // module variables, read in a class-body annotation; the read named
+        // `SkipTarget` yet neither variable had a certain site.
+        let src = "SheetSpan = int\nSkipTarget = SheetSpan\n\nclass T:\n    skip: SkipTarget | None = None\n";
+        let (_d, idx) = build(&[("m.py", src)]);
+        let dead = names(&data_dead_end(&idx));
+        assert!(
+            !dead.iter().any(|d| d.ends_with("::SkipTarget")),
+            "{dead:?}"
+        );
+        assert!(!dead.iter().any(|d| d.ends_with("::SheetSpan")), "{dead:?}");
+    }
+
+    #[test]
     fn global_rebinding_inside_a_function_reads_the_module_variable() {
         // Adjudicated on Marianne 2026-11-12: `_store = None` at module
         // level, then `global _store; if _store is None: _store = ...` in a

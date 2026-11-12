@@ -1476,8 +1476,12 @@ fn record_named(
     // Reading a name bound to exactly one module variable is a certain
     // reference to that variable even when its value cannot be typed: the
     // uncertainty is about what it holds, not about which binding is read.
+    // When the variable forwards to further variables (`B = A`, read `B`),
+    // the variable the name itself binds is still certain; the forwarded
+    // ones are what the value may be. `Val` lists the direct binding last,
+    // because `lookup` merges it after evaluating the alias shape.
     let vars = v.tys.iter().filter(|t| matches!(t, Ty::Var(_))).count();
-    let var_certain = certain || vars == 1;
+    let direct = v.tys.iter().rev().find(|t| matches!(t, Ty::Var(_)));
     for ty in &v.tys {
         match ty {
             Ty::Var(d) => push(
@@ -1485,7 +1489,7 @@ fn record_named(
                 owner,
                 at,
                 SiteKind::Reference,
-                var_certain,
+                certain || vars == 1 || Some(ty) == direct,
                 "more than one possible target",
             ),
             Ty::Func(d) => push(
