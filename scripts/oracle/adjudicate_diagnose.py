@@ -29,7 +29,7 @@ loads = collections.defaultdict(set)
 for rel, t in trees.items():
     for n in ast.walk(t):
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load): loads[n.id].add((rel, n.lineno))
-        elif isinstance(n, ast.Attribute): loads[n.attr].add((rel, n.lineno))
+        elif isinstance(n, ast.Attribute) and not (isinstance(n.value, ast.Name) and n.value.id in ("self", "cls")): loads[n.attr].add((rel, n.lineno))
 
 def file_uses(rel, name):
     t = trees.get(rel)
@@ -66,9 +66,17 @@ for pat, xs in sorted(by_pat.items()):
             # does not import it from this module is a different binding.
             if pat == "data_dead_end" and name.startswith("_") and not name.startswith("__"):
                 mod = rel[:-3].replace("/", ".")
-                importers = {f for f, t in trees.items() for n in ast.walk(t)
-                             if isinstance(n, ast.ImportFrom) and n.module and mod.endswith(n.module.split(".")[-1])
-                             and any(a.name == name for a in n.names)}
+                # `from pkg.mod import _x`, `from .mod import _x` or `from . import _x`
+                # in a sibling: the module is named absolutely, relatively, or
+                # as the package whose `__init__` re-exports it.
+                def imports_from(f, n):
+                    if not isinstance(n, ast.ImportFrom) or not any(a.name == name for a in n.names): return False
+                    pkg_parts = f.split("/")[:-1]
+                    base = pkg_parts[:len(pkg_parts) - (n.level - 1)] if n.level else []
+                    target = ".".join(base + (n.module.split(".") if n.module else [])) if n.level else (n.module or "")
+                    # Exact module, or the package whose __init__ is this module.
+                    return target == mod or mod == target + ".__init__"
+                importers = {f for f, t in trees.items() for n in ast.walk(t) if imports_from(f, n)}
                 others = [(f, l) for (f, l) in others if f == rel or f in importers]
             if others: verdict = "disagree:" + ",".join(f"{f}:{l}" for f, l in sorted(others)[:3])
         elif pat == "phantom_dependency":

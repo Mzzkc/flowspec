@@ -1374,7 +1374,7 @@ pub fn resolve_file(ex: &Exports, fi: u32, facts: &FactSet) -> Resolved {
             .resolve_import(&i.module, i.member.as_deref(), fi, 0, &mut Vec::new())
             .tys
         {
-            if let Ty::Func(d) | Ty::Class(d) = ty {
+            if let Ty::Func(d) | Ty::Class(d) | Ty::Var(d) = ty {
                 push(d, (fi, i.scope), (i.line, 1), SiteKind::Import, true, "");
             }
         }
