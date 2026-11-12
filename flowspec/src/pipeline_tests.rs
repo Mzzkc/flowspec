@@ -2672,13 +2672,12 @@ fn test_pipeline_graph_exposed_in_analysis_result() {
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    // This line fails to COMPILE if the field doesn't exist. Unconditional assertion.
-    let symbol_count = result.graph.all_symbols().count();
+    // Python never populates the legacy graph (it is indexed instead,
+    // 2026-11-12); the graph field must still exist for the other languages.
+    let _graph_symbols = result.graph.all_symbols().count();
     assert!(
-        symbol_count > 0,
-        "AnalysisResult.graph MUST be accessible and populated after analysis. \
-         Got 0 symbols. This field is required for trace_flows_from() direct calls \
-         and MCP integration."
+        !result.manifest.entities.is_empty(),
+        "AnalysisResult must carry the indexed Python entities. Got none."
     );
 }
 
@@ -2695,23 +2694,19 @@ fn test_pipeline_graph_symbols_populated_after_analysis() {
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    let symbols: Vec<_> = result.graph.all_symbols().collect();
+    let entities = &result.manifest.entities;
     assert!(
-        symbols.len() >= 4,
-        "dead_code.py has at least 4 named functions. Graph returned {} symbols. \
-         The graph may not have been populated or was cleared before being moved \
-         into AnalysisResult.",
-        symbols.len()
+        entities.len() >= 4,
+        "dead_code.py has at least 4 named functions. Manifest returned {} entities.",
+        entities.len()
     );
 
-    let has_main_handler = symbols
-        .iter()
-        .any(|(_, sym)| sym.qualified_name.contains("main_handler") || sym.name == "main_handler");
+    let has_main_handler = entities.iter().any(|e| e.id.contains("main_handler"));
     assert!(
         has_main_handler,
-        "Graph MUST contain the 'main_handler' symbol from dead_code.py. \
-         Found symbols: {:?}",
-        symbols.iter().map(|(_, s)| &s.name).collect::<Vec<_>>()
+        "Manifest MUST contain the 'main_handler' entity from dead_code.py. \
+         Found entities: {:?}",
+        entities.iter().map(|e| &e.id).collect::<Vec<_>>()
     );
 }
 
@@ -2728,21 +2723,22 @@ fn test_pipeline_graph_symbol_count_consistent_with_entities() {
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    let graph_non_module_count = result
-        .graph
-        .all_symbols()
-        .filter(|(_, sym)| sym.kind != crate::parser::ir::SymbolKind::Module)
+    // Every `def` and `class` in the fixture is one manifest entity; count
+    // them in the source so the check does not depend on either engine.
+    let source = include_str!("../../tests/fixtures/python/dead_code.py");
+    let defined = source
+        .lines()
+        .filter(|l| {
+            l.starts_with("def ") || l.starts_with("class ") || l.trim_start().starts_with("def ")
+        })
         .count();
-
     let entity_count = result.manifest.entities.len();
-
-    let diff = (graph_non_module_count as i64 - entity_count as i64).unsigned_abs();
+    let diff = (defined as i64 - entity_count as i64).unsigned_abs();
     assert!(
-        diff <= graph_non_module_count as u64 / 2,
-        "Graph has {} non-Module symbols but manifest has {} entities. \
-         Difference of {} is too large — indicates graph population or entity \
-         extraction mismatch.",
-        graph_non_module_count,
+        diff <= (defined as u64) / 2,
+        "Source defines {} functions/classes but manifest has {} entities. \
+         Difference of {} is too large.",
+        defined,
         entity_count,
         diff
     );
@@ -2996,15 +2992,16 @@ fn test_pipeline_graph_has_edges_after_move() {
     let config = Config::load(tmp.path(), None).unwrap();
     let result = analyze(tmp.path(), &config, &["python".to_string()]).unwrap();
 
-    let has_edges = result.graph.all_symbols().any(|(id, _)| {
-        !result.graph.edges_from(id).is_empty() || !result.graph.edges_to(id).is_empty()
-    });
+    let has_edges = result
+        .manifest
+        .entities
+        .iter()
+        .any(|e| !e.calls.is_empty() || !e.called_by.is_empty());
 
     assert!(
         has_edges,
-        "Graph in AnalysisResult should contain edges from cross-file imports. \
-         If no edges found, the graph may have been replaced with Graph::new() \
-         instead of moved from the populated instance."
+        "AnalysisResult entities should carry cross-file call edges from the \
+         Python index. If none found, resolution did not run or was discarded."
     );
 }
 

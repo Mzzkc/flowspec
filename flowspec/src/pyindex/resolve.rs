@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use super::facts::{BindTarget, DefKind, Expr, FactSet, SiteKind};
+use super::facts::{BindTarget, DefKind, Expr, FactSet, HazardKind, SiteKind};
 
 /// Global id of a definition: (file index, definition index in that file).
 pub type GId = (u32, u32);
@@ -1149,6 +1149,38 @@ pub struct UnknownCall {
     pub line: u32,
 }
 
+/// Why a span of a file leaves a question open. Each maps onto one loss
+/// reason the report authority already understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LossKind {
+    /// An annotation whose contract no type-flow evidence backs
+    /// (`capability_unavailable` / `type_flows`).
+    TypeFlows,
+    /// An annotation naming a type the resolver cannot bind
+    /// (`unresolved_type` / `type_resolution`).
+    UnresolvedType,
+    /// A runtime namespace lookup (`unresolved_reference` / `consumer_closure`).
+    DynamicNamespace,
+    /// A `match` statement (`unsupported_construct` / `control_flow`).
+    MatchStatement,
+    /// A relative import the resolver could not place in the project
+    /// (`unresolved_import`).
+    UnresolvedImport,
+}
+
+/// One open question, with the span it is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Loss {
+    /// File the span is in.
+    pub file: u32,
+    /// Byte span.
+    pub start: u32,
+    /// End byte, exclusive.
+    pub end: u32,
+    /// What is open.
+    pub kind: LossKind,
+}
+
 /// The output of resolving one file.
 #[derive(Debug, Default, Clone)]
 pub struct Resolved {
@@ -1156,6 +1188,48 @@ pub struct Resolved {
     pub sites: Vec<Site>,
     /// Calls with an unknown receiver, by member name.
     pub unknown_calls: Vec<UnknownCall>,
+    /// Open questions in this file.
+    pub losses: Vec<Loss>,
+}
+
+/// Builtin type names an annotation may use without a project binding.
+const ANNOTATION_BUILTINS: &[&str] = &[
+    "int",
+    "str",
+    "float",
+    "bool",
+    "bytes",
+    "bytearray",
+    "list",
+    "tuple",
+    "dict",
+    "set",
+    "frozenset",
+    "object",
+    "type",
+    "complex",
+    "None",
+    "Any",
+    "Optional",
+    "Union",
+    "Callable",
+    "Iterable",
+    "Iterator",
+    "Sequence",
+    "Mapping",
+    "List",
+    "Dict",
+    "Set",
+    "Tuple",
+    "Self",
+];
+
+/// The root identifier of an annotation text: `Optional[Foo]` → `Optional`,
+/// `pkg.mod.Cls[int]` → `pkg`, `"Foo"` → `Foo`.
+fn annotation_root(text: &str) -> Option<&str> {
+    let t = text.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    let head = t.split(['[', '|', '.', ',', ' ']).next()?.trim();
+    (!head.is_empty() && head.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(head)
 }
 
 /// Resolve one file's facts against the export table.
@@ -1271,6 +1345,76 @@ pub fn resolve_file(ex: &Exports, fi: u32, facts: &FactSet) -> Resolved {
     let mut seen = HashSet::new();
     out.sites
         .retain(|s| seen.insert((s.target, s.owner, s.line, s.kind)));
+    // Open questions. A relative import the table cannot place is an
+    // obligation the file declared; an unknown annotation root is a contract
+    // the resolver cannot bind; every annotation lacks type-flow evidence.
+    for i in &facts.imports {
+        if i.relative && ex.module_file_from(&i.module, fi).is_none() {
+            out.losses.push(Loss {
+                file: fi,
+                start: i.span.0,
+                end: i.span.1,
+                kind: LossKind::UnresolvedImport,
+            });
+        }
+    }
+    for h in &facts.hazards {
+        let kind = match h.kind {
+            HazardKind::MatchStatement => LossKind::MatchStatement,
+            HazardKind::DynamicNamespace => {
+                const NAMESPACE_OPS: &[&str] =
+                    &["globals", "locals", "eval", "exec", "getattr", "__import__"];
+                let name = h.text.split('(').next().unwrap_or("").trim();
+                // The original name: the called name itself, or what an
+                // import bound it to (`from builtins import getattr as lookup`).
+                let import = facts
+                    .imports
+                    .iter()
+                    .filter(|i| i.local == name)
+                    .find(|i| i.scope == h.scope || i.scope == 0);
+                let original = import.and_then(|i| i.member.as_deref()).unwrap_or(name);
+                if !NAMESPACE_OPS.contains(&original) {
+                    continue;
+                }
+                // A project definition of the name is the provider, not the
+                // builtin; so is an import from anywhere but `builtins`.
+                let env = envs.get(&h.scope).unwrap_or(&empty);
+                if ex.lookup(name, fi, h.scope, env).has_project() {
+                    continue;
+                }
+                if import.is_some_and(|i| i.module != "builtins") {
+                    continue;
+                }
+                LossKind::DynamicNamespace
+            }
+            HazardKind::Annotation => {
+                out.losses.push(Loss {
+                    file: fi,
+                    start: h.start,
+                    end: h.end,
+                    kind: LossKind::TypeFlows,
+                });
+                let Some(root) = annotation_root(&h.text) else {
+                    continue;
+                };
+                if ANNOTATION_BUILTINS.contains(&root) {
+                    continue;
+                }
+                let env = envs.get(&h.scope).unwrap_or(&empty);
+                let v = ex.lookup(root, fi, h.scope, env);
+                if v.has_project() || !v.unknown {
+                    continue;
+                }
+                LossKind::UnresolvedType
+            }
+        };
+        out.losses.push(Loss {
+            file: fi,
+            start: h.start,
+            end: h.end,
+            kind,
+        });
+    }
     out
 }
 

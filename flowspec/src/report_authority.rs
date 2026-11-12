@@ -91,6 +91,10 @@ pub(crate) fn loss(reason: &str, path_key: String, range: Option<Value>, stage: 
 
 fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Value]) -> Vec<String> {
     let mut blocked = Vec::new();
+    let by_key: HashMap<String, &InputRecord> = inputs
+        .iter()
+        .map(|i| (path_key(root, &i.path), i))
+        .collect();
     for loss in losses {
         let reason = loss["reason"].as_str().unwrap_or("");
         if !matches!(
@@ -116,9 +120,8 @@ fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Valu
             // No accessibility/interop proof exists here to narrow that scope
             // based on its language or filename. Policy-excluded known paths
             // are outside the declared scope; omitted walker entries are not.
-            let relevant_scope = inputs
-                .iter()
-                .find(|i| path_key(root, &i.path) == key)
+            let relevant_scope = by_key
+                .get(key)
                 .is_none_or(|input| input.disposition == "selected");
             if relevant_scope {
                 blocked.push(key.to_string());
@@ -128,6 +131,182 @@ fn consumer_closure_blockers(inputs: &[InputRecord], root: &Path, losses: &[Valu
     blocked.sort();
     blocked.dedup();
     blocked
+}
+
+/// What the authority needs from the Python reference index: the analysis
+/// graph projection (bindings and edges with stable keys) and the open
+/// questions the resolver recorded, each as a loss with a byte range.
+pub struct IndexProjection {
+    /// Entities, boundaries, dependency edges and call flows, in the shape
+    /// [`graph_state`] produces for the legacy graph.
+    pub graph: Value,
+    /// Losses with `origin`, `required_capabilities` and `affected_patterns`.
+    pub losses: Vec<Value>,
+}
+
+/// Build the authority's view of a Python index. Bindings are keyed the same
+/// way as graph symbols (`path_key`, `language`, `qualified_name`,
+/// `construct_kind`), so a finding keeps its `semantic_id` whichever
+/// producer made it.
+pub(crate) fn index_projection(
+    root: &Path,
+    index: &crate::pyindex::store::Index,
+    inputs: &[InputRecord],
+) -> IndexProjection {
+    use crate::pyindex::facts::{DefKind, SiteKind};
+    use crate::pyindex::resolve::LossKind;
+    let files = &index.exports.files;
+    let by_key: HashMap<String, &InputRecord> = inputs
+        .iter()
+        .map(|i| (path_key(root, &i.path), i))
+        .collect();
+    let content_of = |rel: &str| -> Option<(String, &str)> {
+        let key = path_key(root, &root.join(rel));
+        let input = by_key.get(&key)?;
+        Some((key, input.content.as_deref()?))
+    };
+    let construct = |kind: DefKind| match kind {
+        DefKind::Function => "function",
+        DefKind::Method => "method",
+        DefKind::Class => "class",
+        DefKind::Module => "module",
+        DefKind::Variable => "variable",
+    };
+    let mut keys: HashMap<(u32, u32), String> = HashMap::new();
+    let mut binding_counts: HashMap<String, usize> = HashMap::new();
+    let mut bases: Vec<((u32, u32), Value, &str, String)> = Vec::new();
+    for (fi, f) in files.iter().enumerate() {
+        let Some((key, _)) = content_of(&f.rel) else {
+            continue;
+        };
+        let file_name = f.rel.rsplit('/').next().unwrap_or(&f.rel);
+        for (di, d) in f.defs.iter().enumerate() {
+            if d.kind == DefKind::Module {
+                continue;
+            }
+            let base = json!({"path_key":key,"language":"python",
+                "qualified_name":format!("{}::{}", file_name, d.qual),
+                "construct_kind":construct(d.kind)});
+            let id = hash("binding", &base);
+            *binding_counts.entry(id.clone()).or_insert(0) += 1;
+            bases.push(((fi as u32, di as u32), base, construct(d.kind), id));
+        }
+    }
+    let mut entities = Vec::new();
+    for (g, base, kind, id) in bases {
+        if binding_counts.get(&id).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        let f = &files[g.0 as usize];
+        let Some((key, content)) = content_of(&f.rel) else {
+            continue;
+        };
+        let d = &f.defs[g.1 as usize];
+        let range = offset_range(
+            &key,
+            content,
+            byte_at(content, d.line, d.column),
+            byte_at(content, d.end_line, d.end_column),
+        );
+        let mut subject = base;
+        subject["binding_id"] = json!(id);
+        entities.push(json!({"key":id,"kind":kind,"subject":subject,"range":range}));
+        keys.insert(g, id);
+    }
+    entities.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    let mut boundaries = Vec::new();
+    let mut dependency_graph = Vec::new();
+    let mut flows = Vec::new();
+    for s in index.all_sites() {
+        if !s.certain {
+            continue;
+        }
+        let (Some(source_key), Some(target_key)) = (keys.get(&s.owner), keys.get(&s.target)) else {
+            continue;
+        };
+        let kind = match s.kind {
+            SiteKind::Call => "calls",
+            SiteKind::Import => "imports",
+            SiteKind::Reference | SiteKind::Decorator => "references",
+        };
+        let edge_key = hash(
+            "binding",
+            &json!({"kind":kind,"source_key":source_key,"target_key":target_key}),
+        );
+        let record = json!({"key":edge_key,"kind":kind,"source_key":source_key,
+            "target_key":target_key,"evidence":[]});
+        if s.owner.0 != s.target.0 {
+            boundaries.push(record.clone());
+        }
+        dependency_graph.push(record);
+        if s.kind == SiteKind::Call {
+            let flow_key = hash(
+                "binding",
+                &json!({"kind":"call","node_keys":[source_key,target_key],"edge_keys":[edge_key]}),
+            );
+            flows.push(
+                json!({"key":flow_key,"kind":"call","node_keys":[source_key,target_key],
+                "edge_keys":[edge_key],"evidence":[]}),
+            );
+        }
+    }
+    for rows in [&mut boundaries, &mut dependency_graph, &mut flows] {
+        rows.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+        rows.dedup_by(|a, b| a["key"] == b["key"]);
+    }
+    let graph = json!({"entities":entities,"boundaries":boundaries,
+        "dependency_graph":dependency_graph,"flows":flows,"type_flows":[]});
+
+    let mut losses = Vec::new();
+    for l in index.losses() {
+        let f = &files[l.file as usize];
+        let Some((key, content)) = content_of(&f.rel) else {
+            continue;
+        };
+        let range = offset_range(&key, content, l.start as u64, l.end as u64);
+        let (reason, capability, origin, stage) = match l.kind {
+            LossKind::TypeFlows => (
+                "capability_unavailable",
+                "type_flows",
+                "Annotation",
+                "parse",
+            ),
+            LossKind::UnresolvedType => (
+                "unresolved_type",
+                "type_resolution",
+                "Annotation",
+                "resolve",
+            ),
+            LossKind::DynamicNamespace => (
+                "unresolved_reference",
+                "consumer_closure",
+                "Value",
+                "resolve",
+            ),
+            LossKind::MatchStatement => ("unsupported_construct", "control_flow", "Value", "parse"),
+            LossKind::UnresolvedImport => ("unresolved_import", "resolution", "Value", "resolve"),
+        };
+        let mut value = loss(reason, key, Some(range), stage);
+        value["required_capabilities"] = json!([capability]);
+        value["origin"] = json!(origin);
+        value["affected_patterns"] = if capability == "type_flows" {
+            json!(["contract_mismatch", "orphaned_impl"])
+        } else {
+            json!([
+                "data_dead_end",
+                "isolated_cluster",
+                "partial_wiring",
+                "asymmetric_handling",
+                "contract_mismatch",
+                "orphaned_impl"
+            ])
+        };
+        losses.push(value);
+    }
+    if binding_counts.values().any(|c| *c > 1) {
+        losses.push(loss("identity_uncertain", String::new(), None, "binding"));
+    }
+    IndexProjection { graph, losses }
 }
 
 /// The same proof as [`build_finding`], from an index subject instead of a
@@ -517,8 +696,12 @@ pub(crate) fn build(
     diagnostics: &[DiagnosticEntry],
     graph: &Graph,
     index_subjects: &[IndexSubject],
+    index: Option<&IndexProjection>,
     mut losses: Vec<Value>,
 ) -> Value {
+    if let Some(p) = index {
+        losses.extend(p.losses.iter().cloned());
+    }
     let blockers = consumer_closure_blockers(inputs, root, &losses);
     let mut findings: Vec<Value> = Vec::new();
     for diagnostic in diagnostics {
@@ -659,10 +842,29 @@ pub(crate) fn build(
     if binding_counts.values().any(|count| *count > 1) {
         losses.push(loss("identity_uncertain", String::new(), None, "binding"));
     }
+    // Group losses by the pattern they affect once; the per-pattern cells
+    // below then read a slice instead of rescanning every loss.
+    let mut losses_by_pattern: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for loss in &losses {
+        for p in loss["affected_patterns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if let Some(known) = PATTERNS.iter().find(|k| **k == p) {
+                losses_by_pattern.entry(known).or_default().push(loss);
+            }
+        }
+    }
     let mut pattern_state = Vec::new();
     for pattern in PATTERNS {
+        let pattern_losses: &[&Value] = losses_by_pattern
+            .get(pattern)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let cells:Vec<Value>=scope["effective_languages"].as_array().unwrap().iter().map(|lang|{
-            let mut reasons:Vec<String>=losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
+            let mut reasons:Vec<String>=pattern_losses.iter().filter_map(|loss|loss["reason"].as_str().map(str::to_string)).collect();
             reasons.sort(); reasons.dedup();
             let capabilities: &[&str] = match pattern {
                 "data_dead_end" => &["symbols", "calls", "value_references", "exports", "registration", "consumer_closure"],
@@ -673,7 +875,7 @@ pub(crate) fn build(
                 "stale_reference" | "incomplete_migration" => &["imports", "resolution"],
                 _ => &["symbols", "calls", "resolution"],
             };
-            let relevant_losses: Vec<_> = losses.iter().filter(|loss| loss["affected_patterns"].as_array().is_some_and(|patterns| patterns.iter().any(|p| p == pattern))).collect();
+            let relevant_losses: &[&Value] = pattern_losses;
             let mut capabilities: std::collections::BTreeSet<String> = capabilities.iter().map(|name| name.to_string()).collect();
             let mut affected_paths = std::collections::BTreeSet::new();
             for loss in relevant_losses {
@@ -707,7 +909,18 @@ pub(crate) fn build(
     } else {
         "findings"
     };
-    let graph_state = graph_state(root, graph, inputs);
+    let mut graph_state = graph_state(root, graph, inputs);
+    if let Some(p) = index {
+        // Merge the index projection with whatever the graph holds for the
+        // other languages; keys are stable hashes so a plain append is a union.
+        for section in ["entities", "boundaries", "dependency_graph", "flows"] {
+            let mut rows: Vec<Value> = graph_state[section].as_array().cloned().unwrap_or_default();
+            rows.extend(p.graph[section].as_array().cloned().unwrap_or_default());
+            rows.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+            rows.dedup_by(|a, b| a["key"] == b["key"]);
+            graph_state[section] = json!(rows);
+        }
+    }
     let mut authority = json!({"schema_version":2,"producer_contract":"flowspec.analysis.provenance.v1",
         "producer":producer,"execution":execution,"outcome":outcome,"findings_present":!findings.is_empty(),
         "gate":{"verdict":"pass","qualifying_count":0},

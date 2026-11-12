@@ -230,15 +230,16 @@ value names a definition (`handler = helper`) also forwards that value, so
 - Implicit protocol calls (`__enter__`, `__iter__`, operators) are not
   sites. A zero-caller answer for a dunder says so.
 - `getattr`, `exec`, monkey-patching: recorded as hazards per file.
-- Mixed-language trees: `analyze` and `diagnose` route Python through the
-  index only when every selected file is Python. A tree that also selects
-  JavaScript/TypeScript or Rust files still runs Python through the legacy
-  graph, whose diagnose findings are known to be mostly false (issue #35) and
-  whose annotation and dynamic-reference losses mark the run incomplete.
-  Measured 2026-11-11 on Marianne (`src/marianne`, 323 Python files and 2
-  JavaScript files): diagnose produced 4,631 findings and `analyze` exited 3
-  from the graph path. Pass `--language python` to get the index on such a
-  tree until the per-language split lands (tracked in a GitHub issue).
+- Mixed-language trees (fixed 2026-11-12, issue #37): Python always goes
+  to the index and the other languages to the graph; the manifest and the
+  authority projection are the union. The Python prerequisite losses the
+  authority reports (`capability_unavailable` per annotation,
+  `unresolved_type`, `unresolved_reference`, `unsupported_construct`,
+  `unresolved_import`) are derived from hazards the fact extractor records
+  with byte spans and persisted in `losses.bin`, so a warm run never
+  re-derives them. An annotated codebase therefore still reports
+  `execution: incomplete` until type flows are implemented; that is the
+  authority's contract, not an index limitation.
 
 ## Conventions the oracle and the index disagree on
 

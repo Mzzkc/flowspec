@@ -8,6 +8,7 @@
 //! exports.bin                   Vec<FileExports>, one per indexed file
 //! sites.bin                     Vec<Site> sorted by target
 //! unknown.bin                   Vec<UnknownCall> sorted by member name
+//! losses.bin                    Vec<Loss> sorted by file
 //! manifest.bin                  files, hashes, import closure, version
 //! ```
 //!
@@ -28,10 +29,10 @@ use sha2::{Digest, Sha256};
 use tree_sitter::Parser;
 
 use super::facts::{self, DefKind, FactSet, SiteKind};
-use super::resolve::{self, Exports, FileExports, GId, Site, UnknownCall};
+use super::resolve::{self, Exports, FileExports, GId, Loss, Site, UnknownCall};
 use crate::error::FlowspecError;
 
-const INDEX_VERSION: u32 = 3;
+const INDEX_VERSION: u32 = 4;
 
 /// Per-file record in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +93,7 @@ pub struct Index {
     pub exports: Exports,
     sites: Vec<Site>,
     unknown: Vec<UnknownCall>,
+    losses: Vec<Loss>,
     manifest: IndexManifest,
     /// Counts from the last build (zeros when loaded without building).
     pub stats: BuildStats,
@@ -557,6 +559,7 @@ impl Index {
         // Pass 2: resolve. Reuse prior sites for untouched files.
         let mut sites: Vec<Site> = Vec::new();
         let mut unknown: Vec<UnknownCall> = Vec::new();
+        let mut losses: Vec<Loss> = Vec::new();
         if !structure_changed {
             let keep: HashSet<u32> = (0..entries.len() as u32)
                 .filter(|fi| !to_resolve.contains(&(*fi as usize)))
@@ -579,6 +582,9 @@ impl Index {
                         .filter(|u| keep.contains(&u.owner.0) && in_table(&u.owner)),
                 );
             }
+            if let Ok(old) = read_bin::<Vec<Loss>>(&dir.join("losses.bin")) {
+                losses.extend(old.into_iter().filter(|l| keep.contains(&l.file)));
+            }
         }
         for &fi in &to_resolve {
             let e = &entries[fi];
@@ -590,6 +596,7 @@ impl Index {
             let r = resolve::resolve_file(&ex, fi as u32, &f);
             sites.extend(r.sites);
             unknown.extend(r.unknown_calls);
+            losses.extend(r.losses);
             stats.resolved += 1;
             crate::budget::check("index resolve")?;
         }
@@ -601,6 +608,7 @@ impl Index {
                 .then(a.owner.cmp(&b.owner))
                 .then(a.line.cmp(&b.line))
         });
+        losses.sort_by_key(|l| (l.file, l.start, l.end));
         stats.sites = sites.len();
         stats.unknown_receiver_calls = unknown.len();
 
@@ -611,6 +619,7 @@ impl Index {
         };
         write_atomic(&dir.join("sites.bin"), &sites)?;
         write_atomic(&dir.join("unknown.bin"), &unknown)?;
+        write_atomic(&dir.join("losses.bin"), &losses)?;
         write_atomic(&dir.join("exports.bin"), &ex.files)?;
         write_atomic(&dir.join("manifest.bin"), &manifest)?;
         tracing::debug!("index written; total {:?}", t0.elapsed());
@@ -637,6 +646,7 @@ impl Index {
             exports: ex,
             sites,
             unknown,
+            losses,
             manifest,
             stats,
             dir,
@@ -705,6 +715,11 @@ impl Index {
     /// Unknown-receiver calls, sorted by member name.
     pub fn unknown_calls(&self) -> &[UnknownCall] {
         &self.unknown
+    }
+
+    /// Every open question the resolver recorded, sorted by file and span.
+    pub fn losses(&self) -> &[Loss] {
+        &self.losses
     }
 
     /// Resolve a user-supplied symbol to one definition.

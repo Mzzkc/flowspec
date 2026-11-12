@@ -367,6 +367,24 @@ fn analyze_core(
             .collect()
     };
 
+    // Python goes to the reference index (flowspec/src/pyindex/): one parse
+    // per file into a persisted fact set, a resident export table, every
+    // site resolved through scopes, imports, class hierarchy and receiver
+    // typing (docs/design/streaming-index.md). The whole-program graph is
+    // never built for Python; the other languages still use it. A tree that
+    // mixes them sends each file to its engine and the manifest merges.
+    let python_routed =
+        active_languages.is_empty() || active_languages.iter().any(|l| l == "python");
+    let python_files: Vec<PathBuf> = if python_routed {
+        files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "py"))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let stage_clock = std::time::Instant::now();
     let mut graph = Graph::new();
     let mut parsed_file_count: u64 = 0;
@@ -374,6 +392,9 @@ fn analyze_core(
     let mut completeness = Completeness::default();
 
     for file in &files {
+        if python_routed && file.extension().is_some_and(|e| e == "py") {
+            continue;
+        }
         if let Some(adapter) = adapters.iter().find(|a| a.can_handle(file)) {
             let record = input_records
                 .iter_mut()
@@ -593,6 +614,96 @@ fn analyze_core(
         }
     }
 
+    // Stage 2: Run diagnostic patterns.
+    //
+    // Python findings come from the reference index: per-file facts and a
+    // resident export table, with every site resolved through scopes,
+    // imports, class hierarchy and receiver typing (see
+    // docs/design/streaming-index.md). The graph-based patterns remain for
+    // the other languages, whose adapters have not been ported.
+    let mut py_index: Option<pyindex::store::Index> = None;
+    let mut raw_diagnostics = if files.len() > python_files.len() {
+        run_all_patterns(&graph, project_path)
+    } else {
+        Vec::new()
+    };
+    if !python_files.is_empty() {
+        // A single-file analysis roots the index at the file's directory so
+        // module names and relative paths are well formed.
+        let index_root = if project_path.is_file() {
+            project_path.parent().unwrap_or(project_path)
+        } else {
+            project_path
+        };
+        let index = pyindex::store::Index::build(index_root, &python_files)?;
+        budget::check("index")?;
+        tracing::debug!("analyze stage 2a (index built) {:?}", stage_clock.elapsed());
+        // Custody for Python files comes from the index: it read and parsed
+        // them. A file with a syntax error is a parse_recovery loss with the
+        // same disposition the graph path gave it.
+        for entry in index.manifest().files.iter() {
+            let abs = index_root.join(&entry.rel);
+            let Some(record) = input_records.iter_mut().find(|r| r.path == abs) else {
+                continue;
+            };
+            completeness.selected += 1;
+            let content = match std::fs::read_to_string(&abs) {
+                Ok(c) => c,
+                Err(_) => {
+                    completeness.reject(abs.display().to_string(), "read_error");
+                    record.rejected_reason = Some("read_error".to_string());
+                    losses.push(report_authority::loss(
+                        "read_error",
+                        report_authority::path_key(project_path, &abs),
+                        None,
+                        "read",
+                    ));
+                    continue;
+                }
+            };
+            completeness.read += 1;
+            record.read = true;
+            source_bytes += content.len() as u64;
+            record.content = Some(content.clone());
+            if entry.skipped.is_some() || entry.has_errors {
+                completeness.reject(abs.display().to_string(), "parse_error");
+                record.rejected_reason = Some("parse_error".to_string());
+                let key = report_authority::path_key(project_path, &abs);
+                let range =
+                    parser::source_parse_loss_range(&abs, &content).map(|(start, end, _, _)| {
+                        report_authority::offset_range(&key, &content, start, end)
+                    });
+                losses.push(report_authority::loss(
+                    if entry.skipped.is_some() {
+                        "parse_error"
+                    } else {
+                        "parse_recovery"
+                    },
+                    key,
+                    range,
+                    "parse",
+                ));
+            } else {
+                parsed_file_count += 1;
+                completeness.parsed += 1;
+                record.parsed = true;
+            }
+        }
+        completeness
+            .rejected_files
+            .sort_by(|a, b| a.path.cmp(&b.path));
+        let mut diags = pyindex::diagnostics::all(&index);
+        tracing::debug!(
+            "analyze stage 2b (index diagnostics) {:?}",
+            stage_clock.elapsed()
+        );
+        raw_diagnostics.append(&mut diags);
+        py_index = Some(index);
+    }
+    for (i, d) in raw_diagnostics.iter_mut().enumerate() {
+        d.id = format!("D{:03}", i + 1);
+    }
+    let graph_has_symbols = graph.all_symbols().next().is_some();
     // Warn when explicitly requested languages produce no analysis results
     if !languages.is_empty() && parsed_file_count == 0 {
         for lang in languages {
@@ -604,42 +715,6 @@ fn analyze_core(
         }
     }
 
-    // Stage 2: Run diagnostic patterns.
-    //
-    // Python findings come from the reference index: per-file facts and a
-    // resident export table, with every site resolved through scopes,
-    // imports, class hierarchy and receiver typing (see
-    // docs/design/streaming-index.md). The graph-based patterns remain for
-    // the other languages, whose adapters have not been ported.
-    let python_only = active_languages.iter().all(|l| l == "python")
-        && files
-            .iter()
-            .all(|f| f.extension().is_some_and(|e| e == "py"));
-    let mut py_index: Option<pyindex::store::Index> = None;
-    let raw_diagnostics = if python_only && !files.is_empty() {
-        // A single-file analysis roots the index at the file's directory so
-        // module names and relative paths are well formed.
-        let index_root = if project_path.is_file() {
-            project_path.parent().unwrap_or(project_path)
-        } else {
-            project_path
-        };
-        let index = pyindex::store::Index::build(index_root, &files)?;
-        budget::check("index")?;
-        tracing::debug!("analyze stage 2a (index built) {:?}", stage_clock.elapsed());
-        let mut diags = pyindex::diagnostics::all(&index);
-        tracing::debug!(
-            "analyze stage 2b (index diagnostics) {:?}",
-            stage_clock.elapsed()
-        );
-        for (i, d) in diags.iter_mut().enumerate() {
-            d.id = format!("D{:03}", i + 1);
-        }
-        py_index = Some(index);
-        diags
-    } else {
-        run_all_patterns(&graph, project_path)
-    };
     budget::check("diagnostics")?;
     tracing::debug!("analyze stage 2 (diagnostics) {:?}", stage_clock.elapsed());
     let diagnostics = to_manifest_entries(&raw_diagnostics);
@@ -687,7 +762,7 @@ fn analyze_core(
         None => Vec::new(),
     };
     for (sym_id, symbol) in graph.all_symbols() {
-        if py_index.is_some() || symbol.kind == SymbolKind::Module {
+        if symbol.kind == SymbolKind::Module {
             continue;
         }
         let rel_path = symbol
@@ -752,10 +827,8 @@ fn analyze_core(
 
     // Stage 4: Build module summaries. Python: from the index.
     let mut file_set: HashSet<PathBuf> = HashSet::new();
-    if py_index.is_none() {
-        for (_, sym) in graph.all_symbols() {
-            file_set.insert(sym.location.file.clone());
-        }
+    for (_, sym) in graph.all_symbols() {
+        file_set.insert(sym.location.file.clone());
     }
     let mut modules: Vec<ModuleSummary> = file_set
         .iter()
@@ -783,15 +856,15 @@ fn analyze_core(
         })
         .collect();
     if let Some(index) = &py_index {
-        modules = pyindex::manifest::modules(index);
+        modules.extend(pyindex::manifest::modules(index));
     }
     modules.sort_by_key(|m| std::cmp::Reverse(m.entity_count));
 
     // Stage 4b: Trace data flows. Python: from the index; the graph is empty.
-    let flow_paths = if py_index.is_some() {
-        Vec::new()
-    } else {
+    let flow_paths = if graph_has_symbols {
         trace_all_flows(&graph)
+    } else {
+        Vec::new()
     };
     budget::check("flow tracing")?;
     let flows: Vec<FlowEntry> = flow_paths
@@ -848,10 +921,14 @@ fn analyze_core(
         .collect();
 
     // Stage 4c: Deduplicate flows — hash-based dedup on (entry, exit, steps)
-    let flows = match &py_index {
-        Some(index) => pyindex::manifest::flows(index),
-        None => deduplicate_flows(flows),
-    };
+    let mut flows = deduplicate_flows(flows);
+    if let Some(index) = &py_index {
+        let offset = flows.len();
+        for (i, mut f) in pyindex::manifest::flows(index).into_iter().enumerate() {
+            f.id = format!("F{:03}", offset + i + 1);
+            flows.push(f);
+        }
+    }
 
     // Stage 5: Assemble manifest
     let diagnostic_count = diagnostics.len() as u64;
@@ -880,9 +957,12 @@ fn analyze_core(
         .collect();
 
     // Exit points: public functions/methods with no outgoing call edges (data leaves through them)
-    let exit_points: Vec<String> = if let Some(index) = &py_index {
+    let mut exit_points: Vec<String> = if let Some(index) = &py_index {
         pyindex::manifest::exit_points(index)
     } else {
+        Vec::new()
+    };
+    exit_points.extend(
         graph
             .all_symbols()
             .filter(|(id, sym)| {
@@ -892,9 +972,8 @@ fn analyze_core(
                     && !sym.annotations.contains(&"entry_point".to_string())
                     && !sym.annotations.contains(&"import".to_string())
             })
-            .map(|(_, sym)| sym.qualified_name.clone())
-            .collect()
-    };
+            .map(|(_, sym)| sym.qualified_name.clone()),
+    );
 
     // Key flows: top 5 flows by step count (most significant data flow paths)
     let key_flows: Vec<KeyFlow> = {
@@ -974,13 +1053,19 @@ fn analyze_core(
         diagnostics,
         entities,
         flows,
-        boundaries: match &py_index {
-            Some(index) => pyindex::manifest::boundaries(index),
-            None => extract_boundaries(&graph, project_path),
+        boundaries: {
+            let mut b = extract_boundaries(&graph, project_path);
+            if let Some(index) = &py_index {
+                b.extend(pyindex::manifest::boundaries(index));
+            }
+            b
         },
-        dependency_graph: match &py_index {
-            Some(index) => pyindex::manifest::dependency_graph(index),
-            None => extract_dependency_graph(&graph),
+        dependency_graph: {
+            let mut d = extract_dependency_graph(&graph);
+            if let Some(index) = &py_index {
+                d.extend(pyindex::manifest::dependency_graph(index));
+            }
+            d
         }
         .into_iter()
         .map(|dep| {
@@ -1018,6 +1103,9 @@ fn analyze_core(
         .map(pyindex::diagnostics::proven_private_subjects)
         .unwrap_or_default();
     tracing::debug!("analyze stages 3-5 (manifest) {:?}", stage_clock.elapsed());
+    let projection = py_index
+        .as_ref()
+        .map(|index| report_authority::index_projection(project_path, index, &input_records));
     let authority = report_authority::build(
         project_path,
         config,
@@ -1026,6 +1114,7 @@ fn analyze_core(
         &manifest.diagnostics,
         &graph,
         &index_subjects,
+        projection.as_ref(),
         losses,
     );
     tracing::debug!("analyze authority {:?}", stage_clock.elapsed());

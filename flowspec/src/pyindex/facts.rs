@@ -96,6 +96,12 @@ pub struct ImportFact {
     pub member: Option<String>,
     /// 1-based line.
     pub line: u32,
+    /// Byte span of the import statement.
+    #[serde(default)]
+    pub span: (u32, u32),
+    /// Whether the statement was spelled relative (`from . import x`).
+    #[serde(default)]
+    pub relative: bool,
 }
 
 /// What a binding assigns to.
@@ -152,6 +158,37 @@ pub struct RefFact {
     pub expr: Expr,
 }
 
+/// A construct the resolver cannot close over, recorded with its byte span
+/// so the report can name the exact source it could not prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HazardKind {
+    /// A parameter or return annotation; the contract it states is parsed
+    /// but no type-flow evidence is built for it (`capability_unavailable`).
+    Annotation,
+    /// A bare-name call; a loss when the name resolves to a runtime
+    /// namespace operation (`getattr`, `globals`, `eval`, ...) provided by
+    /// the builtins, so any name may be read (`unresolved_reference`).
+    DynamicNamespace,
+    /// A `match` statement; pattern bindings and guards are not modelled
+    /// (`unsupported_construct`).
+    MatchStatement,
+}
+
+/// One hazard with its span.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hazard {
+    /// What it is.
+    pub kind: HazardKind,
+    /// Scope the hazard sits in (for provider lookup).
+    pub scope: u32,
+    /// Byte span in the file.
+    pub start: u32,
+    /// End byte, exclusive.
+    pub end: u32,
+    /// The annotation text, or the called name, for later resolution.
+    pub text: String,
+}
+
 /// Everything extracted from one file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FactSet {
@@ -175,6 +212,9 @@ pub struct FactSet {
     pub call_count: u32,
     /// Whether tree-sitter reported syntax errors.
     pub has_errors: bool,
+    /// Constructs the resolver cannot close over.
+    #[serde(default)]
+    pub hazards: Vec<Hazard>,
 }
 
 /// Why a file produced no facts.
@@ -384,6 +424,9 @@ impl Extractor<'_> {
         let returns = node
             .child_by_field_name("return_type")
             .map(|n| text(n, src).to_string());
+        if let Some(n) = node.child_by_field_name("return_type") {
+            self.hazard(HazardKind::Annotation, owner, n);
+        }
         let mut bases = Vec::new();
         if let Some(sup) = node.child_by_field_name("superclasses") {
             let mut c = sup.walk();
@@ -410,6 +453,9 @@ impl Extractor<'_> {
                                 p.child_by_field_name("type")
                                     .map(|t| text(t, src).to_string()),
                             ));
+                            if let Some(t) = p.child_by_field_name("type") {
+                                self.hazard(HazardKind::Annotation, owner, t);
+                            }
                         }
                     }
                     "default_parameter" => {
@@ -492,6 +538,7 @@ impl Extractor<'_> {
     fn add_import(&mut self, node: Node, scope: u32) {
         let src = self.src;
         let line = line_of(node);
+        let span = (node.start_byte() as u32, node.end_byte() as u32);
         if node.kind() == "import_statement" {
             let mut c = node.walk();
             for n in node.children_by_field_name("name", &mut c) {
@@ -515,6 +562,8 @@ impl Extractor<'_> {
                         module,
                         member: None,
                         line,
+                        span,
+                        relative: false,
                     });
                 }
             }
@@ -562,6 +611,8 @@ impl Extractor<'_> {
                     module: module.clone(),
                     member: Some(member),
                     line,
+                    span,
+                    relative: level > 0,
                 });
             }
         }
@@ -580,6 +631,16 @@ impl Extractor<'_> {
                 _ => return false,
             }
         }
+    }
+
+    fn hazard(&mut self, kind: HazardKind, scope: u32, node: Node) {
+        self.facts.hazards.push(Hazard {
+            kind,
+            scope,
+            start: node.start_byte() as u32,
+            end: node.end_byte() as u32,
+            text: text(node, self.src).to_string(),
+        });
     }
 
     fn push_ref(&mut self, owner: u32, scope: u32, node: Node, kind: SiteKind, expr: Expr) {
@@ -681,12 +742,26 @@ impl Extractor<'_> {
                 self.walk_def(node, scope, owner, class, decs);
                 return;
             }
+            "match_statement" => {
+                self.hazard(HazardKind::MatchStatement, scope, node);
+            }
             "call" => {
                 self.facts.call_count += 1;
                 if let Some(func) = node.child_by_field_name("function") {
                     match func.kind() {
                         "identifier" | "attribute" => {
                             let shape = self.shape(func);
+                            if let Expr::Name(n) = &shape {
+                                // Directly, or through an import alias
+                                // (`from builtins import getattr as lookup`):
+                                // the resolver, which has the import table,
+                                // decides whether this is a namespace operation.
+                                if !self.shadowed(&shape)
+                                    && n.chars().all(|c| c.is_alphanumeric() || c == '_')
+                                {
+                                    self.hazard(HazardKind::DynamicNamespace, scope, node);
+                                }
+                            }
                             self.push_ref(owner, scope, node, SiteKind::Call, shape);
                             if let Some(obj) = func.child_by_field_name("object") {
                                 self.walk(obj, scope, owner, class, &mut Vec::new());

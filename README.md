@@ -221,7 +221,6 @@ Flowspec detects 13 structural patterns:
 - **Flow type information** — `in_type`/`out_type` fields in flow output are populated from function signatures when available, but may show "unknown" for functions without parsed signatures
 - **Cross-file flow tracing (JavaScript/TypeScript, Rust)** — import resolution creates graph edges, but the graph flow tracer does not follow them across module boundaries. Python flows come from the reference index and do cross files.
 - **Runtime dispatch (Python)** — a call through a base-typed receiver is `certain` for the base method and `possible` for each subclass override; an untyped receiver yields `possible` sites on every method of that name. Implicit protocol calls (`__enter__`, `__iter__`, operators) are not sites.
-- **Mixed-language trees (Python)** — `analyze` and `diagnose` use the reference index only when every selected file is Python; pass `--language python` otherwise (issue #37)
 - **`duplication` detection** — uses Jaccard similarity on callees sets (structural, not textual); functions sharing common utility calls may trigger false positives. Minimum union size of 3 callees required.
 - **`asymmetric_handling` detection** — groups functions by file, kind, and similar arity; consensus threshold is strict (N-1 of N), but groups of functions with legitimately different responsibilities may be incorrectly grouped
 
@@ -245,9 +244,8 @@ of each site and the reason it is not certain. An unresolved call is counted
 and named, never dropped. The thirteen diagnostic patterns read the same
 index; their false-positive rate is adjudicated per pattern with
 `scripts/oracle/adjudicate_diagnose.py` and the planted-shape fixtures under
-`tests/oracle/fixtures/`. In a tree that mixes Python with JavaScript or
-Rust files, pass `--language python` to get the index (issue #37 tracks the
-per-language split).
+`tests/oracle/fixtures/`. In a tree that mixes languages, Python goes to
+the index and the rest to the graph; the report is the union.
 
 ## CI Integration
 
