@@ -3,6 +3,8 @@
 //! read. A fact set depends on nothing outside its file: cross-file names
 //! stay as text until the resolution pass.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Tree};
 
@@ -218,6 +220,13 @@ pub struct FactSet {
     /// Constructs the resolver cannot close over.
     #[serde(default)]
     pub hazards: Vec<Hazard>,
+    /// Names listed in a literal `__all__`.
+    #[serde(default)]
+    pub all_names: Vec<String>,
+    /// String literals that spell an identifier (`"_check_rule"`): a
+    /// name-based dispatch table may look the definition up by it.
+    #[serde(default)]
+    pub named_strings: Vec<String>,
 }
 
 /// Why a file produced no facts.
@@ -288,6 +297,7 @@ pub fn extract(
         src,
         facts: &mut facts,
         package,
+        globals: HashMap::new(),
         shadow: Vec::new(),
     };
     cx.walk(tree.root_node(), 0, 0, 0, &mut Vec::new());
@@ -322,6 +332,9 @@ struct Extractor<'a> {
     src: &'a str,
     facts: &'a mut FactSet,
     package: Vec<String>,
+    /// Names declared `global` per scope: an assignment to one inside that
+    /// scope rebinds the module variable instead of shadowing it.
+    globals: HashMap<u32, Vec<String>>,
     /// Names bound by the lambdas enclosing the node being walked; a read
     /// of one is the parameter, not an outer definition of the same name.
     shadow: Vec<String>,
@@ -514,13 +527,17 @@ impl Extractor<'_> {
 
     fn bind_pattern(&mut self, node: Node, scope: u32, value: Expr) {
         match node.kind() {
-            "identifier" => self.facts.binds.push(BindFact {
-                scope,
-                class: None,
-                target: BindTarget::Local(text(node, self.src).to_string()),
-                value,
-                annotation: None,
-            }),
+            "identifier" => {
+                let name = text(node, self.src).to_string();
+                let scope = self.binding_scope(scope, &name);
+                self.facts.binds.push(BindFact {
+                    scope,
+                    class: None,
+                    target: BindTarget::Local(name),
+                    value,
+                    annotation: None,
+                })
+            }
             "pattern_list"
             | "tuple_pattern"
             | "list_pattern"
@@ -636,6 +653,90 @@ impl Extractor<'_> {
         }
     }
 
+    /// The scope an assignment to `name` in `scope` binds: the module scope
+    /// when the name was declared `global` there.
+    fn binding_scope(&self, scope: u32, name: &str) -> u32 {
+        if self
+            .globals
+            .get(&scope)
+            .is_some_and(|g| g.iter().any(|n| n == name))
+        {
+            0
+        } else {
+            scope
+        }
+    }
+
+    /// `__all__ = ["a", "b"]` (or `+= [...]`): each string is a module-level
+    /// read of that name; the package exports it.
+    fn walk_all_entries(&mut self, node: Node, owner: u32) {
+        if !matches!(node.kind(), "list" | "tuple") {
+            return;
+        }
+        let mut c = node.walk();
+        for ch in node.named_children(&mut c) {
+            if matches!(ch.kind(), "string") {
+                let name = text(ch, self.src)
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string();
+                if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    self.facts.all_names.push(name.clone());
+                    let shape = Expr::Name(name);
+                    self.push_ref(owner, 0, ch, SiteKind::Reference, shape);
+                }
+            }
+        }
+    }
+
+    /// Record every name an annotation reads. A string inside an annotation
+    /// is a forward reference (`"Foo | None"`): its identifiers are reads too.
+    fn walk_annotation(&mut self, node: Node, scope: u32, owner: u32) {
+        match node.kind() {
+            "string" | "concatenated_string" => {
+                let raw = text(node, self.src);
+                let inner = raw.trim_matches(|c| c == '"' || c == '\'');
+                let mut cur = String::new();
+                let flush = |cur: &mut String, this: &mut Self| {
+                    if !cur.is_empty() && !cur.starts_with(|c: char| c.is_ascii_digit()) {
+                        let shape = Expr::Name(std::mem::take(cur));
+                        this.push_ref(owner, scope, node, SiteKind::Reference, shape);
+                    }
+                    cur.clear();
+                };
+                // Only the head of a dotted name is a binding in this file:
+                // after a `.` skip to the next separator.
+                let mut skipping = false;
+                for c in inner.chars() {
+                    if c.is_alphanumeric() || c == '_' {
+                        if !skipping {
+                            cur.push(c);
+                        }
+                    } else {
+                        flush(&mut cur, self);
+                        skipping = c == '.';
+                    }
+                }
+                flush(&mut cur, self);
+            }
+            "identifier" => {
+                let shape = Expr::Name(text(node, self.src).to_string());
+                self.push_ref(owner, scope, node, SiteKind::Reference, shape);
+            }
+            "attribute" => {
+                // `typing.Optional[Foo]`: the head is the read; walk the rest
+                // for subscripts that may still name local types.
+                let shape = self.shape(node);
+                self.push_ref(owner, scope, node, SiteKind::Reference, shape);
+            }
+            _ => {
+                let mut c = node.walk();
+                for ch in node.named_children(&mut c) {
+                    self.walk_annotation(ch, scope, owner);
+                }
+            }
+        }
+    }
+
     fn hazard(&mut self, kind: HazardKind, scope: u32, node: Node) {
         self.facts.hazards.push(Hazard {
             kind,
@@ -670,7 +771,13 @@ impl Extractor<'_> {
                 self.add_import(node, scope);
                 return;
             }
-            "type" | "parameters" | "lambda_parameters" | "comment" => return,
+            "parameters" | "lambda_parameters" | "comment" => return,
+            // An annotation reads the names in it (`x: Foo`, `-> Bar`,
+            // `Optional[Baz]`); a quoted forward reference is one too.
+            "type" => {
+                self.walk_annotation(node, scope, owner);
+                return;
+            }
             "lambda" => {
                 // Defaults run in the enclosing scope; the body sees the
                 // parameters first.
@@ -749,6 +856,18 @@ impl Extractor<'_> {
             "match_statement" => {
                 self.hazard(HazardKind::MatchStatement, scope, node);
             }
+            "global_statement" => {
+                let mut c = node.walk();
+                for ch in node.named_children(&mut c) {
+                    if ch.kind() == "identifier" {
+                        self.globals
+                            .entry(scope)
+                            .or_default()
+                            .push(text(ch, src).to_string());
+                    }
+                }
+                return;
+            }
             "call" => {
                 self.facts.call_count += 1;
                 if let Some(func) = node.child_by_field_name("function") {
@@ -791,12 +910,20 @@ impl Extractor<'_> {
                 let annotation = node
                     .child_by_field_name("type")
                     .map(|t| text(t, src).to_string());
+                if let Some(t) = node.child_by_field_name("type") {
+                    self.walk_annotation(t, scope, owner);
+                }
                 let value = match (node.kind(), right) {
                     ("assignment", Some(r)) => self.shape(r),
                     _ => Expr::Unknown,
                 };
                 if let Some(left) = left {
                     let in_class_body = owner == class && class != 0 && scope != class;
+                    if left.kind() == "identifier" && text(left, src) == "__all__" && scope == 0 {
+                        if let Some(r) = right {
+                            self.walk_all_entries(r, owner);
+                        }
+                    }
                     match left.kind() {
                         "identifier" => {
                             let name = text(left, src).to_string();
@@ -835,6 +962,7 @@ impl Extractor<'_> {
                                     annotation,
                                 });
                             } else {
+                                let scope = self.binding_scope(scope, &name);
                                 self.facts.binds.push(BindFact {
                                     scope,
                                     class: None,
@@ -924,6 +1052,49 @@ impl Extractor<'_> {
                 self.push_ref(owner, scope, node, SiteKind::Reference, shape);
                 return;
             }
+            "string" => {
+                // A plain string that spells an identifier may be a
+                // name-based dispatch key. An f-string holds expressions;
+                // fall through so its interpolations are walked.
+                let raw = text(node, src);
+                let inner = raw.trim_matches(|c| c == '"' || c == '\'');
+                let identifier_shaped = !raw.starts_with(['f', 'F'])
+                    && !inner.is_empty()
+                    && inner.len() <= 64
+                    && inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !inner.starts_with(|c: char| c.is_ascii_digit());
+                if identifier_shaped {
+                    self.facts.named_strings.push(inner.to_string());
+                }
+                // A string inside a subscript (`Callable[[str], "Backend"]`,
+                // `Optional["Foo"]`) is a forward reference: its names are
+                // reads, exactly as in a `type` node.
+                let in_subscript = node
+                    .parent()
+                    .is_some_and(|p| matches!(p.kind(), "subscript" | "list" | "tuple"))
+                    && {
+                        let mut a = node.parent();
+                        let mut found = false;
+                        while let Some(x) = a {
+                            if x.kind() == "subscript" {
+                                found = true;
+                                break;
+                            }
+                            if !matches!(x.kind(), "list" | "tuple") {
+                                break;
+                            }
+                            a = x.parent();
+                        }
+                        found
+                    };
+                if in_subscript && !raw.starts_with(['f', 'F']) {
+                    self.walk_annotation(node, scope, owner);
+                    return;
+                }
+                if identifier_shaped {
+                    return;
+                }
+            }
             _ => {}
         }
         let mut c = node.walk();
@@ -960,14 +1131,20 @@ impl Extractor<'_> {
                 self.walk(body, scope, id, id, &mut Vec::new());
             }
         } else {
-            // Default values run in the enclosing scope.
+            // Default values and annotations run in the enclosing scope.
             if let Some(ps) = node.child_by_field_name("parameters") {
                 let mut c = ps.walk();
                 for p in ps.named_children(&mut c) {
                     if let Some(v) = p.child_by_field_name("value") {
                         self.walk(v, scope, owner, class, &mut Vec::new());
                     }
+                    if let Some(t) = p.child_by_field_name("type") {
+                        self.walk_annotation(t, scope, owner);
+                    }
                 }
+            }
+            if let Some(t) = node.child_by_field_name("return_type") {
+                self.walk_annotation(t, scope, owner);
             }
             // Every parameter shadows outer names; annotated ones are typed
             // when the scope's environment is seeded.
@@ -1030,6 +1207,62 @@ mod tests {
             .set_language(&tree_sitter_python::LANGUAGE.into())
             .unwrap();
         extract(&mut parser, src, "pkg/m.py", "pkg.m", false).unwrap()
+    }
+
+    #[test]
+    fn annotations_all_entries_and_dispatch_strings_are_recorded() {
+        let f = facts(
+            "from typing import Optional\nimport typing\n__all__ = [\"Known\", \"api\"]\nTABLE = {\"rule\": \"_check_rule\"}\n\nclass Known:\n    pass\n\ndef api(a: Known, b: Optional[\"Known | None\"], c: typing.Any = None) -> \"pkg.other.Thing\":\n    return a\n",
+        );
+        let reads: Vec<(u32, String)> = f
+            .refs
+            .iter()
+            .filter(|r| r.kind == SiteKind::Reference)
+            .filter_map(|r| match &r.expr {
+                Expr::Name(n) => Some((r.line, n.clone())),
+                Expr::Attr(o, a) => match &**o {
+                    Expr::Name(n) => Some((r.line, format!("{n}.{a}"))),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        // Parameter annotations, a quoted forward reference inside a
+        // subscript, a dotted annotation head, and the return annotation.
+        assert!(reads.contains(&(9, "Known".into())), "{reads:?}");
+        assert!(reads.contains(&(9, "Optional".into())), "{reads:?}");
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|(l, n)| *l == 9 && n == "Known")
+                .count(),
+            2,
+            "{reads:?}"
+        );
+        assert!(reads.contains(&(9, "typing.Any".into())), "{reads:?}");
+        assert!(reads.contains(&(9, "pkg".into())), "{reads:?}");
+        assert!(
+            !reads.iter().any(|(_, n)| n == "other" || n == "Thing"),
+            "{reads:?}"
+        );
+        // `__all__` entries are module-level reads and are listed.
+        assert!(
+            reads.contains(&(3, "Known".into())) && reads.contains(&(3, "api".into())),
+            "{reads:?}"
+        );
+        assert_eq!(f.all_names, vec!["Known", "api"]);
+        // The dispatch-table string is recorded; the key is too (it is
+        // identifier-shaped), the annotation strings are not.
+        assert!(
+            f.named_strings.contains(&"_check_rule".to_string()),
+            "{:?}",
+            f.named_strings
+        );
+        assert!(f.named_strings.contains(&"rule".to_string()));
+        assert!(!f
+            .named_strings
+            .iter()
+            .any(|s| s.contains(' ') || s.contains('.')));
     }
 
     #[test]

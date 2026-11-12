@@ -178,6 +178,23 @@ pub fn orphaned_impl(index: &Index) -> Vec<Diagnostic> {
             if overrides_base {
                 continue;
             }
+            // A decorated method is handed to its decorator, which dispatches
+            // it (`@property`, `@field_validator`, `@app.route`, `@hook`):
+            // the decorator is the dispatch point. `staticmethod` and
+            // `classmethod` only change the binding and dispatch nothing.
+            let dispatched_by_decorator = d
+                .decorators
+                .iter()
+                .any(|x| x != "staticmethod" && x != "classmethod");
+            if dispatched_by_decorator {
+                continue;
+            }
+            // A method whose name is a string literal somewhere in its class's
+            // file is looked up by name (`{"rule": "_check_rule"}` tables).
+            let named_in_file = index.named_strings(fi as u32).contains(d.name.as_str());
+            if named_in_file {
+                continue;
+            }
             let confidence = match (is_private(&d.name), possible) {
                 (true, 0) => Confidence::High,
                 (true, _) => Confidence::Moderate,
@@ -350,13 +367,7 @@ fn collect_idents(text: &str, out: &mut HashSet<String>) {
 
 /// Names listed in a literal `__all__`, if the file has one.
 fn all_names(facts: &super::facts::FactSet) -> HashSet<String> {
-    // The fact extractor keeps `__all__` as a module-level binding of a
-    // literal; its elements are not recorded as shapes. Names referenced
-    // anywhere at module level as plain strings are not available either,
-    // so this is conservative: a file with an `__all__` binding exempts
-    // nothing by name, but its imports are still checked against uses.
-    let _ = facts;
-    HashSet::new()
+    facts.all_names.iter().cloned().collect()
 }
 
 /// `missing_reexport`: a public top-level definition in a submodule that the
@@ -1374,6 +1385,49 @@ mod tests {
             ("pkg/m.py", src),
         ]);
         assert_eq!(names(&phantom_dependency(&idx)), vec!["m.py::unused_one"]);
+    }
+
+    #[test]
+    fn annotation_reads_default_values_and_all_entries_consume_definitions() {
+        // Adjudicated on Marianne 2026-11-12: constants read only in
+        // annotations, default values, binary operators or `__all__` were
+        // reported dead; a `TYPE_CHECKING` import read only in a quoted
+        // annotation was reported phantom.
+        let src = "from typing import TYPE_CHECKING, Callable\nif TYPE_CHECKING:\n    from pkg.other import Backend\n\n__all__ = [\"Exported\"]\n_POOL = 8\n_EVENTS = frozenset({\"a\"})\n_ALL = _EVENTS | frozenset({\"b\"})\nAlias = Callable[[str], \"Backend\"]\n_Memo = tuple[int, int]\n_memo: dict[str, _Memo] = {}\n\ndef Exported():\n    return 1\n\ndef api(size: int = _POOL, cb: Alias | None = None) -> None:\n    return None\n";
+        let (_d, idx) = build(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/other.py", "class Backend:\n    pass\n"),
+            ("pkg/m.py", src),
+        ]);
+        let dead = names(&data_dead_end(&idx));
+        for name in ["_POOL", "_EVENTS", "Alias", "_Memo", "Exported"] {
+            assert!(
+                !dead.iter().any(|d| d.ends_with(&format!("::{name}"))),
+                "{name} is read; dead ends: {dead:?}"
+            );
+        }
+        assert!(dead.iter().any(|d| d.ends_with("::_ALL")), "{dead:?}");
+        let phantom = names(&phantom_dependency(&idx));
+        assert!(phantom.is_empty(), "every import is read: {phantom:?}");
+    }
+
+    #[test]
+    fn global_rebinding_inside_a_function_reads_the_module_variable() {
+        // Adjudicated on Marianne 2026-11-12: `_store = None` at module
+        // level, then `global _store; if _store is None: _store = ...` in a
+        // function was reported dead because the function-scope assignment
+        // shadowed the read.
+        let src = "_store = None\n\ndef get():\n    global _store\n    if _store is None:\n        _store = 1\n    return _store\n";
+        let (_d, idx) = build(&[("m.py", src)]);
+        let dead = names(&data_dead_end(&idx));
+        assert!(!dead.iter().any(|d| d.ends_with("::_store")), "{dead:?}");
+    }
+
+    #[test]
+    fn decorated_and_string_named_methods_are_dispatched_not_orphaned() {
+        let src = "class Cfg:\n    CHECKS = {\"range\": \"_check_range\"}\n    @property\n    def running(self):\n        return True\n    @validator(\"x\")\n    def _check_x(cls, v):\n        return v\n    def _check_range(self):\n        return 1\n    def _lonely(self):\n        return 2\n";
+        let (_d, idx) = build(&[("m.py", src)]);
+        assert_eq!(names(&orphaned_impl(&idx)), vec!["m.py::Cfg::_lonely"]);
     }
 
     #[test]

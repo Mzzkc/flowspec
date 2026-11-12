@@ -741,6 +741,12 @@ impl Index {
         &self.losses
     }
 
+    /// Identifier-shaped string literals in file `fi` (a dispatch table may
+    /// name a method by string).
+    pub fn named_strings(&self, fi: u32) -> &HashSet<String> {
+        &self.exports.files[fi as usize].named_strings
+    }
+
     /// Manifest entity ids by definition, computed once per index.
     pub fn entity_ids(&self) -> &HashMap<GId, String> {
         self.entity_ids

@@ -214,6 +214,19 @@ it. An external decorator (`@lru_cache`, `@property`) wraps but registers
 nothing. A lambda's parameters shadow outer names inside its body, so
 `lambda _helper: _helper` reads the parameter, not a module function.
 
+## What counts as a read
+
+Measured against the ast oracle on Marianne (2026-11-12, 30 findings per
+pattern): names read only in annotations (`x: Foo`, `-> Bar`, quoted forward
+references, strings inside subscripts), in default values, in binary
+expressions, or listed in a literal `__all__` are reads. A read of a name
+bound to exactly one module variable is a certain reference to that
+variable even when its value is untyped: the uncertainty is about what it
+holds, not which binding is read. A method that carries any decorator
+other than `staticmethod` or `classmethod` is dispatched by that decorator,
+and a method whose name appears as a string literal in its own file is
+looked up by name; neither is an orphan.
+
 ## Module-level variables
 
 A first module-level assignment (`LIMIT = 3`, `handler = helper`) is a

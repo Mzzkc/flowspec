@@ -55,11 +55,21 @@ for pat, xs in sorted(by_pat.items()):
     sample = xs if len(xs) <= per_pattern else random.sample(xs, per_pattern)
     for x in sample:
         rel, line = x["loc"].rsplit(":", 1); line = int(line)
+        if not rel.endswith(".py"): continue  # the ast oracle adjudicates Python only
         name = x["entity"].split("::")[-1] if "::" in x["entity"] else x["entity"]
         verdict = "agree"
         if pat in ("data_dead_end", "orphaned_impl"):
             lo, hi = def_line_range(rel, line)
             others = [(f, l) for (f, l) in loads.get(name, ()) if not (f == rel and lo <= l <= hi)]
+            # A private module-level name (`_logger`, `_cache`) is importable
+            # only by explicit import; a same-name read in another file that
+            # does not import it from this module is a different binding.
+            if pat == "data_dead_end" and name.startswith("_") and not name.startswith("__"):
+                mod = rel[:-3].replace("/", ".")
+                importers = {f for f, t in trees.items() for n in ast.walk(t)
+                             if isinstance(n, ast.ImportFrom) and n.module and mod.endswith(n.module.split(".")[-1])
+                             and any(a.name == name for a in n.names)}
+                others = [(f, l) for (f, l) in others if f == rel or f in importers]
             if others: verdict = "disagree:" + ",".join(f"{f}:{l}" for f, l in sorted(others)[:3])
         elif pat == "phantom_dependency":
             l = file_uses(rel, name)

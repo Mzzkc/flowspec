@@ -72,6 +72,9 @@ pub struct FileExports {
     pub class_attrs: Vec<(u32, String, Option<String>, Expr)>,
     /// `self.attr = ...` facts: (class, attr, annotation, shape, scope def).
     pub self_attrs: Vec<(u32, String, Option<String>, Expr, u32)>,
+    /// Identifier-shaped string literals (name-based dispatch tables).
+    #[serde(default)]
+    pub named_strings: HashSet<String>,
 }
 
 impl FileExports {
@@ -122,6 +125,7 @@ impl FileExports {
             rel: f.rel.clone(),
             module: f.module.clone(),
             is_package: f.is_package,
+            named_strings: f.named_strings.iter().cloned().collect(),
             defs: f
                 .defs
                 .iter()
@@ -856,6 +860,9 @@ impl Exports {
         for ty in &v.tys {
             match ty {
                 Ty::Class(c) => out.merge(&Val::one(Ty::Inst(*c))),
+                // A type alias (`Alias = Callable[...]`) is a module variable;
+                // the annotation reads it even though it names no class.
+                Ty::Var(d) => out.merge(&Val::one(Ty::Var(*d))),
                 _ => out.merge(&Val::external()),
             }
         }
@@ -1281,6 +1288,17 @@ pub fn resolve_file(ex: &Exports, fi: u32, facts: &FactSet) -> Resolved {
             if b.value == Expr::Unknown && b.annotation.is_none() && target_env.is_param(name) {
                 continue;
             }
+            let mut v = v;
+            // A module-scope binding of a module-level variable definition is
+            // that variable: a read of the name is a reference site to it, in
+            // this file or any other, so carry its identity with the value.
+            if b.scope == 0 {
+                if let Some(&c) = ex.members.get(&(fi, 0)).and_then(|m| m.get(name.as_str())) {
+                    if ex.files[fi as usize].defs[c as usize].kind == DefKind::Variable {
+                        v.merge(&Val::one(Ty::Var((fi, c))));
+                    }
+                }
+            }
             target_env.insert(name.clone(), v);
         }
     }
@@ -1455,6 +1473,11 @@ fn record_named(
                 .count()
                 <= 1
             && v.tys.iter().any(|t| matches!(t, Ty::Var(_))));
+    // Reading a name bound to exactly one module variable is a certain
+    // reference to that variable even when its value cannot be typed: the
+    // uncertainty is about what it holds, not about which binding is read.
+    let vars = v.tys.iter().filter(|t| matches!(t, Ty::Var(_))).count();
+    let var_certain = certain || vars == 1;
     for ty in &v.tys {
         match ty {
             Ty::Var(d) => push(
@@ -1462,7 +1485,7 @@ fn record_named(
                 owner,
                 at,
                 SiteKind::Reference,
-                certain,
+                var_certain,
                 "more than one possible target",
             ),
             Ty::Func(d) => push(
